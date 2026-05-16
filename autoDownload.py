@@ -50,7 +50,7 @@ DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
 rarfile.UNRAR_TOOL = UNRAR_PATH
-APP_VERSION = "3.4.2"
+APP_VERSION = "3.4.3"
 
 # FIXED: RLock prevents main thread from freezing
 config_lock = threading.RLock()
@@ -71,7 +71,8 @@ app_settings = {
 finish_event = threading.Event()
 cancel_event = threading.Event()
 pause_event = threading.Event()
-manual_driver = None  
+manual_driver = None
+active_aria2_processes = []
 
 # ==========================================
 #  MIGRATION & INITIALIZATION LOGIC
@@ -554,48 +555,36 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
 
     cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
     final_name = final_name if final_name else f"episode_{ep}.mp4"
+    global active_aria2_processes # <-- Links to our tracking list
     
     while True:
         if cancel_event.is_set(): break
         
         cmd = [
-            ARIA2C_PATH,
-            "-c",                         
-            "--auto-file-renaming=false", 
-            "-x", "8",                    
-            "-s", "8",                    
-            "-j", "8",                    
-            "-k", "5M",                   
-            "--min-split-size=5M",        
-            "--disk-cache=64M",           
-            "--optimize-concurrent-downloads=true",
-            "--file-allocation=none",     
-            "--summary-interval=1",
-            "--auto-save-interval=1",
+            ARIA2C_PATH, "-c", "--auto-file-renaming=false", "-x", "8", "-s", "8", "-j", "8",                    
+            "-k", "5M", "--min-split-size=5M", "--disk-cache=64M", "--optimize-concurrent-downloads=true",
+            "--file-allocation=none", "--summary-interval=1", "--auto-save-interval=1"     
         ]
         if ua: cmd.append(f"--user-agent={ua}")
         else: cmd.append("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         
-        cmd.extend([
-            "--header=Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "--header=Accept-Language: en-US,en;q=0.5",
-            "--header=Sec-Fetch-Dest: document",
-            "--header=Sec-Fetch-Mode: navigate",
-        ])
-
+        cmd.extend(["--header=Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "--header=Accept-Language: en-US,en;q=0.5", "--header=Sec-Fetch-Dest: document",
+                    "--header=Sec-Fetch-Mode: navigate"])
         if cookie_str: cmd.append(f"--header=Cookie: {cookie_str}")
-
         cmd.extend([f"--dir={temp_dir}", f"--out={final_name}", url])
+
+        process_finished_normally = False
 
         try:
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
                 text=True, encoding='utf-8', errors='replace', creationflags=CREATE_NO_WINDOW
             )
+            active_aria2_processes.append(process) # <-- Registers the process so Python can kill it instantly
             
             for line in process.stdout:
                 if cancel_event.is_set() or pause_event.is_set():
-                    process.terminate()
                     break
                     
                 if "%" in line and "DL:" in line:
@@ -611,46 +600,44 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                                     if unit == 'M': return f"{val * 1.048576:.2f} MB"
                                     if unit == 'G': return f"{val * 1.07374:.2f} GB"
                                 return val_str
-                        
                             pct = int(match.group(3))
                             speed = convert_unit(match.group(4)) + "/s"
-                            txt = f"Speed: {speed}   •   Progress: {pct}%"
-                            
                             signals.update_active_bar.emit(ep, pct)
-                            signals.update_active_download.emit(ep, txt)
-                    except Exception:
-                        pass
+                            signals.update_active_download.emit(ep, f"Speed: {speed}   •   Progress: {pct}%")
+                    except Exception: pass
             
             process.wait()
+            if process in active_aria2_processes: active_aria2_processes.remove(process)
+            if process.returncode == 0: process_finished_normally = True
             
-            if cancel_event.is_set():
+        except Exception as e:
+            if process in active_aria2_processes: active_aria2_processes.remove(process)
+            if not pause_event.is_set() and not cancel_event.is_set():
+                signals.update_active_download.emit(ep, f"Download Error: {e}")
                 break
                 
-            if pause_event.is_set():
-                signals.update_active_download.emit(ep, "⏸ Paused")
-                while pause_event.is_set() and not cancel_event.is_set():
-                    time.sleep(1)
-                if cancel_event.is_set(): break
-                continue # RESTART THE DOWNLOADER LOOP TO RESUME!
+        if cancel_event.is_set(): break
             
-            if process.returncode == 0:
-                signals.update_active_bar.emit(ep, 100)
-                signals.update_active_download.emit(ep, "Extraction & Cleanup...")
-                if process_callback:
-                    process_callback(ep, temp_dir)
+        if pause_event.is_set():
+            signals.update_active_download.emit(ep, "⏸ Paused")
+            while pause_event.is_set() and not cancel_event.is_set():
                 time.sleep(1)
-                signals.remove_active_download.emit(ep)
-                break 
-            else:
-                signals.update_active_download.emit(ep, "❌ Download Failed. Retrying...")
-                time.sleep(3)
-                
-        except Exception as e:
-            signals.update_active_download.emit(ep, f"Download Error: {e}")
-            break
+            if cancel_event.is_set(): break
+            continue 
+            
+        if process_finished_normally:
+            signals.update_active_bar.emit(ep, 100)
+            signals.update_active_download.emit(ep, "Extraction & Cleanup...")
+            if process_callback: process_callback(ep, temp_dir)
+            time.sleep(1)
+            signals.remove_active_download.emit(ep)
+            break 
+        elif not pause_event.is_set() and not cancel_event.is_set():
+            signals.update_active_download.emit(ep, "❌ Download Failed. Retrying...")
+            time.sleep(3)
             
     on_episode_completed()
-
+    
 # ==========================================
 #     SELENIUM INTERCEPTION CORE
 # ==========================================
@@ -841,6 +828,11 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
 
                         for step_idx, step in enumerate(steps):
                             if cancel_event.is_set(): break
+
+                            while pause_event.is_set() and not cancel_event.is_set():
+                                time.sleep(1)
+                            if cancel_event.is_set(): break
+
                             raw_xpath = step.get("xpath", "").strip()
                             delay = float(step.get("delay", 0.0))
                             if not raw_xpath: continue
@@ -877,7 +869,14 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                     signals.update_status.emit(f"Status: ❌ Failed to click Step {step_idx + 1}", "#e74c3c")
                                     break
                             
-                            time.sleep(delay)
+                            slept = 0
+                            while slept < delay:
+                                while pause_event.is_set() and not cancel_event.is_set(): 
+                                    time.sleep(1)
+                                if cancel_event.is_set(): break
+                                time.sleep(0.5)
+                                slept += 0.5
+
                             new_tabs = len(driver.window_handles)
                             if new_tabs > current_tabs:
                                 driver.switch_to.window(driver.window_handles[-1])
@@ -896,7 +895,11 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                             wait_timer = 0
                             
                             while wait_timer < 35 and not cancel_event.is_set():
-                                # This JS guarantees it finds the active download, extracts the URL, and physically clicks "Cancel" in Chrome
+                                # Freeze Check: Instantly stops Selenium from extracting!
+                                while pause_event.is_set() and not cancel_event.is_set(): 
+                                    time.sleep(1)
+                                if cancel_event.is_set(): break
+
                                 js_intercept = """
                                     const manager = document.querySelector('downloads-manager');
                                     if (!manager) return null;
@@ -955,15 +958,13 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                     }
                                     return null;
                                 """
+
                                 res = driver.execute_script(js_intercept)
                                 if res:
                                     found_data = res
                                     break
                                 time.sleep(1)
                                 wait_timer += 1
-                                
-                            driver.close()
-                            driver.switch_to.window(driver.window_handles[0])
                             
                             if found_data and found_data != "BLOB":
                                 signals.update_status.emit(f"Status: ✅ Locked onto Ep {x}! Starting download...", "#2ecc71")                                
@@ -2425,6 +2426,7 @@ class ProgressTab(QWidget):
     def set_buttons(self, start_en, close_en, prof_en):
         self.btn_pause.setEnabled(close_en)
         self.btn_cancel.setEnabled(close_en)
+        self.btn_resume.setEnabled(True)
         if start_en: 
             self.btn_resume.hide()
             self.btn_pause.show()
@@ -2442,7 +2444,13 @@ class ProgressTab(QWidget):
         pause_event.set()
         self.btn_pause.hide()
         self.btn_resume.show()
-        # Aggressively kill Aria2c to force it to release the thread and pause immediately
+        
+        # 100% Foolproof Native Python Kill
+        global active_aria2_processes
+        for p in active_aria2_processes:
+            try: p.kill() 
+            except: pass
+            
         subprocess.run("taskkill /F /IM aria2c.exe /T", shell=True, creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def resume_task(self):
@@ -2457,9 +2465,15 @@ class ProgressTab(QWidget):
         self.btn_resume.setEnabled(False)
         self.btn_cancel.setEnabled(False)
         cancel_event.set()
-        pause_event.clear() # Unblock it if it was paused!
+        pause_event.clear()
         finish_event.set()
-        # Kill aria2c immediately to prevent UI freezing
+        
+        # 100% Foolproof Native Python Kill
+        global active_aria2_processes
+        for p in active_aria2_processes:
+            try: p.kill()
+            except: pass
+            
         subprocess.run("taskkill /F /IM aria2c.exe /T", shell=True, creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
