@@ -156,7 +156,7 @@ def main():
     run_cmd(["git", "add", "."]) 
     run_cmd(["git", "commit", "-m", f"🚀 Release version {new_version}"])
     try:
-        run_cmd(["git", "push", "-u", "origin", "master"])
+        run_cmd(["git", "push", "-u", "origin", "main"])
     except SystemExit:
         run_cmd(["git", "push"])
 
