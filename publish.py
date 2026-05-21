@@ -154,7 +154,7 @@ def main():
     # 5. Git Commit & Push (Adding ALL new folders!)
     print("\n🌐 Pushing code to GitHub...")
     run_cmd(["git", "add", "."]) 
-    run_cmd(["git", "commit", "-m", f"🚀 Release version {new_version}"])
+    run_cmd(["git", "commit", "-m", f"🚀 Release version {new_version}"], check=False)
     try:
         run_cmd(["git", "push", "-u", "origin", "main"])
     except SystemExit:
