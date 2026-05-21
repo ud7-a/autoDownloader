@@ -49,7 +49,7 @@ def main():
         vbs_path = os.path.join(temp_dir, "install_helper.vbs")
         
         # Create a double-safe VBScript file that runs completely headless using wscript.exe
-        vbs_content = f"""Set WshShell = CreateObject("WScript.Shell")
+        vbs_content = """Set WshShell = CreateObject("WScript.Shell")
 WScript.Sleep 2000
 
 ' 1. Force terminate any active app sessions to release file locks
@@ -59,24 +59,24 @@ WScript.Sleep 1000
 
 ' 2. Safely wipe the old installation folder if it exists
 Set fso = CreateObject("Scripting.FileSystemObject")
-If fso.FolderExists("{dest}") Then
-    fso.DeleteFolder "{dest}", True
+If fso.FolderExists("{dest_dir}") Then
+    fso.DeleteFolder "{dest_dir}", True
 End If
 WScript.Sleep 1000
 
 ' 3. Sweep the fresh update files into the permanent App directory
-fso.CopyFolder "{temp_extract}", "{dest}", True
+fso.CopyFolder "{temp_extract_dir}", "{dest_dir}", True
 WScript.Sleep 1000
 
 ' 4. Clean up the temporary directory
-fso.DeleteFolder "{temp_extract}", True
+fso.DeleteFolder "{temp_extract_dir}", True
 
 ' 5. Re-generate a clean Desktop Shortcut
 desktopPath = WshShell.SpecialFolders("Desktop")
 Set Shortcut = WshShell.CreateShortcut(desktopPath & "\\AutoDownloader.lnk")
-Shortcut.TargetPath = "{dest}\\AutoDownloader.exe"
-Shortcut.WorkingDirectory = "{dest}"
-Shortcut.IconLocation = "{dest}\\AutoDownloader.exe,0"
+Shortcut.TargetPath = "{dest_dir}\\AutoDownloader.exe"
+Shortcut.WorkingDirectory = "{dest_dir}"
+Shortcut.IconLocation = "{dest_dir}\\AutoDownloader.exe,0"
 Shortcut.Save()
 
 ' 6. Clean up the old launcher's folder (reversing updater's rename and deleting old backup)
@@ -86,7 +86,7 @@ End If
 
 ' If the launcher was renamed to AutoDownloader.exe by the old updater, rename it back to AutoDownloader_Setup.exe
 If LCase("{launcher_name}") = "autodownloader.exe" Then
-    If LCase("{launcher_dir}") <> LCase("{dest}") Then
+    If LCase("{launcher_dir}") <> LCase("{dest_dir}") Then
         If fso.FileExists("{launcher_dir}\\AutoDownloader.exe") Then
             fso.MoveFile "{launcher_dir}\\AutoDownloader.exe", "{launcher_dir}\\AutoDownloader_Setup.exe"
         End If
@@ -99,8 +99,12 @@ WshShell.Run Chr(34) & desktopPath & "\\AutoDownloader.lnk" & Chr(34), 1, False
 ' 8. Self-delete this VBScript file cleanly
 fso.DeleteFile WScript.ScriptFullName, True
 """
-        # Help Python f-string variables map correctly
-        vbs_content = vbs_content.replace("{dest}", dest_dir).replace("{temp_extract}", temp_extract_dir)
+        # Cleanly replace all template placeholders safely
+        vbs_content = (vbs_content
+                       .replace("{dest_dir}", dest_dir)
+                       .replace("{temp_extract_dir}", temp_extract_dir)
+                       .replace("{launcher_dir}", launcher_dir)
+                       .replace("{launcher_name}", launcher_name))
 
         with open(vbs_path, "w", encoding="utf-8") as f:
             f.write(vbs_content)
