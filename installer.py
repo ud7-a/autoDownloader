@@ -49,54 +49,109 @@ def main():
         vbs_path = os.path.join(temp_dir, "install_helper.vbs")
         
         # Create a double-safe VBScript file that runs completely headless using wscript.exe
-        vbs_content = """Set WshShell = CreateObject("WScript.Shell")
+        vbs_content = """Dim fso, logFile, logPath
+Set fso = CreateObject("Scripting.FileSystemObject")
+logPath = "C:\\Auto Episodes Downloader\\install_log.txt"
+
+On Error Resume Next
+Set logFile = fso.CreateTextFile(logPath, True)
+logFile.WriteLine "=== AUTO DOWNLOADER INSTALL HELPER LOG ==="
+logFile.WriteLine "Date/Time: " & Now()
+logFile.WriteLine "Launcher Path: {launcher_exe}"
+logFile.WriteLine "Launcher Dir: {launcher_dir}"
+logFile.WriteLine "Launcher Name: {launcher_name}"
+logFile.WriteLine "Destination Dir: {dest_dir}"
+logFile.WriteLine "Temp Extract Dir: {temp_extract_dir}"
+
+Set WshShell = CreateObject("WScript.Shell")
 WScript.Sleep 2000
 
-' 1. Force terminate any active app sessions to release file locks
-On Error Resume Next
+' 1. Force terminate any active app sessions
+logFile.WriteLine "Step 1: Killing running AutoDownloader.exe instances..."
 WshShell.Run "taskkill /F /IM AutoDownloader.exe /T", 0, True
 WScript.Sleep 1000
 
 ' 2. Safely wipe the old installation folder if it exists
-Set fso = CreateObject("Scripting.FileSystemObject")
+logFile.WriteLine "Step 2: Wiping destination folder if exists..."
 If fso.FolderExists("{dest_dir}") Then
     fso.DeleteFolder "{dest_dir}", True
+    logFile.WriteLine "Destination folder wiped."
+Else
+    logFile.WriteLine "Destination folder did not exist."
 End If
 WScript.Sleep 1000
 
 ' 3. Sweep the fresh update files into the permanent App directory
+logFile.WriteLine "Step 3: Copying folder from temp to destination..."
 fso.CopyFolder "{temp_extract_dir}", "{dest_dir}", True
+If Err.Number <> 0 Then
+    logFile.WriteLine "ERROR Copying folder: " & Err.Description
+    Err.Clear
+Else
+    logFile.WriteLine "Folder copied successfully."
+End If
 WScript.Sleep 1000
 
 ' 4. Clean up the temporary directory
+logFile.WriteLine "Step 4: Cleaning up temp directory..."
 fso.DeleteFolder "{temp_extract_dir}", True
+WScript.Sleep 1000
 
 ' 5. Re-generate a clean Desktop Shortcut
+logFile.WriteLine "Step 5: Creating Desktop Shortcut..."
 desktopPath = WshShell.SpecialFolders("Desktop")
 Set Shortcut = WshShell.CreateShortcut(desktopPath & "\\AutoDownloader.lnk")
 Shortcut.TargetPath = "{dest_dir}\\AutoDownloader.exe"
 Shortcut.WorkingDirectory = "{dest_dir}"
 Shortcut.IconLocation = "{dest_dir}\\AutoDownloader.exe,0"
 Shortcut.Save()
+logFile.WriteLine "Shortcut saved to: " & desktopPath & "\\AutoDownloader.lnk"
 
 ' 6. Clean up the old launcher's folder (reversing updater's rename and deleting old backup)
-If fso.FileExists("{launcher_dir}\\AutoDownloader.exe.old") Then
-    fso.DeleteFile "{launcher_dir}\\AutoDownloader.exe.old", True
+logFile.WriteLine "Step 6: Deleting .old files and renaming launcher..."
+
+' Location A: Dest Dir
+If fso.FileExists("{dest_dir}\\AutoDownloader.exe.old") Then
+    fso.DeleteFile "{dest_dir}\\AutoDownloader.exe.old", True
+    logFile.WriteLine "Deleted .old in destination directory."
 End If
 
-' If the launcher was renamed to AutoDownloader.exe by the old updater, rename it back to AutoDownloader_Setup.exe
+' Location B: Launcher Dir
+If fso.FileExists("{launcher_dir}\\AutoDownloader.exe.old") Then
+    fso.DeleteFile "{launcher_dir}\\AutoDownloader.exe.old", True
+    logFile.WriteLine "Deleted .old in launcher directory."
+End If
+
+' Location C: Parent Dir of Launcher Dir (for dist/ checks)
+parentDir = fso.GetParentFolderName("{launcher_dir}")
+If fso.FileExists(parentDir & "\\AutoDownloader.exe.old") Then
+    fso.DeleteFile parentDir & "\\AutoDownloader.exe.old", True
+    logFile.WriteLine "Deleted .old in parent of launcher directory: " & parentDir
+End If
+
+' Rename launcher if needed
+logFile.WriteLine "Launcher name lower: " & LCase("{launcher_name}")
 If LCase("{launcher_name}") = "autodownloader.exe" Then
+    logFile.WriteLine "Launcher was renamed by updater. Checking directories..."
     If LCase("{launcher_dir}") <> LCase("{dest_dir}") Then
         If fso.FileExists("{launcher_dir}\\AutoDownloader.exe") Then
             fso.MoveFile "{launcher_dir}\\AutoDownloader.exe", "{launcher_dir}\\AutoDownloader_Setup.exe"
+            logFile.WriteLine "Successfully renamed launcher to AutoDownloader_Setup.exe"
+        Else
+            logFile.WriteLine "Launcher file not found for rename."
         End If
+    Else
+        logFile.WriteLine "Skipping rename because launcher is in final destination directory."
     End If
 End If
 
-' 7. Boot the fresh application cleanly by running the newly created Desktop shortcut!
+' 7. Boot the fresh application cleanly
+logFile.WriteLine "Step 7: Launching new application..."
 WshShell.Run Chr(34) & desktopPath & "\\AutoDownloader.lnk" & Chr(34), 1, False
 
-' 8. Self-delete this VBScript file cleanly
+' 8. Close and clean up
+logFile.WriteLine "Step 8: Finalizing and deleting helper script..."
+logFile.Close
 fso.DeleteFile WScript.ScriptFullName, True
 """
         # Cleanly replace all template placeholders safely
@@ -104,7 +159,8 @@ fso.DeleteFile WScript.ScriptFullName, True
                        .replace("{dest_dir}", dest_dir)
                        .replace("{temp_extract_dir}", temp_extract_dir)
                        .replace("{launcher_dir}", launcher_dir)
-                       .replace("{launcher_name}", launcher_name))
+                       .replace("{launcher_name}", launcher_name)
+                       .replace("{launcher_exe}", launcher_exe))
 
         with open(vbs_path, "w", encoding="utf-8") as f:
             f.write(vbs_content)
