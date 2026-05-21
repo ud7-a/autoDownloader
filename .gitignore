@@ -1,0 +1,20 @@
+# PyInstaller & Compilation Artifacts
+build/
+dist/
+*.spec
+
+# Package Deliverables (Uploaded directly to Releases)
+*.zip
+*.exe
+
+# Python Execution Caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local Database, Configs, and Active Selenium Profiles
+download_history.db
+sites_config.json
+SeleniumProfile/
+*.log
