@@ -185,16 +185,17 @@ If Not isLegacyUpdate And (LCase("{launcher_name}") = "autodownloader.exe" Or LC
     End If
 End If
 
-' 7. Boot the fresh application cleanly
-logFile.WriteLine "Step 7: Launching new application..."
-WshShell.Run Chr(34) & desktopPath & "\\AutoDownloader.lnk" & Chr(34), 1, False
+' 7. Force Windows Explorer to refresh the Desktop and folders
+logFile.WriteLine "Step 7: Forcing Windows Explorer to refresh Desktop icons..."
+WshShell.Run "ie4uinit.exe -show", 0, False
+Dim psRefreshCmd
+psRefreshCmd = "powershell -NoProfile -WindowStyle Hidden -Command ""$code = '[DllImport(\""shell32.dll\"")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);'; $type = Add-Type -MemberDefinition $code -Name 'Shell' -PassThru; $type::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)"""
+WshShell.Run psRefreshCmd, 0, True
+WScript.Sleep 500
 
-' 8. Refresh the Desktop to instantly show renamed and deleted files
-logFile.WriteLine "Step 8: Refreshing Desktop visually..."
-WshShell.AppActivate "Program Manager"
-WScript.Sleep 200
-WshShell.SendKeys "{F5}"
-WScript.Sleep 200
+' 8. Boot the fresh application cleanly
+logFile.WriteLine "Step 8: Launching new application..."
+WshShell.Run Chr(34) & desktopPath & "\\AutoDownloader.lnk" & Chr(34), 1, False
 
 ' 9. Close and clean up
 logFile.WriteLine "Step 9: Finalizing and deleting helper script..."
