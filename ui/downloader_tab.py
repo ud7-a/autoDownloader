@@ -119,7 +119,7 @@ class DownloaderWidget(QWidget):
         sound_layout = QHBoxLayout()
         
         self.combo_sound = ComboBox()
-        self.combo_sound.currentIndexChanged.connect(self.on_sound_change)
+        self.combo_sound.currentTextChanged.connect(self.on_sound_change)
         self.combo_sound.setFixedHeight(40)
         sound_layout.addWidget(self.combo_sound, 1) 
         
@@ -223,12 +223,14 @@ class DownloaderWidget(QWidget):
     # (refresh_sound_dropdown, browse_folder, save_settings, start_task, etc.)
     # I have omitted them here to save space, but DO NOT delete your functions!
 
-    def on_sound_change(self, index):
-        if index >= 0:
+    def on_sound_change(self, text):
+        if text and text != "No sounds added...":
             sounds = app_settings.get("custom_sounds", [])
-            if sounds and index < len(sounds):
-                app_settings["selected_sound"] = sounds[index]
-                save_config()
+            for s in sounds:
+                if os.path.basename(s) == text:
+                    app_settings["selected_sound"] = s
+                    save_config()
+                    break
 
     def browse_custom_sound(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Audio File", "", "Audio Files (*.mp3 *.wav *.ogg)")

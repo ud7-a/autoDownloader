@@ -635,8 +635,12 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                     try:
                         if selected_sound and os.path.exists(selected_sound):
                             vol = volume * 10 
+                            mci_path = selected_sound.replace("\\", "/")
                             ctypes.windll.winmm.mciSendStringW('close custom_audio', None, 0, None)
-                            ctypes.windll.winmm.mciSendStringW(f'open "{selected_sound}" alias custom_audio', None, 0, None)
+                            if mci_path.lower().endswith(".mp3"):
+                                ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" type mpegvideo alias custom_audio', None, 0, None)
+                            else:
+                                ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" alias custom_audio', None, 0, None)
                             ctypes.windll.winmm.mciSendStringW(f'setaudio custom_audio volume to {vol}', None, 0, None)
                             ctypes.windll.winmm.mciSendStringW('play custom_audio', None, 0, None)
                     except Exception: pass
