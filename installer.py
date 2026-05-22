@@ -188,8 +188,9 @@ End If
 ' 7. Force Windows Explorer to refresh the Desktop and folders
 logFile.WriteLine "Step 7: Forcing Windows Explorer to refresh Desktop icons..."
 WshShell.Run "ie4uinit.exe -show", 0, False
-Dim psRefreshCmd
-psRefreshCmd = "powershell -NoProfile -WindowStyle Hidden -Command ""$code = '[DllImport(\""shell32.dll\"")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);'; $type = Add-Type -MemberDefinition $code -Name 'Shell' -PassThru; $type::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)"""
+Dim psRefreshCmd, qt
+qt = Chr(34)
+psRefreshCmd = "powershell -NoProfile -WindowStyle Hidden -Command " & qt & "$code = '[DllImport(\\" & qt & "shell32.dll\\" & qt & ")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);'; $type = Add-Type -MemberDefinition $code -Name 'Shell' -PassThru; $type::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)" & qt
 WshShell.Run psRefreshCmd, 0, True
 WScript.Sleep 500
 
