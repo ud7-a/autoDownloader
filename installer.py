@@ -71,6 +71,20 @@ logFile.WriteLine "Step 1: Killing running AutoDownloader.exe instances..."
 WshShell.Run "taskkill /F /IM AutoDownloader.exe /T", 0, True
 WScript.Sleep 1000
 
+' Legacy update unlock bypass: If installer is running inside the dest folder, move it out to unlock the folder
+Dim isLegacyUpdate, targetSetupPath
+isLegacyUpdate = False
+If LCase("{launcher_name}") = "autodownloader.exe" And LCase("{launcher_dir}") = LCase("{dest_dir}") Then
+    isLegacyUpdate = True
+    targetSetupPath = fso.GetParentFolderName("{dest_dir}") & "\\AutoDownloader_Setup.exe"
+    logFile.WriteLine "Legacy update detected. Moving running installer to: " & targetSetupPath
+    If fso.FileExists(targetSetupPath) Then
+        fso.DeleteFile targetSetupPath, True
+    End If
+    fso.MoveFile "{dest_dir}\\AutoDownloader.exe", targetSetupPath
+End If
+WScript.Sleep 1000
+
 ' 2. Safely wipe the old installation folder if it exists
 logFile.WriteLine "Step 2: Wiping destination folder if exists..."
 If fso.FolderExists("{dest_dir}") Then
@@ -108,7 +122,7 @@ Shortcut.Save()
 logFile.WriteLine "Shortcut saved to: " & desktopPath & "\\AutoDownloader.lnk"
 
 ' 6. Clean up the old launcher's folder (reversing updater's rename and deleting old backup)
-logFile.WriteLine "Step 6: Deleting .old files and renaming launcher..."
+logFile.WriteLine "Step 6: Deleting .old files and cleaning up launcher..."
 
 ' Location A: Dest Dir
 If fso.FileExists("{dest_dir}\\AutoDownloader.exe.old") Then
@@ -129,19 +143,15 @@ If fso.FileExists(parentDir & "\\AutoDownloader.exe.old") Then
     logFile.WriteLine "Deleted .old in parent of launcher directory: " & parentDir
 End If
 
-' Rename launcher if needed
+' Rename launcher outside dest if needed
 logFile.WriteLine "Launcher name lower: " & LCase("{launcher_name}")
-If LCase("{launcher_name}") = "autodownloader.exe" Then
+If Not isLegacyUpdate And LCase("{launcher_name}") = "autodownloader.exe" Then
     logFile.WriteLine "Launcher was renamed by updater. Checking directories..."
-    If LCase("{launcher_dir}") <> LCase("{dest_dir}") Then
-        If fso.FileExists("{launcher_dir}\\AutoDownloader.exe") Then
-            fso.MoveFile "{launcher_dir}\\AutoDownloader.exe", "{launcher_dir}\\AutoDownloader_Setup.exe"
-            logFile.WriteLine "Successfully renamed launcher to AutoDownloader_Setup.exe"
-        Else
-            logFile.WriteLine "Launcher file not found for rename."
-        End If
+    If fso.FileExists("{launcher_dir}\\AutoDownloader.exe") Then
+        fso.MoveFile "{launcher_dir}\\AutoDownloader.exe", "{launcher_dir}\\AutoDownloader_Setup.exe"
+        logFile.WriteLine "Successfully renamed launcher to AutoDownloader_Setup.exe"
     Else
-        logFile.WriteLine "Skipping rename because launcher is in final destination directory."
+        logFile.WriteLine "Launcher file not found for rename."
     End If
 End If
 

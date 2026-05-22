@@ -74,6 +74,9 @@ class AppWindow(FluentWindow):
         
         # When a download successfully finishes, trigger the delayed auto-hide!
         signals.task_finished.connect(self.delayed_hide_active_tasks)
+        
+        # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
+        self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
 
     def maximize_window(self):
         if hasattr(self, 'titleBar') and hasattr(self.titleBar, 'maxBtn'):
