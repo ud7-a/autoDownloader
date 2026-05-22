@@ -16,5 +16,6 @@ __pycache__/
 # Local Database, Configs, and Active Selenium Profiles
 download_history.db
 sites_config.json
+autoDownload.py
 SeleniumProfile/
 *.log

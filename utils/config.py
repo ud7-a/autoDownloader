@@ -10,7 +10,7 @@ UBLOCK_CRX_PATH = os.path.join(APP_DIR, "ublock_lite.crx")
 DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
-APP_VERSION = "4.0.2"
+APP_VERSION = "4.0.0"
 
 # --- GLOBAL LOCKS ---
 config_lock = threading.RLock()
