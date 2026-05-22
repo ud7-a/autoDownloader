@@ -129,33 +129,39 @@ logFile.WriteLine "Step 6: Deleting .old files and cleaning up launcher..."
 
 ' Location A: Dest Dir (.old sweeps)
 If fso.FileExists("{dest_dir}\\AutoDownloader.exe.old") Then
+    Err.Clear
     fso.DeleteFile "{dest_dir}\\AutoDownloader.exe.old", True
-    logFile.WriteLine "Deleted AutoDownloader.exe.old in destination directory."
+    If Err.Number <> 0 Then logFile.WriteLine "Error deleting AutoDownloader.exe.old in dest: " & Err.Description Else logFile.WriteLine "Deleted AutoDownloader.exe.old in destination directory."
 End If
 If fso.FileExists("{dest_dir}\\autoDownload.exe.old") Then
+    Err.Clear
     fso.DeleteFile "{dest_dir}\\autoDownload.exe.old", True
-    logFile.WriteLine "Deleted autoDownload.exe.old in destination directory."
+    If Err.Number <> 0 Then logFile.WriteLine "Error deleting autoDownload.exe.old in dest: " & Err.Description Else logFile.WriteLine "Deleted autoDownload.exe.old in destination directory."
 End If
 
 ' Location B: Launcher Dir (.old sweeps)
 If fso.FileExists("{launcher_dir}\\AutoDownloader.exe.old") Then
+    Err.Clear
     fso.DeleteFile "{launcher_dir}\\AutoDownloader.exe.old", True
-    logFile.WriteLine "Deleted AutoDownloader.exe.old in launcher directory."
+    If Err.Number <> 0 Then logFile.WriteLine "Error deleting AutoDownloader.exe.old in launcher: " & Err.Description Else logFile.WriteLine "Deleted AutoDownloader.exe.old in launcher directory."
 End If
 If fso.FileExists("{launcher_dir}\\autoDownload.exe.old") Then
+    Err.Clear
     fso.DeleteFile "{launcher_dir}\\autoDownload.exe.old", True
-    logFile.WriteLine "Deleted autoDownload.exe.old in launcher directory."
+    If Err.Number <> 0 Then logFile.WriteLine "Error deleting autoDownload.exe.old in launcher: " & Err.Description Else logFile.WriteLine "Deleted autoDownload.exe.old in launcher directory."
 End If
 
 ' Location C: Parent Dir of Launcher Dir (.old sweeps)
 parentDir = fso.GetParentFolderName("{launcher_dir}")
 If fso.FileExists(parentDir & "\\AutoDownloader.exe.old") Then
+    Err.Clear
     fso.DeleteFile parentDir & "\\AutoDownloader.exe.old", True
-    logFile.WriteLine "Deleted AutoDownloader.exe.old in parent of launcher directory."
+    If Err.Number <> 0 Then logFile.WriteLine "Error deleting AutoDownloader.exe.old in parent: " & Err.Description Else logFile.WriteLine "Deleted AutoDownloader.exe.old in parent of launcher directory."
 End If
 If fso.FileExists(parentDir & "\\autoDownload.exe.old") Then
+    Err.Clear
     fso.DeleteFile parentDir & "\\autoDownload.exe.old", True
-    logFile.WriteLine "Deleted autoDownload.exe.old in parent of launcher directory."
+    If Err.Number <> 0 Then logFile.WriteLine "Error deleting autoDownload.exe.old in parent: " & Err.Description Else logFile.WriteLine "Deleted autoDownload.exe.old in parent of launcher directory."
 End If
 
 ' Rename launcher outside dest if needed
@@ -163,8 +169,17 @@ logFile.WriteLine "Launcher name lower: " & LCase("{launcher_name}")
 If Not isLegacyUpdate And (LCase("{launcher_name}") = "autodownloader.exe" Or LCase("{launcher_name}") = "autodownload.exe") Then
     logFile.WriteLine "Launcher was renamed by updater. Performing rename back to AutoDownloader_Setup.exe..."
     If fso.FileExists("{launcher_dir}\\" & "{launcher_name}") Then
+        ' MoveFile fails if destination already exists, so delete it first!
+        If fso.FileExists("{launcher_dir}\\AutoDownloader_Setup.exe") Then
+            fso.DeleteFile "{launcher_dir}\\AutoDownloader_Setup.exe", True
+        End If
+        Err.Clear
         fso.MoveFile "{launcher_dir}\\" & "{launcher_name}", "{launcher_dir}\\AutoDownloader_Setup.exe"
-        logFile.WriteLine "Successfully renamed launcher to AutoDownloader_Setup.exe"
+        If Err.Number <> 0 Then 
+            logFile.WriteLine "ERROR renaming launcher: " & Err.Description 
+        Else 
+            logFile.WriteLine "Successfully renamed launcher to AutoDownloader_Setup.exe"
+        End If
     Else
         logFile.WriteLine "Launcher file not found for rename."
     End If
