@@ -187,7 +187,9 @@ End If
 
 ' 7. Force Windows Explorer to visually refresh the Desktop
 logFile.WriteLine "Step 7: Refreshing Desktop..."
-psCmd = "powershell -NoProfile -WindowStyle Hidden -Command ""$c='[DllImport(\""shell32.dll\"")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);';$t=Add-Type -MemberDefinition $c -Name 'W32' -Namespace 'A' -PassThru;$t::SHChangeNotify(0x08000000,0,[IntPtr]::Zero,[IntPtr]::Zero)"""
+Dim q
+q = Chr(34)
+psCmd = "powershell -NoProfile -WindowStyle Hidden -Command " & q & "$c='[DllImport(\" & q & "shell32.dll\" & q & ")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);';$t=Add-Type -MemberDefinition $c -Name 'W32' -Namespace 'A' -PassThru;$t::SHChangeNotify(0x08000000,0,[IntPtr]::Zero,[IntPtr]::Zero)" & q
 WshShell.Run psCmd, 0, True
 
 ' 8. Boot the fresh application cleanly
