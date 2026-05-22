@@ -70,6 +70,8 @@ WScript.Sleep 2000
 logFile.WriteLine "Step 1: Killing running AutoDownloader.exe and autoDownload.exe instances..."
 WshShell.Run "taskkill /F /IM AutoDownloader.exe /T", 0, True
 WshShell.Run "taskkill /F /IM autoDownload.exe /T", 0, True
+WshShell.Run "taskkill /F /IM AutoDownloader.exe /T", 0, True
+WshShell.Run "taskkill /F /IM autoDownloader.exe /T", 0, True
 WScript.Sleep 1000
 
 ' Legacy update unlock bypass: If installer is running inside the dest folder, move it out to unlock the folder
