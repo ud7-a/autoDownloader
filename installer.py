@@ -185,12 +185,17 @@ If Not isLegacyUpdate And (LCase("{launcher_name}") = "autodownloader.exe" Or LC
     End If
 End If
 
-' 7. Boot the fresh application cleanly
-logFile.WriteLine "Step 7: Launching new application..."
+' 7. Force Windows Explorer to visually refresh the Desktop
+logFile.WriteLine "Step 7: Refreshing Desktop..."
+psCmd = "powershell -NoProfile -WindowStyle Hidden -Command ""$c='[DllImport(\""shell32.dll\"")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);';$t=Add-Type -MemberDefinition $c -Name 'W32' -Namespace 'A' -PassThru;$t::SHChangeNotify(0x08000000,0,[IntPtr]::Zero,[IntPtr]::Zero)"""
+WshShell.Run psCmd, 0, True
+
+' 8. Boot the fresh application cleanly
+logFile.WriteLine "Step 8: Launching new application..."
 WshShell.Run Chr(34) & desktopPath & "\\AutoDownloader.lnk" & Chr(34), 1, False
 
-' 8. Close and clean up
-logFile.WriteLine "Step 8: Finalizing and deleting helper script..."
+' 9. Close and clean up
+logFile.WriteLine "Step 9: Finalizing and deleting helper script..."
 logFile.Close
 fso.DeleteFile WScript.ScriptFullName, True
 """
