@@ -29,10 +29,6 @@ def main():
         if res != 6: # 6 is IDYES
             sys.exit(0)
 
-    # 2. Terminate any running instances of the app
-    subprocess.run("taskkill /F /IM AutoDownloader.exe /T", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1)
-
     # 3. Handle installation using a detached helper VBScript to prevent Windows file locks!
     try:
         launcher_exe = sys.executable
@@ -66,12 +62,32 @@ logFile.WriteLine "Temp Extract Dir: {temp_extract_dir}"
 Set WshShell = CreateObject("WScript.Shell")
 WScript.Sleep 2000
 
+' 0. Optional: Automatically whitelist installation folder in Windows Defender
+' We only request UAC Administrator rights for this if it's the very first manual installation!
+If LCase("{is_silent_update}") = "false" Then
+    logFile.WriteLine "Step 0: Requesting UAC elevation to add Windows Defender Exclusion..."
+    Set shellApp = CreateObject("Shell.Application")
+    Dim rootDir, psExclusionCmd, qt
+    qt = Chr(34)
+    rootDir = fso.GetParentFolderName("{dest_dir}")
+    psExclusionCmd = "-NoProfile -WindowStyle Hidden -Command " & qt & "Add-MpPreference -ExclusionPath '" & rootDir & "'" & qt
+    ' 0 = Hide window
+    Err.Clear
+    shellApp.ShellExecute "powershell.exe", psExclusionCmd, "", "runas", 0
+    If Err.Number <> 0 Then
+        logFile.WriteLine "User denied UAC elevation or execution failed: " & Err.Description
+        Err.Clear
+    Else
+        logFile.WriteLine "UAC elevation requested. Folder whitelisted in Defender."
+    End If
+    ' Give Windows a moment to process the UAC command asynchronously
+    WScript.Sleep 3000
+End If
+
 ' 1. Force terminate any active app sessions
 logFile.WriteLine "Step 1: Killing running AutoDownloader.exe and autoDownload.exe instances..."
-WshShell.Run "taskkill /F /IM AutoDownloader.exe /T", 0, True
-WshShell.Run "taskkill /F /IM autoDownload.exe /T", 0, True
-WshShell.Run "taskkill /F /IM AutoDownloader.exe /T", 0, True
-WshShell.Run "taskkill /F /IM autoDownloader.exe /T", 0, True
+WshShell.Run "taskkill /F /IM AutoDownloader.exe", 0, True
+WshShell.Run "taskkill /F /IM autoDownload.exe", 0, True
 WScript.Sleep 1000
 
 ' Legacy update unlock bypass: If installer is running inside the dest folder, move it out to unlock the folder
@@ -205,6 +221,7 @@ fso.DeleteFile WScript.ScriptFullName, True
 """
         # Cleanly replace all template placeholders safely
         vbs_content = (vbs_content
+                       .replace("{is_silent_update}", str(is_silent_update))
                        .replace("{dest_dir}", dest_dir)
                        .replace("{temp_extract_dir}", temp_extract_dir)
                        .replace("{launcher_dir}", launcher_dir)
