@@ -50,10 +50,15 @@ def check_for_updates_silently():
         latest_version = data.get('tag_name', '').replace("v", "")
         
         if latest_version and latest_version != APP_VERSION:
+            print(f"[UPDATER] Found new version: {latest_version}. Current is {APP_VERSION}")
             for asset in data.get('assets', []):
                 if "Setup" in asset['name'] and asset['name'].endswith('.exe'):
                     download_url = asset['browser_download_url']
+                    print(f"[UPDATER] Emitting update_available signal for URL: {download_url}")
                     signals.update_available.emit(latest_version, download_url)
                     break
-    except Exception:
+        else:
+            print(f"[UPDATER] No new version found or versions match. GitHub: {latest_version}, Local: {APP_VERSION}")
+    except Exception as e:
+        print(f"[UPDATER] CRASHED during check: {e}")
         pass

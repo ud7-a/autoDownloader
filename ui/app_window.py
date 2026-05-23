@@ -82,21 +82,30 @@ class AppWindow(FluentWindow):
         signals.update_available.connect(self.prompt_update)
 
     def prompt_update(self, latest_version, download_url):
+        print(f"[UI] prompt_update TRIGGERED for version {latest_version}")
         # Prevent spamming the prompt
         if getattr(self, '_update_prompted', False):
+            print("[UI] Update already prompted this session. Skipping.")
             return
         self._update_prompted = True
         
-        from qfluentwidgets import MessageBox, ProgressDialog, InfoBar, InfoBarPosition
+        from qfluentwidgets import MessageBox, InfoBar, InfoBarPosition
+        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtCore import Qt
         
         title = "Update Available"
         content = f"🚀 Version {latest_version} is available!\n\nWould you like to download and install it now?"
         
+        print("[UI] Attempting to show MessageBox...")
         w = MessageBox(title, content, self)
         if w.exec():
+            print("[UI] User clicked YES to update!")
             self.setEnabled(False)
-            self.progress_dialog = ProgressDialog("Downloading Update", "Fetching new setup file from GitHub... Please wait.", self)
-            self.progress_dialog.setCancelButtonVisible(False)
+            
+            self.progress_dialog = QProgressDialog("Fetching new setup file from GitHub... Please wait.", "Cancel", 0, 100, self)
+            self.progress_dialog.setWindowTitle("Downloading Update")
+            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self.progress_dialog.setCancelButton(None) # Disable cancel button
             self.progress_dialog.show()
             
             from core.updater import UpdateDownloaderThread, launch_setup_and_exit

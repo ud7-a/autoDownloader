@@ -99,10 +99,6 @@ if __name__ == "__main__":
     # Run exe cleanup in the background
     threading.Thread(target=cleanup_old_exe, daemon=True).start()
     
-    # Check for updates in the background
-    from core.updater import check_for_updates_silently
-    threading.Thread(target=check_for_updates_silently, daemon=True).start()
-    
     # Load system configurations and database
     from utils.config import load_config, PROFILE_DIR
     from utils.database import init_db
@@ -131,5 +127,9 @@ if __name__ == "__main__":
     from ui.app_window import AppWindow
     window = AppWindow()
     window.show()
+    
+    # Check for updates in the background ONLY after the window is fully initialized and listening!
+    from core.updater import check_for_updates_silently
+    threading.Thread(target=check_for_updates_silently, daemon=True).start()
     
     sys.exit(app.exec())
