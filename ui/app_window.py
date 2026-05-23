@@ -77,6 +77,44 @@ class AppWindow(FluentWindow):
         
         # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
         self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
+        
+        # Wire up the update signal
+        signals.update_available.connect(self.prompt_update)
+
+    def prompt_update(self, latest_version, download_url):
+        # Prevent spamming the prompt
+        if getattr(self, '_update_prompted', False):
+            return
+        self._update_prompted = True
+        
+        from qfluentwidgets import MessageBox, ProgressDialog, InfoBar, InfoBarPosition
+        
+        title = "Update Available"
+        content = f"🚀 Version {latest_version} is available!\n\nWould you like to download and install it now?"
+        
+        w = MessageBox(title, content, self)
+        if w.exec():
+            self.setEnabled(False)
+            self.progress_dialog = ProgressDialog("Downloading Update", "Fetching new setup file from GitHub... Please wait.", self)
+            self.progress_dialog.setCancelButtonVisible(False)
+            self.progress_dialog.show()
+            
+            from core.updater import UpdateDownloaderThread, launch_setup_and_exit
+            self.update_thread = UpdateDownloaderThread(download_url)
+            self.update_thread.progress.connect(self.progress_dialog.setValue)
+            
+            def on_download_finished(setup_path):
+                self.progress_dialog.close()
+                launch_setup_and_exit(setup_path)
+                
+            def on_download_error(err):
+                self.setEnabled(True)
+                self.progress_dialog.close()
+                InfoBar.error("Update Failed", f"Could not download the update: {err}", parent=self, position=InfoBarPosition.TOP)
+                
+            self.update_thread.finished.connect(on_download_finished)
+            self.update_thread.error.connect(on_download_error)
+            self.update_thread.start()
 
     def maximize_window(self):
         if hasattr(self, 'titleBar') and hasattr(self.titleBar, 'maxBtn'):

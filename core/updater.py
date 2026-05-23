@@ -3,65 +3,42 @@ import sys
 import json
 import urllib.request
 import subprocess
-import shutil
+from PyQt6.QtCore import QThread, pyqtSignal
 from core.signals import signals
 from utils.config import APP_VERSION
 
-def apply_update_and_restart(downloaded_update_path):
-    current_exe = sys.executable 
-    exe_dir = os.path.dirname(current_exe)
-    
-    if not current_exe.lower().endswith(".exe") or "python" in current_exe.lower():
-        print("Update skipped: Running from raw Python script, not a compiled .exe")
+class UpdateDownloaderThread(QThread):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, download_url):
+        super().__init__()
+        self.download_url = download_url
+
+    def run(self):
+        try:
+            temp_dir = os.environ.get("TEMP", os.environ.get("TMP", "C:\\"))
+            setup_path = os.path.join(temp_dir, "AutoDownloader_Setup.exe")
+            
+            def report(blocknum, blocksize, totalsize):
+                if totalsize > 0:
+                    percent = int(blocknum * blocksize * 100 / totalsize)
+                    if percent > 100: percent = 100
+                    self.progress.emit(percent)
+                    
+            urllib.request.urlretrieve(self.download_url, setup_path, reporthook=report)
+            self.finished.emit(setup_path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+def launch_setup_and_exit(setup_path):
+    try:
+        # Launch the setup file in silent mode and exit
+        subprocess.Popen([setup_path, "--silent"], close_fds=True)
         os._exit(0)
-
-    bat_path = os.path.join(exe_dir, "updater.bat")
-    old_exe = current_exe + ".old"
-    abs_download_path = os.path.join(exe_dir, downloaded_update_path)
-    current_pid = os.getpid()
-    
-    bat_content = f"""@echo off
-echo Installing new version... Please wait.
-timeout /t 2 /nobreak > NUL
-
-:: 1. Force kill the Python app completely
-taskkill /F /PID {current_pid} /T > NUL 2>&1
-timeout /t 2 /nobreak > NUL
-
-:: 2. Delete the previous .old file if it exists
-del /f /q "{old_exe}" > NUL 2>&1
-
-:: 3. Rename current to .old
-move /y "{current_exe}" "{old_exe}" > NUL 2>&1
-
-:: 4. Move new download to current
-move /y "{abs_download_path}" "{current_exe}" > NUL 2>&1
-
-timeout /t 2 /nobreak > NUL
-
-:: 5. Launch the new app
-cd /d "{exe_dir}"
-start "" "{current_exe}"
-
-:: 6. Delete the script
-del "%~f0"
-"""
-    
-    with open(bat_path, "w", encoding="utf-8") as f:
-        f.write(bat_content)
-        
-    DETACHED_PROCESS = 0x00000008
-    clean_env = os.environ.copy()
-    keys_to_remove = [k for k in clean_env if k.startswith('_MEI') or k == 'PYTHONPATH']
-    for k in keys_to_remove:
-        clean_env.pop(k, None)
-        
-    subprocess.Popen(
-        ["cmd.exe", "/c", bat_path], 
-        env=clean_env, 
-        creationflags=DETACHED_PROCESS
-    )
-    os._exit(0)
+    except Exception as e:
+        print(f"Failed to launch installer: {e}")
 
 def check_for_updates_silently():
     API_URL = "https://api.github.com/repos/ud7-a/autoDownloader/releases/latest"
@@ -74,7 +51,7 @@ def check_for_updates_silently():
         
         if latest_version and latest_version != APP_VERSION:
             for asset in data.get('assets', []):
-                if asset['name'].endswith('.exe'):
+                if "Setup" in asset['name'] and asset['name'].endswith('.exe'):
                     download_url = asset['browser_download_url']
                     signals.update_available.emit(latest_version, download_url)
                     break
