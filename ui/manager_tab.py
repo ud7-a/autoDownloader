@@ -6,12 +6,13 @@ from urllib.parse import unquote
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QDoubleValidator, QCursor, QIcon
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QFrame, QTabWidget, QFileDialog, QTabBar, QApplication, QPushButton)
+                             QFrame, QTabWidget, QFileDialog, QTabBar, QApplication)
 
 # THE UPGRADE: We removed FluentIcon and will use standard Emojis for the menu!
 from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, ComboBox, 
                             SmoothScrollArea, MessageBoxBase, SubtitleLabel, MessageBox,
-                            RoundMenu, Action, FluentIcon as FIF, ToolButton, TransparentToolButton)
+                            RoundMenu, FluentIcon as FIF, ToolButton,
+                            InfoBar, InfoBarPosition)
 
 from utils.config import sites_data, config_lock, save_config
 from core.signals import signals
@@ -505,7 +506,7 @@ class SiteManagerWidget(QWidget):
             self.path_tabs.removeTab(0)
             widget.deleteLater()
         
-        if choice == "New Profile":
+        if choice in ["New Profile", "No Profiles"]:
             self.btn_del.hide()
             self.btn_dup.hide()
             self.original_profile_name = None
@@ -513,7 +514,10 @@ class SiteManagerWidget(QWidget):
             self.url_entry.clear()
             self.next_entry.clear()
             self.profile_combo.blockSignals(True)
-            self.profile_combo.setCurrentIndex(-1)
+            if choice == "New Profile":
+                self.profile_combo.setCurrentIndex(-1)
+            else:
+                self.profile_combo.setCurrentText("No Profiles")
             self.profile_combo.blockSignals(False)
             self.add_new_path("Path 1", switch_to=True)
         else:
@@ -561,6 +565,19 @@ class SiteManagerWidget(QWidget):
     def save_profile(self):
         name = self.name_entry.text().strip()
         if not name: return
+
+        if name in ["No Profiles", "No profile selected"]:
+            InfoBar.warning(
+                title="Profile Required",
+                content="Please select a valid site profile from the dropdown before starting.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self
+            )
+            self.name_entry.setText("")
+            return
         
         old_start = "1"
         old_end = "1"

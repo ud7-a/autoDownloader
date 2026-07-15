@@ -18,7 +18,9 @@ PYINSTALLER_CMD = [
     "--collect-all", "numpy",
     "--hidden-import", "PyQt6.QtXml",
     "--hidden-import", "PyQt6.QtSvg",
+    "--exclude-module", "PyQt5",
     "--add-data", "assets;assets",
+    "--add-data", "tools;tools",
     MAIN_FILE
 ]
 

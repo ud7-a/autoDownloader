@@ -1,7 +1,6 @@
-import sys
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
-from qfluentwidgets import FluentWindow, NavigationItemPosition, FluentIcon as FIF
+from qfluentwidgets import FluentWindow, FluentIcon as FIF
 
 from ui.downloader_tab import DownloaderWidget
 from ui.manager_tab import SiteManagerWidget
@@ -77,7 +76,7 @@ class AppWindow(FluentWindow):
         
         # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
         self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
-        
+
         # Wire up the update signal
         signals.update_available.connect(self.prompt_update)
 
@@ -139,6 +138,7 @@ class AppWindow(FluentWindow):
 
     def hide_active_tasks(self):
         """Hides the Active Tasks tab completely"""
+        self.navigationInterface.setEnabled(True)
         if self.progress_added:
             self.switchTo(self.downloader_interface)
             self.navigationInterface.removeWidget(self.progress_interface.objectName())
@@ -153,11 +153,13 @@ class AppWindow(FluentWindow):
             self.addSubInterface(self.progress_interface, FIF.SYNC, "Active Tasks")
             self.progress_added = True
             
+        self.navigationInterface.setEnabled(False)
         # Automatically jump to the progress screen!
         self.switchTo(self.progress_interface)
 
-    def delayed_hide_active_tasks(self, results=None):
+    def delayed_hide_active_tasks(self, _results=None):
         """Waits exactly 2 seconds, then smoothly hides the tab"""
+        self.navigationInterface.setEnabled(True)
         if hasattr(self, 'hide_timer') and self.hide_timer:
             self.hide_timer.stop()
             

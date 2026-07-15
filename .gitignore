@@ -7,6 +7,10 @@ dist/
 *.zip
 *.exe
 
+# Exception: bundled downloader binaries must ship with the app/installer
+!tools/aria2c.exe
+!tools/unrar.exe
+
 # Python Execution Caches
 __pycache__/
 *.pyc

@@ -10,11 +10,10 @@ import tempfile
 import subprocess
 import threading
 import urllib.request
-import concurrent.futures
 from subprocess import CREATE_NO_WINDOW 
 
 from core.signals import signals
-from utils.config import PROFILE_DIR, ARIA2C_PATH, UBLOCK_CRX_PATH, APP_DIR, sites_data, app_settings, config_lock, progress_lock
+from utils.config import PROFILE_DIR, ARIA2C_PATH, UNRAR_PATH, APP_DIR, sites_data, app_settings, config_lock, progress_lock
 from utils.database import log_history
 
 # --- GLOBAL THREAD EVENTS ---
@@ -47,19 +46,120 @@ def parse_smart_xpath(raw_input):
         return f"//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text_part}')]"
 
 def kill_stuck_chrome_processes():
-    try: subprocess.run("taskkill /F /IM chromedriver.exe /T", shell=True, creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try: 
+        subprocess.run(["taskkill", "/F", "/IM", "chromedriver.exe", "/T"], 
+                       creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except: pass
-    ps_kill_profile = 'powershell -Command "Get-WmiObject Win32_Process -Filter \\"Name=\'chrome.exe\'\\" | Where-Object {$_.CommandLine -match \'SeleniumProfile\'} | ForEach-Object { $_.Terminate() }"'
-    try: subprocess.run(ps_kill_profile, shell=True, creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except: pass
-    ps_kill_headless = 'powershell -Command "Get-WmiObject Win32_Process -Filter \\"Name=\'chrome.exe\'\\" | Where-Object {$_.CommandLine -match \'--headless\'} | ForEach-Object { $_.Terminate() }"'
-    try: subprocess.run(ps_kill_headless, shell=True, creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except: pass
+    
+    # Securely list and terminate chrome.exe instances matching SeleniumProfile or --headless using wmic
+    try:
+        cmd = ["wmic", "process", "where", "name='chrome.exe'", "get", "processid,commandline", "/format:csv"]
+        res = subprocess.run(cmd, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
+        for line in res.stdout.splitlines():
+            if "," in line:
+                parts = line.strip().split(",")
+                if len(parts) >= 3:
+                    cmdline = parts[1]
+                    pid = parts[2]
+                    if pid.isdigit() and ("SeleniumProfile" in cmdline or "--headless" in cmdline):
+                        subprocess.run(["taskkill", "/F", "/PID", pid, "/T"], 
+                                       creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        # Safe fallback: only kill by name if parsing fails
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"], 
+                           creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except: pass
     time.sleep(1)
     if not os.path.exists(PROFILE_DIR): return
     for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
         try: os.remove(os.path.join(PROFILE_DIR, lock))
         except: pass
+
+def auto_install_extensions():
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        import pyautogui
+        
+        kill_stuck_chrome_processes()
+        options = webdriver.ChromeOptions()
+        options.add_argument(f"--user-data-dir={PROFILE_DIR}")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("prefs", {"profile.exit_type": "Normal", "profile.exited_cleanly": True})
+        options.add_argument("--start-maximized")
+        options.add_argument("--force-dark-mode")
+        options.add_argument("--enable-features=WebContentsForceDark")
+        
+        service = Service()
+        service.creation_flags = CREATE_NO_WINDOW
+        driver = webdriver.Chrome(options=options, service=service)
+        
+        def install_one(url, name):
+            signals.update_status.emit(f"Status: ⚡ Installing {name}...", "#f39c12")
+            driver.get(url)
+            time.sleep(5)
+            
+            js_click_btn = """
+            // Target the button by its stable storefront jsname attribute first
+            let btn = document.querySelector('button[jsname="wQO0od"]');
+            if (btn) {
+                btn.click();
+                return true;
+            }
+            // Fallback to text matching
+            const buttons = document.querySelectorAll('button');
+            for (let b of buttons) {
+                if (b.innerText && (b.innerText.includes('Add to Chrome') || b.innerText.includes('إضافة') || b.innerText.includes('Chrome'))) {
+                    b.click();
+                    return true;
+                }
+            }
+            return false;
+            """
+            clicked = driver.execute_script(js_click_btn)
+            if clicked:
+                screen_w, screen_h = pyautogui.size()
+                
+                # Step 1: Force active window focus on Chrome by clicking safe neutral space in the center of the browser
+                time.sleep(2)
+                pyautogui.click(screen_w // 2, int(screen_h * 0.5))
+                time.sleep(1)
+                
+                # Step 2: Try multi-layered key sequences to hit the Add Extension button (handles different default button configurations)
+                # Attempt A: Left Arrow + Enter (standard shift to Add Extension)
+                pyautogui.press('left')
+                time.sleep(0.5)
+                pyautogui.press('enter')
+                
+                # Attempt B: Tab + Enter (alternate modal shift to Add Extension)
+                time.sleep(1.5)
+                pyautogui.press('tab')
+                time.sleep(0.5)
+                pyautogui.press('enter')
+                
+                # Attempt C: Shift+Tab + Enter (reverse shift to Add Extension)
+                time.sleep(1.5)
+                with pyautogui.hold('shift'):
+                    pyautogui.press('tab')
+                time.sleep(0.5)
+                pyautogui.press('enter')
+                
+                time.sleep(8) # Wait for download and configuration setup to finalize
+                    
+        # Install uBlock if missing
+        ublock_path = os.path.join(PROFILE_DIR, "Default", "Extensions", "ddkjiahejlhfcafbddmgiahcphecmpfh")
+        if not os.path.exists(ublock_path):
+            install_one("https://chromewebstore.google.com/detail/ublock-origin-lite/ddkjiahejlhfcafbddmgiahcphecmpfh", "uBlock Origin Lite")
+            
+        # Install Buster if missing
+        buster_path = os.path.join(PROFILE_DIR, "Default", "Extensions", "mpbjkejclgfgadiemmefgebjfooflfhl")
+        if not os.path.exists(buster_path):
+            install_one("https://chromewebstore.google.com/detail/buster-captcha-solver-for/mpbjkejclgfgadiemmefgebjfooflfhl", "Buster Captcha Solver")
+            
+        driver.quit()
+    except Exception as e:
+        print("Auto-install extensions failed:", e)
 
 def launch_visible_browser():
     global manual_driver
@@ -76,13 +176,15 @@ def launch_visible_browser():
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("prefs", {"profile.exit_type": "Normal", "profile.exited_cleanly": True})
         options.add_argument("--start-maximized")
+        options.add_argument("--force-dark-mode")
+        options.add_argument("--enable-features=WebContentsForceDark")
 
         log_path = os.path.join(APP_DIR, "chromedriver.log")
         service = Service(service_args=["--log-level=ALL", "--enable-chrome-logs"], log_output=log_path)
         service.creation_flags = CREATE_NO_WINDOW
         manual_driver = webdriver.Chrome(options=options, service=service)
         manual_driver.get("chrome://extensions/")
-        signals.update_status.emit("Status: Browser open. Setup extensions/logins, then close & Start!", "#f39c12")
+        signals.update_status.emit("Status: Profile browser open. Manage your sessions/logins, then close to continue.", "#f39c12")
     except Exception as e:
         signals.update_status.emit(f"Status: ❌ Error opening browser: {e}", "#e74c3c")
     finally:
@@ -103,10 +205,8 @@ def create_browser(download_dir, headless=True):
     }
     options.add_experimental_option("prefs", prefs)
 
-    options.add_argument("--enable-features=ParallelDownloading")
-    options.add_argument("--disable-background-timer-throttling")
-    options.add_argument("--disable-backgrounding-occluded-windows")
-    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--force-dark-mode")
+    options.add_argument("--enable-features=WebContentsForceDark,ParallelDownloading")
 
     if headless: 
         options.add_argument("--headless=new")
@@ -114,24 +214,267 @@ def create_browser(download_dir, headless=True):
     else: 
         options.add_argument("--start-maximized") 
 
-    if os.path.exists(UBLOCK_CRX_PATH) and os.path.getsize(UBLOCK_CRX_PATH) > 100000:
-        try: options.add_extension(UBLOCK_CRX_PATH)
-        except: pass
-
+    # Aggressive Performance & Memory Tweaks (Keep Images Enabled)
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage") 
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-features=Translate,MediaRouter,BackForwardCache,SharedArrayBuffer")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-breakpad")
+    options.add_argument("--disable-client-side-phishing-detection")
+    options.add_argument("--disable-component-update")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--disable-domain-reliability")
+    options.add_argument("--disable-hang-monitor")
+    options.add_argument("--disable-ipc-flooding-protection")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-prompt-on-repost")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--disable-sync")
+    options.add_argument("--metrics-recording-only")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--mute-audio")
+
     service = Service()
     service.creation_flags = CREATE_NO_WINDOW
     driver = webdriver.Chrome(options=options, service=service)
     driver.set_page_load_timeout(45) 
     return driver
 
+def solve_captcha_if_present(driver, url):
+    """
+    Detects and solves hCaptcha, reCAPTCHA, and Cloudflare Turnstile using 2Captcha or Anti-Captcha API.
+    """
+    provider = app_settings.get("captcha_provider", "Disabled")
+    api_key = app_settings.get("captcha_api_key", "").strip()
+    
+    if provider == "Disabled" or not api_key:
+        return
+        
+    import urllib.request
+    import urllib.parse
+    import time
+    
+    # 1. Detection of Captcha Elements & Sitekeys
+    sitekey = None
+    captcha_type = None # "recaptcha", "hcaptcha", "turnstile"
+    
+    # Check reCAPTCHA v2
+    try:
+        elements = driver.find_elements("xpath", "//*[contains(@class, 'g-recaptcha')] | //iframe[contains(@src, 'recaptcha/api2')]")
+        for el in elements:
+            sk = el.get_attribute("data-sitekey")
+            if sk:
+                sitekey = sk
+                captcha_type = "recaptcha"
+                break
+            src = el.get_attribute("src")
+            if src and "k=" in src:
+                parsed = urllib.parse.urlparse(src)
+                params = urllib.parse.parse_qs(parsed.query)
+                if 'k' in params:
+                    sitekey = params['k'][0]
+                    captcha_type = "recaptcha"
+                    break
+    except Exception:
+        pass
+        
+    # Check hCaptcha
+    if not sitekey:
+        try:
+            elements = driver.find_elements("xpath", "//*[contains(@class, 'h-captcha')] | //iframe[contains(@src, 'hcaptcha.com')]")
+            for el in elements:
+                sk = el.get_attribute("data-sitekey")
+                if sk:
+                    sitekey = sk
+                    captcha_type = "hcaptcha"
+                    break
+                src = el.get_attribute("src")
+                if src and "sitekey=" in src:
+                    parsed = urllib.parse.urlparse(src)
+                    params = urllib.parse.parse_qs(parsed.query)
+                    if 'sitekey' in params:
+                        sitekey = params['sitekey'][0]
+                        captcha_type = "hcaptcha"
+                        break
+        except Exception:
+            pass
+            
+    # Check Cloudflare Turnstile
+    if not sitekey:
+        try:
+            elements = driver.find_elements("xpath", "//*[contains(@class, 'cf-turnstile')] | //iframe[contains(@src, 'challenges.cloudflare.com')]")
+            for el in elements:
+                sk = el.get_attribute("data-sitekey")
+                if sk:
+                    sitekey = sk
+                    captcha_type = "turnstile"
+                    break
+                src = el.get_attribute("src")
+                if src and "sitekey=" in src:
+                    parsed = urllib.parse.urlparse(src)
+                    params = urllib.parse.parse_qs(parsed.query)
+                    if 'sitekey' in params:
+                        sitekey = params['sitekey'][0]
+                        captcha_type = "turnstile"
+                        break
+        except Exception:
+            pass
+
+    if not sitekey or not captcha_type:
+        return # No captcha found
+        
+    signals.update_status.emit(f"Status: 🛡️ Captcha Detected ({captcha_type.upper()}). Solving via {provider}...", "#ffa500")
+    
+    # 2. Submit Task to API
+    try:
+        task_id = None
+        if provider == "2Captcha":
+            submit_url = "https://2captcha.com/in.php"
+            payload = {
+                "key": api_key,
+                "method": "userrecaptcha" if captcha_type == "recaptcha" else ("hcaptcha" if captcha_type == "hcaptcha" else "turnstile"),
+                "sitekey": sitekey,
+                "pageurl": url,
+                "json": 1
+            }
+            req_data = urllib.parse.urlencode(payload).encode('utf-8')
+            req = urllib.request.Request(submit_url, data=req_data, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res = json.loads(response.read().decode('utf-8'))
+                if res.get("status") == 1:
+                    task_id = res.get("request")
+                else:
+                    raise Exception(res.get("request"))
+        
+        elif provider == "Anti-Captcha":
+            submit_url = "https://api.anti-captcha.com/createTask"
+            task_type = "NoCaptchaTaskProxyless" if captcha_type == "recaptcha" else ("HCaptchaTaskProxyless" if captcha_type == "hcaptcha" else "TurnstileTaskProxyless")
+            payload = {
+                "clientKey": api_key,
+                "task": {
+                    "type": task_type,
+                    "websiteURL": url,
+                    "websiteKey": sitekey
+                }
+            }
+            req_data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(submit_url, data=req_data, headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res = json.loads(response.read().decode('utf-8'))
+                if res.get("errorId") == 0:
+                    task_id = res.get("taskId")
+                else:
+                    raise Exception(res.get("errorDescription"))
+
+        if not task_id:
+            signals.update_status.emit(f"Status: ❌ Captcha Submission Failed.", "#ff4c4c")
+            return
+            
+        # 3. Poll for Solution
+        solution_token = None
+        poll_count = 0
+        max_polls = 40 # 2 minutes
+        
+        while poll_count < max_polls:
+            time.sleep(3.0)
+            poll_count += 1
+            signals.update_status.emit(f"Status: 🛡️ Captcha Solving... ({poll_count * 3}s)", "#ffa500")
+            
+            try:
+                if provider == "2Captcha":
+                    res_url = f"https://2captcha.com/res.php?key={api_key}&action=get&id={task_id}&json=1"
+                    req = urllib.request.Request(res_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        res = json.loads(response.read().decode('utf-8'))
+                        if res.get("status") == 1:
+                            solution_token = res.get("request")
+                            break
+                        elif res.get("request") == "CAPCHA_NOT_READY":
+                            continue
+                        else:
+                            raise Exception(res.get("request"))
+                
+                elif provider == "Anti-Captcha":
+                    res_url = "https://api.anti-captcha.com/getTaskResult"
+                    payload = {"clientKey": api_key, "taskId": task_id}
+                    req_data = json.dumps(payload).encode('utf-8')
+                    req = urllib.request.Request(res_url, data=req_data, headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        res = json.loads(response.read().decode('utf-8'))
+                        if res.get("errorId") != 0:
+                            raise Exception(res.get("errorDescription"))
+                        status = res.get("status")
+                        if status == "ready":
+                            solution = res.get("solution", {})
+                            solution_token = solution.get("gRecaptchaResponse") or solution.get("token") or solution.get("text")
+                            break
+                        elif status == "processing":
+                            continue
+            except Exception as e:
+                print(f"[CAPTCHA] Poll error: {e}")
+                
+        if not solution_token:
+            signals.update_status.emit("Status: ❌ Captcha Solve Timeout.", "#ff4c4c")
+            return
+            
+        # 4. Inject Solution Token
+        signals.update_status.emit("Status: 🛡️ Captcha Solved! Injecting token...", "#00e676")
+        
+        js_inject = f"""
+        let token = "{solution_token}";
+        let googleRes = document.getElementById("g-recaptcha-response");
+        if (googleRes) googleRes.innerHTML = token;
+        
+        let hcapRes = document.querySelector("[name='h-captcha-response']");
+        if (hcapRes) hcapRes.innerHTML = token;
+        
+        let cfRes = document.querySelector("[name='cf-turnstile-response']");
+        if (cfRes) cfRes.innerHTML = token;
+        
+        try {{
+            if (typeof recaptchaCallback === 'function') recaptchaCallback(token);
+        }} catch(e) {{}}
+        try {{
+            if (typeof onSubmit === 'function') onSubmit(token);
+        }} catch(e) {{}}
+        
+        try {{
+            let event = new Event('change', {{ bubbles: true }});
+            if (googleRes) googleRes.dispatchEvent(event);
+            if (hcapRes) hcapRes.dispatchEvent(event);
+            if (cfRes) cfRes.dispatchEvent(event);
+        }} catch(e) {{}}
+        """
+        driver.execute_script(js_inject)
+        
+        try:
+            submit_btn = driver.find_elements("xpath", "//button[@type='submit'] | //input[@type='submit'] | //*[contains(@class, 'captcha-submit')]")
+            if submit_btn:
+                submit_btn[0].click()
+            else:
+                driver.execute_script("if (document.forms.length > 0) document.forms[0].submit();")
+        except Exception:
+            pass
+            
+        time.sleep(2.0)
+        signals.update_status.emit("Status: 🛡️ Captcha solved successfully!", "#00e676")
+        
+    except Exception as e:
+        signals.update_status.emit(f"Status: ❌ Captcha error: {e}", "#ff4c4c")
+
 def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, on_episode_completed, process_callback=None, my_task_id=0):
     if not os.path.exists(ARIA2C_PATH):
-        signals.update_active_download.emit(ep, "❌ Downloader core missing! Please restart the app.")
-        on_episode_completed()
-        return
+        from utils.tools_manager import ensure_aria2c
+        signals.update_active_download.emit(ep, "⚡ Bootstrapping downloader...")
+        ensure_aria2c()
+        if not os.path.exists(ARIA2C_PATH):
+            signals.update_active_download.emit(ep, "❌ Downloader core missing! Please restart the app.")
+            on_episode_completed()
+            return
 
     cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
     final_name = final_name if final_name else f"episode_{ep}.mp4"
@@ -149,7 +492,8 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
             "-k", "1M", "--min-split-size=1M", "--disk-cache=128M", 
             "--optimize-concurrent-downloads=true", "--disable-ipv6=true",
             "--file-allocation=none", "--summary-interval=1", "--auto-save-interval=1",
-            "--connect-timeout=5", "--timeout=10", "--max-tries=5", "--retry-wait=2"
+            "--connect-timeout=5", "--timeout=10", "--max-tries=5", "--retry-wait=2",
+            "--check-certificate=false"
         ]
         if ua: cmd.append(f"--user-agent={ua}")
         else: cmd.append("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
@@ -200,8 +544,32 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                                 return val_str
                             pct = int(match.group(3))
                             speed = convert_unit(match.group(4)) + "/s"
+                            
+                            # Extract ETA
+                            eta_str = ""
+                            eta_match = re.search(r"ETA:([^ \]]+)", line)
+                            if eta_match:
+                                eta_str = f"   •   ⏳ {eta_match.group(1)} left"
+                                
                             signals.update_active_bar.emit(ep, pct)
-                            signals.update_active_download.emit(ep, f"Speed: {speed}   •   Progress: {pct}%")
+                            signals.update_active_download.emit(ep, f"⚡ {speed}   •   Progress: {pct}%{eta_str}")
+                    except Exception: pass
+                elif "CN:" in line:
+                    try:
+                        def convert_unit(val_str):
+                            m = re.match(r"([\d\.]+)(K|M|G)iB", val_str)
+                            if m:
+                                val = float(m.group(1))
+                                unit = m.group(2)
+                                if unit == 'K': return f"{val * 1.024:.1f} KB"
+                                if unit == 'M': return f"{val * 1.048576:.2f} MB"
+                                if unit == 'G': return f"{val * 1.07374:.2f} GB"
+                            return val_str
+                        match_init = re.search(r"CN:(\d+)\s+DL:([^ \]]+)", line)
+                        if match_init:
+                            conns = match_init.group(1)
+                            speed = convert_unit(match_init.group(2)) + "/s"
+                            signals.update_active_download.emit(ep, f"🔌 Connecting... (Conns: {conns}, Speed: {speed})")
                     except Exception: pass
             
             process.wait()
@@ -229,6 +597,18 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
             signals.update_active_bar.emit(ep, 100)
             signals.update_active_download.emit(ep, "Extraction & Cleanup...")
             if process_callback: process_callback(ep, temp_dir)
+            
+            # Smart Session Recovery: remove completed episode
+            from utils.config import save_config
+            with config_lock:
+                session = app_settings.get("unfinished_session")
+                if session and "episodes" in session:
+                    if ep in session["episodes"]:
+                        session["episodes"].remove(ep)
+                    if not session["episodes"]:
+                        app_settings.pop("unfinished_session", None)
+                    save_config()
+
             time.sleep(1)
             signals.remove_active_download.emit(ep)
             break 
@@ -283,7 +663,6 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
             config = sites_data.get(site_key, {})
             
         url_template = config.get("url", "")
-        next_btn_xpath = parse_smart_xpath(config.get("next_btn_xpath", ""))
         step_paths = config.get("step_paths", {"Path 1": config.get("steps", [])})
         safe_site_name = "".join(c for c in site_key if c not in r'\/:*?"<>|').strip()
 
@@ -295,6 +674,9 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
             if not os.path.exists(temp_dir): return
             import py7zr
             import rarfile
+            # Point rarfile at the bundled unrar.exe (it is not on the system PATH).
+            if os.path.exists(UNRAR_PATH):
+                rarfile.UNRAR_TOOL = UNRAR_PATH
             try:
                 current_timestamp = time.time()
                 for item in os.listdir(temp_dir):
@@ -386,6 +768,14 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
 
         signals.update_status.emit("Status: Cleaning up...", "#f39c12")
         kill_stuck_chrome_processes()
+
+        # Check if extensions are installed in the persistent profile
+        ublock_path = os.path.join(PROFILE_DIR, "Default", "Extensions", "ddkjiahejlhfcafbddmgiahcphecmpfh")
+        buster_path = os.path.join(PROFILE_DIR, "Default", "Extensions", "mpbjkejclgfgadiemmefgebjfooflfhl")
+        if not os.path.exists(ublock_path) or not os.path.exists(buster_path):
+            signals.update_status.emit("Status: ⚡ Checking and installing browser extensions...", "#f39c12")
+            auto_install_extensions()
+
         driver = create_browser(download_dir, headless)
         wait = WebDriverWait(driver, 10)
 
@@ -395,9 +785,6 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
         for x in episodes_list:
             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
             
-            while len([t for t in active_engine_threads if t.is_alive()]) >= MAX_CONCURRENT and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
-                time.sleep(1)
-
             while pause_event.is_set() and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
                 time.sleep(1)
             
@@ -425,6 +812,12 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                     
                     driver.get(url)
                     time.sleep(3) 
+
+                    # Dynamic Captcha Solver Integration
+                    try:
+                        solve_captcha_if_present(driver, driver.current_url)
+                    except Exception as captcha_err:
+                        print(f"Captcha solving failed: {captcha_err}")
 
                     for path_name, steps in step_paths.items():
                         if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) or path_success: break
@@ -465,10 +858,10 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 break 
 
                             try: 
-                                from selenium.webdriver.common.action_chains import ActionChains
                                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
                                 time.sleep(0.5)
-                                ActionChains(driver).move_to_element(btn).click().perform()
+                                # ALWAYS use JS click first to bypass invisible ad overlays!
+                                driver.execute_script("arguments[0].click();", btn)
                             except Exception:
                                 try:
                                     driver.execute_script("arguments[0].click();", btn)
@@ -490,6 +883,12 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 driver.switch_to.window(driver.window_handles[-1])
                                 driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": ep_temp_dir})
                                 current_tabs = new_tabs
+                                
+                                # Dynamic Captcha Solver Integration for tab switch
+                                try:
+                                    solve_captcha_if_present(driver, driver.current_url)
+                                except Exception as captcha_err:
+                                    print(f"Captcha solving failed on tab switch: {captcha_err}")
                         
                         if not path_failed:
                             signals.update_status.emit(f"Status: Intercepting Ep {x} (Waiting up to 35s)...", "#f39c12")
@@ -561,6 +960,14 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                     return null;
                                 """
 
+                                dl_buttons = driver.find_elements(By.XPATH, "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'download')]")
+                                for btn in dl_buttons:
+                                    try:
+                                        if btn.is_displayed():
+                                            driver.execute_script("arguments[0].click();", btn)
+                                            time.sleep(1)
+                                    except: pass
+
                                 res = driver.execute_script(js_intercept)
                                 if res:
                                     found_data = res
@@ -569,7 +976,7 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 wait_timer += 1
                             
                             if found_data and found_data != "BLOB":
-                                signals.update_status.emit(f"Status: ✅ Locked onto Ep {x}! Starting download...", "#2ecc71")                                
+                                signals.update_status.emit(f"Status: ✅ Locked onto Ep {x}! Pre-fetched download details.", "#2ecc71")                                
                                 signals.add_active_download.emit(x)
                                 data_obj = json.loads(found_data)
                                 dl_url = data_obj['url']
@@ -577,6 +984,21 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 cookies = driver.get_cookies()
                                 ua = driver.execute_script("return navigator.userAgent;")
                                 
+                                # Close the successfully intercepted tab immediately to free up system memory
+                                if len(driver.window_handles) > 1:
+                                    try:
+                                        driver.close()
+                                        driver.switch_to.window(driver.window_handles[0])
+                                    except: pass
+                                
+                                # Concurrency throttle: wait here if all active slots are full
+                                while len([t for t in active_engine_threads if t.is_alive()]) >= MAX_CONCURRENT and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
+                                    time.sleep(1)
+                                    
+                                if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
+                                    break
+                                    
+                                signals.update_status.emit(f"Status: ▶ Starting download for Ep {x}...", "#2ecc71")
                                 t = threading.Thread(target=aria2c_downloader, 
                                                      args=(x, dl_url, dl_fname, cookies, ua, ep_temp_dir, cancel_event, on_episode_completed, process_downloaded_episode, my_task_id))
                                 t.start()

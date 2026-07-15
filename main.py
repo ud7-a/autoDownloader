@@ -1,14 +1,13 @@
-from time import sleep
 import sys
 import os
 import time
 import threading
-from PyQt6.QtWidgets import QApplication, QSplashScreen
+from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, qInstallMessageHandler, QtMsgType
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
 from utils.config import APP_VERSION
 
-def suppress_qt_warnings(msg_type, context, message):
+def suppress_qt_warnings(msg_type, _context, message):
     # Filter out common annoying style sheet warnings from QFluentWidgets / Qt
     ignored_phrases = [
         "does not have a property named",
@@ -82,7 +81,7 @@ def create_splash_pixmap():
 def cleanup_old_exe():
     if getattr(sys, 'frozen', False):
         old_exe_path = sys.executable + ".old"
-        for attempt in range(30):
+        for _ in range(30):
             try:
                 os.chmod(old_exe_path, 0o777) # Strip Read-Only flag
                 os.remove(old_exe_path)
@@ -107,6 +106,11 @@ if __name__ == "__main__":
     load_config()
     if not os.path.exists(PROFILE_DIR):
         os.makedirs(PROFILE_DIR)
+
+    # Start background bootstrap of downloader and extractor engines
+    from utils.tools_manager import ensure_aria2c, ensure_unrar
+    threading.Thread(target=ensure_aria2c, daemon=True).start()
+    threading.Thread(target=ensure_unrar, daemon=True).start()
         
     # Force Native Fluent Dark Mode
     from qfluentwidgets import setTheme, Theme, setThemeColor

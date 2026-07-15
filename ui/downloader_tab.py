@@ -2,24 +2,21 @@ import os
 import ctypes
 import threading
 import subprocess
-import tempfile
-import shutil
 import sys
 import urllib.request
 from urllib.parse import unquote
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIntValidator, QCursor
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog, QMessageBox, QDialog)
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QIntValidator
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog, QDialog)
 
 # THE UPGRADE: We are using Fluent Widgets for everything!
 from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, CheckBox, 
-                            ComboBox, Slider, SmoothScrollArea, MessageBoxBase, SubtitleLabel, SpinBox, SwitchButton, FluentIcon as FIF, ToolButton, InfoBar, InfoBarPosition)
+                            ComboBox, Slider, SmoothScrollArea, SpinBox, SwitchButton, FluentIcon as FIF, ToolButton, InfoBar, InfoBarPosition)
 
 from utils.config import app_settings, sites_data, save_config, config_lock
 from core.signals import signals
-from core.selenium_engine import run_selenium_task, launch_visible_browser, kill_stuck_chrome_processes
-from core.updater import check_for_updates_silently
+from core.selenium_engine import run_selenium_task, launch_visible_browser
 
 
 
@@ -218,6 +215,51 @@ class DownloaderWidget(QWidget):
 
         signals.update_buttons.connect(self.set_buttons)
         self.refresh_dropdown()
+        QTimer.singleShot(1000, self.check_and_prompt_resume)
+
+    def check_and_prompt_resume(self):
+        with config_lock:
+            session = app_settings.get("unfinished_session")
+            if not session or not session.get("episodes"):
+                return
+            
+            site = session.get("site")
+            episodes = session.get("episodes", [])
+            target_dir = session.get("target_dir")
+            headless = session.get("headless", True)
+            webhook = session.get("webhook", "")
+            selected_sound = session.get("selected_sound", "")
+            volume = session.get("volume", 100)
+            concurrency = session.get("concurrency", 3)
+
+        from qfluentwidgets import MessageBox
+        title = "🔄 Resume Unfinished Session?"
+        content = f"The application detected an unfinished download session for '{site}'.\n\nWould you like to resume downloading the remaining {len(episodes)} episodes?"
+        w = MessageBox(title, content, self.window())
+        w.yesButton.setText("Resume")
+        w.cancelButton.setText("Discard")
+        
+        if w.exec():
+            # Restore UI values to match the resumed session
+            if site in [self.combo_site.itemText(i) for i in range(self.combo_site.count())]:
+                self.combo_site.setCurrentText(site)
+            self.txt_dir.setText(target_dir)
+            self.chk_headless.setChecked(headless)
+            self.txt_webhook.setText(webhook)
+            self.spin_concurrency.setValue(concurrency)
+            self.slider_vol.setValue(volume)
+            
+            signals.update_buttons.emit(False, True, False)
+            signals.task_started.emit()
+            threading.Thread(
+                target=run_selenium_task, 
+                args=(site, episodes, target_dir, headless, webhook, selected_sound, volume, concurrency), 
+                daemon=True
+            ).start()
+        else:
+            with config_lock:
+                app_settings.pop("unfinished_session", None)
+                save_config()
 
     # KEEP ALL YOUR EXISTING FUNCTIONS BELOW HERE EXACTLY THE SAME!
     # (refresh_sound_dropdown, browse_folder, save_settings, start_task, etc.)
@@ -335,9 +377,15 @@ class DownloaderWidget(QWidget):
         # Determine a safe working directory (the folder containing our executable)
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         
+        # Determine correct restart arguments
+        if hasattr(sys, 'frozen'):
+            args = [sys.executable] + sys.argv[1:]
+        else:
+            args = [sys.executable] + sys.argv
+            
         # Spawn the new instance completely detached and isolated
         subprocess.Popen(
-            [sys.executable] + sys.argv[1:], 
+            args, 
             env=env, 
             cwd=exe_dir,
             close_fds=True,
@@ -386,6 +434,9 @@ class DownloaderWidget(QWidget):
         sounds = app_settings.get("custom_sounds", [])
         if not sounds:
             self.combo_sound.addItem("No sounds added...")
+            if hasattr(self, 'btn_play_sound'): self.btn_play_sound.hide()
+            if hasattr(self, 'btn_delete_sound'): self.btn_delete_sound.hide()
+            if hasattr(self, 'volume_container'): self.volume_container.hide()
         else:
             for s in sounds:
                 self.combo_sound.addItem(os.path.basename(s), userData=s)
@@ -395,7 +446,19 @@ class DownloaderWidget(QWidget):
             else:
                 self.combo_sound.setCurrentIndex(0)
                 app_settings["selected_sound"] = sounds[0] if sounds else ""
+            if hasattr(self, 'btn_play_sound'): self.btn_play_sound.show()
+            if hasattr(self, 'btn_delete_sound'): self.btn_delete_sound.show()
+            if hasattr(self, 'volume_container'): self.volume_container.show()
         self.combo_sound.blockSignals(False)
+    def set_inputs_enabled(self, enabled):
+        self.btn_start.setEnabled(enabled)
+        self.txt_start.setEnabled(enabled)
+        self.txt_end.setEnabled(enabled)
+        self.spin_concurrency.setEnabled(enabled)
+        self.txt_webhook.setEnabled(enabled)
+        self.chk_headless.setEnabled(enabled)
+        self.btn_profile.setEnabled(enabled)
+
     def refresh_dropdown(self):
         self.combo_site.blockSignals(True)
         self.combo_site.clear()
@@ -405,7 +468,9 @@ class DownloaderWidget(QWidget):
         if not has_sites:
             self.combo_site.addItem("No Profiles")
             self.lbl_url.setText("No profile selected")
+            self.set_inputs_enabled(False)
         else:
+            self.set_inputs_enabled(True)
             self.combo_site.addItems(keys)
             last = app_settings.get("last_profile", "")
             if last and last in keys:
@@ -432,23 +497,220 @@ class DownloaderWidget(QWidget):
                 save_config()
             else: 
                 self.lbl_url.setText("No profile selected")
-    def set_buttons(self, start_en, close_en, prof_en):
-        self.btn_start.setEnabled(start_en)
-        self.btn_profile.setEnabled(prof_en)
+    def set_buttons(self, start_en, _close_en, prof_en):
+        if self.combo_site.currentText() == "No Profiles":
+            self.btn_start.setEnabled(False)
+            self.btn_profile.setEnabled(False)
+        else:
+            self.btn_start.setEnabled(start_en)
+            self.btn_profile.setEnabled(prof_en)
     def start_task(self):
         site = self.combo_site.currentText()
-        if site == "No Profiles": return
+        if not site or site in ["No Profiles", "No profile selected"]:
+            InfoBar.warning(
+                title="Profile Required",
+                content="Please select a valid site profile from the dropdown before starting.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self
+            )
+            return
+
+        with config_lock:
+            profile_data = sites_data.get(site, {})
+            step_paths = profile_data.get("step_paths", {})
+            base_url = profile_data.get("url", "").strip()
+
+        if not base_url:
+            InfoBar.warning(
+                title="URL Required",
+                content="The selected profile has no Base URL. Please configure it in the Profile Manager first.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self
+            )
+            return
+
+        start_txt = self.txt_start.text().strip()
+        url_to_check = base_url.replace("{x}", start_txt if start_txt else "1")
+        if not url_to_check.startswith(("http://", "https://")):
+            url_to_check = "https://" + url_to_check
+
+        import urllib.parse
+        from urllib.error import HTTPError
+        import ssl
+        
+        # Proper URL encoding of non-ascii characters in URL components (e.g. Arabic)
         try:
-            start_ep = int(self.txt_start.text())
-            end_ep = int(self.txt_end.text())
-        except ValueError: return
+            url_parsed = urllib.parse.urlsplit(url_to_check)
+            url_path = urllib.parse.quote(url_parsed.path)
+            url_query = urllib.parse.quote(url_parsed.query)
+            url_to_check = urllib.parse.urlunsplit((
+                url_parsed.scheme,
+                url_parsed.netloc,
+                url_path,
+                url_query,
+                url_parsed.fragment
+            ))
+        except Exception:
+            pass
+        # Perform the connection check
+        connection_ok = False
+        connection_error = ""
+        
+        try:
+            req = urllib.request.Request(
+                url_to_check, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+            )
+            # Tier 1: Try secure standard system SSL/TLS verification first
+            with urllib.request.urlopen(req, timeout=3.0):
+                connection_ok = True
+        except HTTPError:
+            # If server responds with an HTTP status (e.g. 403, 404, 500), it's alive!
+            connection_ok = True
+        except Exception as first_err:
+            first_err_str = str(first_err).lower()
+            # Check if the failure is specifically a certificate validation/handshake issue
+            is_ssl_issue = any(word in first_err_str for word in ["ssl", "cert", "handshake", "verification", "untrusted"])
+            
+            if is_ssl_issue:
+                # Tier 2: Targeted SSL Bypass (only trigger if verified check failed due to TLS validation error)
+                try:
+                    context = ssl._create_unverified_context()
+                    with urllib.request.urlopen(req, timeout=3.0, context=context):
+                        connection_ok = True
+                except HTTPError:
+                    connection_ok = True
+                except Exception as fallback_err:
+                    connection_error = str(fallback_err)
+            else:
+                connection_error = str(first_err)
+            
+        # Fallback to DNS resolution if blocked by Cloudflare (e.g. WinError 10054 / Connection Reset)
+        if not connection_ok:
+            import socket
+            try:
+                parsed = urllib.parse.urlsplit(url_to_check)
+                domain = parsed.netloc.split(':')[0]  # Remove port if present
+                if domain:
+                    # If the domain successfully resolves to an IP, the site is active and user has internet!
+                    socket.gethostbyname(domain)
+                    connection_ok = True
+            except Exception as dns_err:
+                connection_error = f"DNS resolution failed: {dns_err}"
+
+        if not connection_ok:
+            InfoBar.warning(
+                title="Connection Failed",
+                content=f"Could not connect to the profile Base URL. Please check your internet connection or the URL itself.\nError: {connection_error}",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self
+            )
+            return
+        
+        total_steps = 0
+        for _, steps in step_paths.items():
+            if isinstance(steps, list):
+                for step in steps:
+                    if step.get("xpath", "").strip():
+                        total_steps += 1
+                        
+        if total_steps == 0:
+            InfoBar.warning(
+                title="No Automation Steps",
+                content="The selected profile has no automation steps in any path. Please add steps in the Profile Manager first.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self
+            )
+            return
+
+        target_dir = self.txt_dir.text().strip()
+        if not target_dir or not os.path.exists(target_dir):
+            InfoBar.warning(
+                title="Invalid Path",
+                content="Please specify a valid and existing download folder path.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self
+            )
+            return
+
+        start_txt = self.txt_start.text().strip()
+        end_txt = self.txt_end.text().strip()
+        if not start_txt or not end_txt:
+            InfoBar.warning(
+                title="Episodes Required",
+                content="Please fill in both Start and End Episode fields.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self
+            )
+            return
+            
+        try:
+            start_ep = int(start_txt)
+            end_ep = int(end_txt)
+            if start_ep <= 0 or end_ep <= 0:
+                raise ValueError()
+        except ValueError:
+            InfoBar.warning(
+                title="Invalid Episode Range",
+                content="Episodes must be valid positive numbers.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self
+            )
+            return
+
+        if start_ep > end_ep:
+            InfoBar.warning(
+                title="Invalid Episode Range",
+                content="Start Episode cannot be greater than End Episode.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self
+            )
+            return
+
         episodes_list = list(range(start_ep, end_ep + 1))
-        target_dir = app_settings["download_dir"]
         headless = self.chk_headless.isChecked()
         webhook = self.txt_webhook.text().strip()
         selected_sound = app_settings.get("selected_sound", "")
         volume = app_settings.get("volume", 100)
         concurrency = app_settings.get("concurrency", 3)
+
+        with config_lock:
+            app_settings["unfinished_session"] = {
+                "site": site,
+                "episodes": list(episodes_list),
+                "target_dir": target_dir,
+                "headless": headless,
+                "webhook": webhook,
+                "selected_sound": selected_sound,
+                "volume": volume,
+                "concurrency": concurrency
+            }
+            save_config()
+
         signals.update_buttons.emit(False, True, False)
         signals.task_started.emit()
         threading.Thread(target=run_selenium_task, args=(site, episodes_list, target_dir, headless, webhook, selected_sound, volume , concurrency), daemon=True).start()

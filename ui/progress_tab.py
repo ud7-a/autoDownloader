@@ -151,13 +151,7 @@ class ProgressTab(QWidget):
         self.stack.setCurrentIndex(0) 
         self.progress.hide()
         self.lbl_prog.hide()
-        self.progress.setValue(0)
         self.lbl_prog.setText("")
-        stats = QLabel("Initiating...")
-        stats.setStyleSheet("color: #aaaaaa; font-size: 12px;")
-        stats.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        stats.setWordWrap(False)
-        stats.setMinimumWidth(200)
 
     def add_active_card(self, ep_num):
         if self.stack.currentIndex() != 1:
@@ -261,7 +255,7 @@ class ProgressTab(QWidget):
         self.progress.setValue(current)
         self.lbl_prog.setText(f"{current} / {total} Episodes Downloaded")
 
-    def set_buttons(self, start_en, close_en, prof_en):
+    def set_buttons(self, start_en, close_en, _prof_en):
         self.btn_pause.setEnabled(close_en)
         self.btn_cancel.setEnabled(close_en)
         self.btn_resume.setEnabled(True)
@@ -269,7 +263,7 @@ class ProgressTab(QWidget):
             self.btn_resume.hide()
             self.btn_pause.show()
 
-    def show_success(self, results=None):
+    def show_success(self, _results=None):
         self.stack.setCurrentIndex(2)
         self.btn_pause.setEnabled(False)
         self.btn_cancel.setEnabled(False)
@@ -288,7 +282,7 @@ class ProgressTab(QWidget):
             try: p.kill() 
             except: pass
             
-        subprocess.run("taskkill /F /IM aria2c.exe /T", shell=True, creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["taskkill", "/F", "/IM", "aria2c.exe", "/T"], creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def resume_task(self):
         self.set_status("Status: ▶ Resuming downloads...", "#2ecc71")
@@ -305,12 +299,18 @@ class ProgressTab(QWidget):
         pause_event.clear()
         finish_event.set()
         
+        # Clear unfinished session recovery on explicit user cancellation
+        from utils.config import app_settings, save_config, config_lock
+        with config_lock:
+            app_settings.pop("unfinished_session", None)
+            save_config()
+        
         global active_aria2_processes
         for p in active_aria2_processes:
             try: p.kill()
             except: pass
             
-        subprocess.run("taskkill /F /IM aria2c.exe /T", shell=True, creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["taskkill", "/F", "/IM", "aria2c.exe", "/T"], creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         from PyQt6.QtCore import QTimer
         
