@@ -1,7 +1,55 @@
 import os
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor
+from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QPainterPath
 from utils.config import APP_DIR
+
+
+def rounded_pixmap(path, w, h, radius=6):
+    """Load an image, center-crop to w×h, and clip to rounded corners.
+    Returns a QPixmap, or None if the image can't be loaded."""
+    src = QPixmap(path)
+    if src.isNull():
+        return None
+    src = src.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                     Qt.TransformationMode.SmoothTransformation)
+    x = max(0, (src.width() - w) // 2)
+    y = max(0, (src.height() - h) // 2)
+    src = src.copy(x, y, w, h)
+    out = QPixmap(w, h)
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    clip = QPainterPath()
+    clip.addRoundedRect(QRectF(0, 0, w, h), radius, radius)
+    p.setClipPath(clip)
+    p.drawPixmap(0, 0, src)
+    p.end()
+    return out
+
+
+def apply_danger_style(btn):
+    """Force the red destructive theme on a qfluentwidgets button.
+
+    qfluentwidgets buttons carry their own stylesheet that overrides the app-wide
+    #Danger QSS by objectName, so a plain setObjectName('Danger') stays grey.
+    setCustomStyleSheet applies a high-priority per-widget override that wins.
+    """
+    from qfluentwidgets import setCustomStyleSheet
+    cls = type(btn).__name__  # e.g. "PushButton" / "ToolButton"
+    qss = f"""
+    {cls} {{
+        background-color: #ff4d4d; color: #ffffff;
+        border: 1px solid #ff4d4d; border-radius: 6px; font-weight: bold;
+    }}
+    {cls}:hover {{ background-color: #ff6666; border: 1px solid #ff6666; color: #ffffff; }}
+    {cls}:pressed {{ background-color: #d93838; border: 1px solid #d93838; }}
+    {cls}:disabled {{
+        background-color: rgba(255, 77, 77, 0.2); color: rgba(255, 255, 255, 0.3);
+        border: 1px solid rgba(255, 77, 77, 0.2);
+    }}
+    """
+    setCustomStyleSheet(btn, qss, qss)
+
 
 def generate_ui_icons():
     os.makedirs(APP_DIR, exist_ok=True)

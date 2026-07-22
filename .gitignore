@@ -3,6 +3,10 @@ build/
 dist/
 *.spec
 
+# Local dev/release tooling -- kept on the maintainer's machine, not published
+exeCompile.py
+publish.py
+
 # Package Deliverables (Uploaded directly to Releases)
 *.zip
 *.exe
@@ -23,3 +27,22 @@ sites_config.json
 autoDownload.py
 SeleniumProfile/
 *.log
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Virtual environments & tooling caches
+venv/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

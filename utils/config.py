@@ -6,11 +6,10 @@ import threading
 APP_DIR = r"C:\Auto Episodes Downloader"
 CONFIG_FILE = os.path.join(APP_DIR, "sites_config.json")
 PROFILE_DIR = os.path.join(APP_DIR, "SeleniumProfile")
-UBLOCK_CRX_PATH = os.path.join(APP_DIR, "ublock_lite.crx")
 DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
-APP_VERSION = "4.1.1"
+APP_VERSION = "4.2.0"
 
 # --- GLOBAL LOCKS ---
 config_lock = threading.RLock()
@@ -26,7 +25,6 @@ app_settings = {
     "custom_sounds": [],    
     "selected_sound": "",   
     "volume": 100,
-    "transparency": True,
     "window_width": 1100,
     "window_height": 800,
     "window_x": -1,
@@ -34,7 +32,10 @@ app_settings = {
     "window_maximized": False,
     "unfinished_session": None,
     "captcha_provider": "Disabled",
-    "captcha_api_key": ""
+    "captcha_api_key": "",
+    # Followed anime for the new-episode watcher. Each entry:
+    # {"title", "url", "domain", "seen_max", "latest_template", "latest_max", "checked"}
+    "watchlist": [],
 }
 
 def encrypt_webhook(url):
@@ -59,8 +60,7 @@ def decrypt_webhook(obfuscated):
         return obfuscated
 
 def load_config():
-    global sites_data, app_settings
-    if not os.path.exists(APP_DIR): 
+    if not os.path.exists(APP_DIR):
         os.makedirs(APP_DIR, exist_ok=True)
         
     if os.path.exists(CONFIG_FILE):
@@ -98,24 +98,54 @@ def load_config():
     else: 
         save_config()
 
-def save_config():
-    os.makedirs(APP_DIR, exist_ok=True)
+# --- Watchlist helpers (followed anime for the new-episode watcher) ---
+def get_watchlist():
     with config_lock:
-        # Create a safe deep copy to obfuscate webhook on-disk only
-        settings_to_save = dict(app_settings)
-        if settings_to_save.get("discord_webhook"):
-            settings_to_save["discord_webhook"] = encrypt_webhook(settings_to_save["discord_webhook"])
-            
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"settings": settings_to_save, "sites": sites_data}, f, indent=4, ensure_ascii=False)
+        return list(app_settings.get("watchlist", []))
 
-def force_windows_transparency():
+def find_watch(url):
+    with config_lock:
+        for w in app_settings.get("watchlist", []):
+            if w.get("url") == url:
+                return w
+    return None
+
+def add_watch(entry):
+    """Add a followed anime (keyed by url). Returns False if already followed."""
+    with config_lock:
+        wl = app_settings.setdefault("watchlist", [])
+        if any(w.get("url") == entry.get("url") for w in wl):
+            return False
+        wl.append(entry)
+    save_config()
+    return True
+
+def remove_watch(url):
+    with config_lock:
+        wl = app_settings.get("watchlist", [])
+        app_settings["watchlist"] = [w for w in wl if w.get("url") != url]
+    save_config()
+
+def update_watch(url, **fields):
+    with config_lock:
+        for w in app_settings.get("watchlist", []):
+            if w.get("url") == url:
+                w.update(fields)
+                break
+    save_config()
+
+
+def save_config():
     try:
-        import winreg
-        registry_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", 0, winreg.KEY_SET_VALUE | winreg.KEY_READ)
-        value, _ = winreg.QueryValueEx(registry_key, "EnableTransparency")
-        if value == 0:
-            winreg.SetValueEx(registry_key, "EnableTransparency", 0, winreg.REG_DWORD, 1)
-        winreg.CloseKey(registry_key)
-    except Exception:
-        pass
+        os.makedirs(APP_DIR, exist_ok=True)
+        with config_lock:
+            # Create a safe deep copy to obfuscate webhook on-disk only
+            settings_to_save = dict(app_settings)
+            if settings_to_save.get("discord_webhook"):
+                settings_to_save["discord_webhook"] = encrypt_webhook(settings_to_save["discord_webhook"])
+
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump({"settings": settings_to_save, "sites": sites_data}, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        # A disk/permission failure must never crash a UI slot that called save.
+        print(f"Error saving config: {e}")

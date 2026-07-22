@@ -1,7 +1,7 @@
 import sqlite3
 import os
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHeaderView, QTableWidgetItem
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QHeaderView, QTableWidgetItem
 from PyQt6.QtGui import QColor
 
 # THE UPGRADE: Fluent Components
@@ -10,8 +10,11 @@ from qfluentwidgets import TableWidget, PushButton, SubtitleLabel, MessageBox, F
 from utils.config import DB_FILE
 from utils.database import db_lock
 from core.signals import signals
+from ui.styles import apply_danger_style
 
 class HistoryWidget(QWidget):
+    redownload_signal = pyqtSignal(str, str)   # (profile, episodes_str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -42,6 +45,7 @@ class HistoryWidget(QWidget):
         self.btn_clear_history = PushButton(FIF.DELETE, "Clear History")
         self.btn_clear_history.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear_history.setObjectName("Danger")
+        apply_danger_style(self.btn_clear_history)
         self.btn_clear_history.setMinimumHeight(40)
         self.btn_clear_history.clicked.connect(self.clear_history)
         
@@ -105,12 +109,23 @@ class HistoryWidget(QWidget):
                             
                         self.table.setItem(row_idx, col_idx, item)
                         
-                    # Action button
-                    play_btn = PushButton(FIF.PLAY, "Start Watching")
+                    # Action cell: Watch + Re-download.
+                    cell = QWidget()
+                    cl = QHBoxLayout(cell)
+                    cl.setContentsMargins(4, 2, 4, 2)
+                    cl.setSpacing(6)
+                    play_btn = PushButton(FIF.PLAY, "Watch")
                     play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
                     play_btn.setFixedHeight(28)
                     play_btn.clicked.connect(lambda checked, r=row_idx: self.play_download(r))
-                    self.table.setCellWidget(row_idx, 5, play_btn)
+                    re_btn = PushButton(FIF.SYNC, "Re-download")
+                    re_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    re_btn.setFixedHeight(28)
+                    prof, eps = str(row_data[1]), str(row_data[2])
+                    re_btn.clicked.connect(lambda checked, p=prof, e=eps: self.redownload_signal.emit(p, e))
+                    cl.addWidget(play_btn)
+                    cl.addWidget(re_btn)
+                    self.table.setCellWidget(row_idx, 5, cell)
         except Exception:
             pass
         finally:

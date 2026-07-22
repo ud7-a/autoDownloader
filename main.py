@@ -3,9 +3,8 @@ import os
 import time
 import threading
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt, qInstallMessageHandler, QtMsgType
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
-from utils.config import APP_VERSION
+from PyQt6.QtCore import qInstallMessageHandler, QtMsgType
+from PyQt6.QtGui import QFont
 
 def suppress_qt_warnings(msg_type, _context, message):
     # Filter out common annoying style sheet warnings from QFluentWidgets / Qt
@@ -35,49 +34,6 @@ def suppress_qt_warnings(msg_type, _context, message):
 # Silently suppress visual parsing warnings to keep the console clean
 qInstallMessageHandler(suppress_qt_warnings)
 
-def create_splash_pixmap():
-    # Make a clean dark mode splash screen matching the Fluent Dark theme
-    pixmap = QPixmap(580, 320)
-    pixmap.fill(Qt.GlobalColor.transparent) # Transparent background for rounded corners
-    
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    
-    # Clip path for rounded corners
-    from PyQt6.QtGui import QPainterPath
-    path = QPainterPath()
-    path.addRoundedRect(0, 0, 580, 320, 12, 12)
-    painter.setClipPath(path)
-    
-    # Fill main background
-    painter.fillPath(path, QColor("#1e1e1e"))
-    
-    # Draw custom premium accent line at the top
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor("#4cc2ff")) # Custom blue accent color
-    painter.drawRect(0, 0, 580, 6) # Thin accent line
-    
-    # Draw app title
-    font_title = QFont("Segoe UI Variable Display", 26, QFont.Weight.Bold)
-    painter.setFont(font_title)
-    painter.setPen(QColor("#ffffff"))
-    painter.drawText(40, 100, "Auto Episodes Downloader")
-    
-    # Draw subtitle/version info
-    font_sub = QFont("Segoe UI Variable Text", 12, QFont.Weight.Medium)
-    painter.setFont(font_sub)
-    painter.setPen(QColor("#aaaaaa"))
-    painter.drawText(40, 135, f"Version {APP_VERSION}  •  High-Speed Downloader")
-    
-    # Draw loading message
-    font_loading = QFont("Segoe UI Variable Small", 10)
-    painter.setFont(font_loading)
-    painter.setPen(QColor("#4cc2ff"))
-    painter.drawText(40, 260, "Loading system modules...")
-    
-    painter.end()
-    return pixmap
-
 def cleanup_old_exe():
     if getattr(sys, 'frozen', False):
         old_exe_path = sys.executable + ".old"
@@ -93,8 +49,8 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     
     # "Fusion" instantly removes ugly grey borders from dropdowns
-    app.setStyle("Fusion") 
-    
+    app.setStyle("Fusion")
+
     # Run exe cleanup in the background
     threading.Thread(target=cleanup_old_exe, daemon=True).start()
     
@@ -131,7 +87,7 @@ if __name__ == "__main__":
     from ui.app_window import AppWindow
     window = AppWindow()
     window.show()
-    
+
     # Check for updates in the background ONLY after the window is fully initialized and listening!
     from core.updater import check_for_updates_silently
     threading.Thread(target=check_for_updates_silently, daemon=True).start()

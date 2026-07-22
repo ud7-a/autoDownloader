@@ -1,32 +1,255 @@
 import os
-import ctypes
 import threading
-import subprocess
 import sys
-import urllib.request
 from urllib.parse import unquote
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QIntValidator
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog, QDialog)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog)
 
 # THE UPGRADE: We are using Fluent Widgets for everything!
-from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, CheckBox, 
-                            ComboBox, Slider, SmoothScrollArea, SpinBox, SwitchButton, FluentIcon as FIF, ToolButton, InfoBar, InfoBarPosition)
+from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, CheckBox,
+                            ComboBox, Slider, SmoothScrollArea, SpinBox, FluentIcon as FIF, ToolButton,
+                            InfoBar, InfoBarPosition)
 
 from utils.config import app_settings, sites_data, save_config, config_lock
 from core.signals import signals
 from core.selenium_engine import run_selenium_task, launch_visible_browser
+from ui.styles import apply_danger_style
 
 
+# Sentinel stored in selected_sound to mean "no finish sound". Distinct from ""
+# (unset), which falls back to the built-in default.
+SOUND_NONE = "__none__"
 
-class UpdateDialog(QDialog):
-    # (Keep your UpdateDialog exactly the same for now)
-    pass 
 
-class DownloaderWidget(QWidget):
+def builtin_sound_path():
+    """Absolute path to the app's bundled default finish sound (frozen or source)."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return os.path.join(base, "assets", "finishingDownloadSound.wav")
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "assets", "finishingDownloadSound.wav")
+
+
+def compact_episode_spec(nums):
+    """Collapse a list of episode numbers into a compact spec string ('1-5, 8-12')."""
+    nums = sorted(set(nums))
+    out, i = [], 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        out.append(str(nums[i]) if i == j else f"{nums[i]}-{nums[j]}")
+        i = j + 1
+    return ", ".join(out)
+
+
+def spec_to_ranges(text):
+    """Parse a spec string ('1-5, 8-12', '5') into a list of (from, to) tuples.
+    Tolerant -- unparseable tokens are skipped. Used to seed the range picker."""
+    ranges = []
+    for tok in (text or "").split(","):
+        tok = tok.strip().replace("–", "-").replace("—", "-")   # normalize en/em dashes
+        if not tok:
+            continue
+        if "-" in tok:
+            parts = [p.strip() for p in tok.split("-")]
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                ranges.append((int(parts[0]), int(parts[1])))
+        elif tok.isdigit():
+            ranges.append((int(tok), int(tok)))
+    return ranges
+
+
+class EpisodeRangePicker(QWidget):
+    """Pick episodes as one or more inclusive From/To ranges.
+
+    One range is always shown; 'Add another range' reveals more so gaps are
+    possible (e.g. 1-5 and 8-12). No syntax for the user to get wrong -- the
+    number boxes can't hold letters or negatives. Emits `changed` on any edit,
+    and serializes to/from the compact spec string used elsewhere.
+    """
+    changed = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._rows = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+
+        self._rows_box = QVBoxLayout()
+        self._rows_box.setSpacing(6)
+        root.addLayout(self._rows_box)
+
+        self.btn_add = PushButton(FIF.ADD, "Add another range")
+        self.btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add.clicked.connect(self._on_add_clicked)
+        add_row = QHBoxLayout()
+        add_row.addWidget(self.btn_add)
+        add_row.addStretch()
+        root.addLayout(add_row)
+
+        self._add_row()   # always start with one range
+
+    def _on_add_clicked(self):
+        self._add_row()
+        self.changed.emit()
+
+    def _add_row(self, a=1, b=1):
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+
+        lbl_from = QLabel("From")
+        lbl_from.setStyleSheet("background: transparent;")
+        sp_from = SpinBox()
+        sp_to = SpinBox()
+        for sp, val in ((sp_from, a), (sp_to, b)):
+            sp.setRange(0, 99999)
+            sp.setValue(val)
+            sp.setFixedWidth(130)   # wide enough that the up/down arrows never cover the digits
+            sp.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            sp.wheelEvent = lambda e: e.ignore()   # don't change value on scroll
+        lbl_to = QLabel("to")
+        lbl_to.setStyleSheet("background: transparent;")
+        sp_from.valueChanged.connect(self.changed.emit)
+        sp_to.valueChanged.connect(self.changed.emit)
+
+        btn_rm = ToolButton(FIF.DELETE, self)
+        btn_rm.setObjectName("Danger")
+        apply_danger_style(btn_rm)
+        btn_rm.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_rm.setFixedSize(40, 40)
+        btn_rm.setToolTip("Remove this range")
+
+        h.addWidget(lbl_from)
+        h.addWidget(sp_from)
+        h.addWidget(lbl_to)
+        h.addWidget(sp_to)
+        h.addWidget(btn_rm)
+        h.addStretch()
+
+        entry = {"widget": row, "from": sp_from, "to": sp_to, "rm": btn_rm}
+        btn_rm.clicked.connect(lambda: self._remove_row(entry))
+        self._rows.append(entry)
+        self._rows_box.addWidget(row)
+        self._update_remove_buttons()
+        return entry
+
+    def _remove_row(self, entry):
+        if len(self._rows) <= 1:
+            return
+        self._rows.remove(entry)
+        entry["widget"].setParent(None)
+        entry["widget"].deleteLater()
+        self._update_remove_buttons()
+        self.changed.emit()
+
+    def _update_remove_buttons(self):
+        # No point removing the only range -- hide its ✕.
+        only = len(self._rows) <= 1
+        for e in self._rows:
+            e["rm"].setVisible(not only)
+
+    def ranges(self):
+        return [(e["from"].value(), e["to"].value()) for e in self._rows]
+
+    def episodes(self):
+        """Return (sorted_unique_episode_list, None) or ([], error_message)."""
+        eps = set()
+        for a, b in self.ranges():
+            if a > b:
+                return [], f"Range {a}–{b} is backwards — 'From' must be ≤ 'To'."
+            eps.update(range(a, b + 1))
+        if not eps:
+            return [], "Pick at least one episode."
+        return sorted(eps), None
+
+    def spec(self):
+        """Compact spec string for saving/history; falls back to raw ranges if invalid."""
+        eps, err = self.episodes()
+        if not err:
+            return compact_episode_spec(eps)
+        return ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in self.ranges())
+
+    def set_spec(self, text):
+        ranges = spec_to_ranges(text) or [(1, 1)]
+        for e in list(self._rows):
+            e["widget"].setParent(None)
+            e["widget"].deleteLater()
+        self._rows.clear()
+        for a, b in ranges:
+            self._add_row(a, b)
+        self._update_remove_buttons()
+
+
+class ConnectionCheckThread(QThread):
+    """Check a profile's Base URL is reachable, off the UI thread -- so clicking
+    Start never freezes the window while the network connection times out."""
+    result = pyqtSignal(bool, str)   # (ok, error_message)
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        import urllib.request, urllib.parse, ssl, socket
+        from urllib.error import HTTPError
+        ok, err = False, ""
+        req = urllib.request.Request(
+            self.url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        )
+        try:
+            # Tier 1: standard TLS-verified reach.
+            with urllib.request.urlopen(req, timeout=5.0):
+                ok = True
+        except HTTPError:
+            ok = True   # any HTTP status means the server is alive
+        except Exception as first_err:
+            s = str(first_err).lower()
+            if any(w in s for w in ["ssl", "cert", "handshake", "verification", "untrusted"]):
+                # Tier 2: only if it failed on TLS validation, retry unverified.
+                try:
+                    ctx = ssl._create_unverified_context()
+                    with urllib.request.urlopen(req, timeout=5.0, context=ctx):
+                        ok = True
+                except HTTPError:
+                    ok = True
+                except Exception as fb:
+                    err = str(fb)
+            else:
+                err = str(first_err)
+        # Tier 3: DNS resolves -> site is up even if Cloudflare reset the socket.
+        if not ok:
+            try:
+                host = urllib.parse.urlsplit(self.url).netloc.split(':')[0]
+                if host:
+                    socket.gethostbyname(host)
+                    ok = True
+            except Exception as dns_err:
+                err = f"DNS resolution failed: {dns_err}"
+        self.result.emit(ok, err)
+
+
+class DownloaderWidget(QWidget):
+    goto_profiles_signal = pyqtSignal()   # asks the main window to open Profile Manager
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self._episodes_valid = True
+        self._checking = False   # True while the async connection check is in flight
+
+        # Debounced config saver -- coalesces rapid setting edits into one disk write.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(save_config)
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -69,10 +292,20 @@ class DownloaderWidget(QWidget):
 
         main_layout.addWidget(QLabel("Active Website Profile:", styleSheet="font-weight: bold; margin-top: 5px;"))
         
-        # THE FIX: Native Fluent ComboBox!
+        # Profile dropdown + a "Create Profile" button shown only when there are none.
+        site_row = QHBoxLayout()
+        site_row.setSpacing(8)
         self.combo_site = ComboBox()
         self.combo_site.currentTextChanged.connect(self.on_site_select)
-        main_layout.addWidget(self.combo_site)
+        site_row.addWidget(self.combo_site, 1)
+
+        self.btn_goto_profiles = PushButton(FIF.ADD, "Create Profile")
+        self.btn_goto_profiles.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_goto_profiles.setToolTip("Open Profile Manager to add a website profile")
+        self.btn_goto_profiles.clicked.connect(self.goto_profiles_signal.emit)
+        self.btn_goto_profiles.hide()
+        site_row.addWidget(self.btn_goto_profiles)
+        main_layout.addLayout(site_row)
         
         self.lbl_url = QLabel("No profile selected")
         self.lbl_url.setStyleSheet("color: #888888; font-size: 12px;")
@@ -85,23 +318,6 @@ class DownloaderWidget(QWidget):
         self.chk_headless.toggled.connect(self.save_settings)
         main_layout.addWidget(self.chk_headless)
 
-        # Transparency Toggle & Restart Button
-        transparency_layout = QHBoxLayout()
-        self.chk_transparency = SwitchButton("Enable Transparency Effects (Mica/Acrylic)")
-        self.chk_transparency.setOnText("Transparency On")
-        self.chk_transparency.setOffText("Transparency Off")
-        self.chk_transparency.setChecked(app_settings.get("transparency", True))
-        self.chk_transparency.checkedChanged.connect(self.toggle_transparency)
-        
-        self.btn_restart_app = PushButton(FIF.UPDATE, "Restart to Apply")
-        self.btn_restart_app.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_restart_app.clicked.connect(self.restart_app)
-        self.btn_restart_app.hide()
-        
-        transparency_layout.addWidget(self.chk_transparency)
-        transparency_layout.addWidget(self.btn_restart_app)
-        transparency_layout.addStretch(1)
-        main_layout.addLayout(transparency_layout)
 
         main_layout.addWidget(QLabel("Concurrent Downloads (Max Active Episode Downloading):", styleSheet="font-weight: bold; margin-top: 5px; background: transparent;"))
         self.spin_concurrency = SpinBox()
@@ -134,6 +350,7 @@ class DownloaderWidget(QWidget):
         
         self.btn_delete_sound = ToolButton(FIF.DELETE, self)
         self.btn_delete_sound.setObjectName("Danger")
+        apply_danger_style(self.btn_delete_sound)
         self.btn_delete_sound.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete_sound.setFixedSize(40, 40)
         self.btn_delete_sound.clicked.connect(self.delete_custom_sound)
@@ -180,27 +397,18 @@ class DownloaderWidget(QWidget):
         self.txt_webhook.textChanged.connect(self.save_settings)
         main_layout.addWidget(self.txt_webhook)
 
-        ep_layout = QHBoxLayout()
-        st_layout = QVBoxLayout()
-        st_layout.addWidget(QLabel("Start Episode", styleSheet="font-weight: bold;"))
-        self.txt_start = LineEdit()
-        self.txt_start.setText("1")
-        self.txt_start.setValidator(QIntValidator(1, 99999))
-        self.txt_start.textEdited.connect(self.save_settings)
-        st_layout.addWidget(self.txt_start)
-        
-        en_layout = QVBoxLayout()
-        en_layout.addWidget(QLabel("End Episode", styleSheet="font-weight: bold;"))
-        self.txt_end = LineEdit()
-        self.txt_end.setText("1")
-        self.txt_end.setValidator(QIntValidator(1, 99999))
-        self.txt_end.textEdited.connect(self.save_settings)
-        en_layout.addWidget(self.txt_end)
-        
-        ep_layout.addLayout(st_layout)
-        ep_layout.addLayout(en_layout)
-        main_layout.addLayout(ep_layout)
-        
+        main_layout.addWidget(QLabel("Episodes", styleSheet="font-weight: bold; margin-top: 5px;"))
+        self.ep_picker = EpisodeRangePicker()
+        self.ep_picker.changed.connect(self.save_settings)
+        self.ep_picker.changed.connect(self._update_episode_feedback)
+        main_layout.addWidget(self.ep_picker)
+
+        # Live total: friendly count + normalized form, red hint if a range is invalid.
+        self.lbl_ep_feedback = QLabel("")
+        self.lbl_ep_feedback.setWordWrap(True)
+        self.lbl_ep_feedback.setStyleSheet("font-size: 12px; background: transparent;")
+        main_layout.addWidget(self.lbl_ep_feedback)
+
         main_layout.addStretch()
 
         # Fluent Primary Button (Automatically uses accent color!)
@@ -215,6 +423,7 @@ class DownloaderWidget(QWidget):
 
         signals.update_buttons.connect(self.set_buttons)
         self.refresh_dropdown()
+        self._update_episode_feedback()   # populate the live preview for the initial value
         QTimer.singleShot(1000, self.check_and_prompt_resume)
 
     def check_and_prompt_resume(self):
@@ -266,13 +475,10 @@ class DownloaderWidget(QWidget):
     # I have omitted them here to save space, but DO NOT delete your functions!
 
     def on_sound_change(self, text):
-        if text and text != "No sounds added...":
-            sounds = app_settings.get("custom_sounds", [])
-            for s in sounds:
-                if os.path.basename(s) == text:
-                    app_settings["selected_sound"] = s
-                    save_config()
-                    break
+        data = self.combo_sound.currentData()   # file path, or SOUND_NONE, for None
+        app_settings["selected_sound"] = data if data else ""
+        save_config()
+        self._update_sound_controls()
 
     def browse_custom_sound(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Audio File", "", "Audio Files (*.mp3 *.wav *.ogg)")
@@ -289,15 +495,17 @@ class DownloaderWidget(QWidget):
     def delete_custom_sound(self):
         selected = app_settings.get("selected_sound", "")
         sounds = app_settings.get("custom_sounds", [])
-        if selected in sounds:
-            sounds.remove(selected)
-            app_settings["custom_sounds"] = sounds
-            if sounds:
-                app_settings["selected_sound"] = sounds[0]
-            else:
-                app_settings["selected_sound"] = ""
-            save_config()
-            self.refresh_sound_dropdown()
+        if selected not in sounds:
+            # The built-in default can't be deleted.
+            InfoBar.info("Built-in Sound", "The default sound can't be removed.",
+                         orient=Qt.Orientation.Horizontal, isClosable=True,
+                         position=InfoBarPosition.TOP, duration=3000, parent=self)
+            return
+        sounds.remove(selected)
+        app_settings["custom_sounds"] = sounds
+        app_settings["selected_sound"] = sounds[0] if sounds else builtin_sound_path()
+        save_config()
+        self.refresh_sound_dropdown()
 
     def preview_sound(self):
         selected = app_settings.get("selected_sound", "")
@@ -309,10 +517,9 @@ class DownloaderWidget(QWidget):
                     mci_vol = int(vol * 10)
                     mci_path = selected.replace("\\", "/")
                     ctypes.windll.winmm.mciSendStringW('close custom_audio', None, 0, None)
-                    if mci_path.lower().endswith(".mp3"):
-                        ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" type mpegvideo alias custom_audio', None, 0, None)
-                    else:
-                        ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" alias custom_audio', None, 0, None)
+                    # Always open via mpegvideo: the waveaudio device rejects
+                    # "setaudio volume" (so the slider had no effect on .wav files).
+                    ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" type mpegvideo alias custom_audio', None, 0, None)
                     ctypes.windll.winmm.mciSendStringW(f'setaudio custom_audio volume to {mci_vol}', None, 0, None)
                     ctypes.windll.winmm.mciSendStringW('play custom_audio', None, 0, None)
                 except Exception:
@@ -338,71 +545,6 @@ class DownloaderWidget(QWidget):
         if value == 0: self.btn_mute.setIcon(FIF.MUTE)
         else: self.btn_mute.setIcon(FIF.VOLUME)
         self.save_settings()
-    def restart_app(self):
-        import os
-        import sys
-        import subprocess
-        
-        # Sanitizing environment: remove all PyInstaller variables and references to the old _MEIPASS folder.
-        # This prevents the restarted app from trying to load DLLs/assets from the old, deleting folder.
-        env = os.environ.copy()
-        
-        # Explicitly remove known PyInstaller variables and all _PYI_ bootloader variables
-        # so the new process knows it is a fresh parent bootloader run.
-        for key in ["_MEIPASS", "_MEIPASS2", "PYTHONPATH", "PYTHONHOME"]:
-            env.pop(key, None)
-            
-        for key in list(env.keys()):
-            if key.startswith("_PYI_"):
-                env.pop(key, None)
-            
-        # Dynamically scan and remove/clean any variable containing the old _MEIPASS directory path
-        if hasattr(sys, '_MEIPASS'):
-            old_mei = os.path.abspath(sys._MEIPASS).lower()
-            keys_to_remove = []
-            for k, v in list(env.items()):
-                val_lower = os.path.abspath(v).lower() if os.path.isabs(v) else v.lower()
-                if old_mei in val_lower:
-                    if k.upper() == "PATH":
-                        # For PATH, we just filter out the old _MEIPASS segment instead of deleting the whole PATH
-                        parts = v.split(os.pathsep)
-                        cleaned_parts = [p for p in parts if old_mei not in os.path.abspath(p).lower()]
-                        env[k] = os.pathsep.join(cleaned_parts)
-                    else:
-                        keys_to_remove.append(k)
-                        
-            for k in keys_to_remove:
-                env.pop(k, None)
-                
-        # Determine a safe working directory (the folder containing our executable)
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        
-        # Determine correct restart arguments
-        if hasattr(sys, 'frozen'):
-            args = [sys.executable] + sys.argv[1:]
-        else:
-            args = [sys.executable] + sys.argv
-            
-        # Spawn the new instance completely detached and isolated
-        subprocess.Popen(
-            args, 
-            env=env, 
-            cwd=exe_dir,
-            close_fds=True,
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-        
-        from PyQt6.QtWidgets import QApplication
-        QApplication.quit()
-
-    def toggle_transparency(self, is_checked):
-        app_settings["transparency"] = is_checked
-        save_config()
-        if is_checked:
-            from utils.config import force_windows_transparency
-            force_windows_transparency()
-        self.btn_restart_app.show()
-
     def save_settings(self):
         app_settings["headless"] = self.chk_headless.isChecked()
 
@@ -417,11 +559,11 @@ class DownloaderWidget(QWidget):
 
         with config_lock:
             if site and site != "No Profiles" and site in sites_data:
-                if hasattr(self, 'txt_start'): 
-                    sites_data[site]["last_start"] = self.txt_start.text().strip()
-                if hasattr(self, 'txt_end'): 
-                    sites_data[site]["last_end"] = self.txt_end.text().strip()
-        save_config()
+                if hasattr(self, 'ep_picker'):
+                    sites_data[site]["last_episodes"] = self.ep_picker.spec()
+        # Debounce the disk write: rapid edits (e.g. holding a spinbox arrow) update
+        # memory instantly but coalesce into a single save ~400ms after the last change.
+        self._save_timer.start(400)
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", app_settings["download_dir"])
         if folder:
@@ -431,33 +573,59 @@ class DownloaderWidget(QWidget):
     def refresh_sound_dropdown(self):
         self.combo_sound.blockSignals(True)
         self.combo_sound.clear()
+        builtin = builtin_sound_path()
+        self.combo_sound.addItem("🔕 None", userData=SOUND_NONE)
+        self.combo_sound.addItem("🔔 Default (Built-in)", userData=builtin)
         sounds = app_settings.get("custom_sounds", [])
-        if not sounds:
-            self.combo_sound.addItem("No sounds added...")
-            if hasattr(self, 'btn_play_sound'): self.btn_play_sound.hide()
-            if hasattr(self, 'btn_delete_sound'): self.btn_delete_sound.hide()
-            if hasattr(self, 'volume_container'): self.volume_container.hide()
+        for s in sounds:
+            self.combo_sound.addItem(os.path.basename(s), userData=s)
+
+        all_paths = [SOUND_NONE, builtin] + sounds
+        selected = app_settings.get("selected_sound", "")
+        if selected in all_paths:
+            self.combo_sound.setCurrentIndex(all_paths.index(selected))
         else:
-            for s in sounds:
-                self.combo_sound.addItem(os.path.basename(s), userData=s)
-            selected = app_settings.get("selected_sound", "")
-            if selected in sounds:
-                self.combo_sound.setCurrentIndex(sounds.index(selected))
-            else:
-                self.combo_sound.setCurrentIndex(0)
-                app_settings["selected_sound"] = sounds[0] if sounds else ""
-            if hasattr(self, 'btn_play_sound'): self.btn_play_sound.show()
-            if hasattr(self, 'btn_delete_sound'): self.btn_delete_sound.show()
-            if hasattr(self, 'volume_container'): self.volume_container.show()
+            self.combo_sound.setCurrentIndex(1)   # unset -> default to built-in
+            app_settings["selected_sound"] = builtin
+
+        self._update_sound_controls()
         self.combo_sound.blockSignals(False)
+
+    def _update_sound_controls(self):
+        # Hide preview/volume when "None" is selected -- there is nothing to play.
+        is_none = app_settings.get("selected_sound", "") == SOUND_NONE
+        if hasattr(self, 'btn_play_sound'): self.btn_play_sound.setVisible(not is_none)
+        if hasattr(self, 'btn_delete_sound'): self.btn_delete_sound.setVisible(not is_none)
+        if hasattr(self, 'volume_container'): self.volume_container.setVisible(not is_none)
+    def _update_episode_feedback(self):
+        """Live total under the picker: friendly count + normalized spec when valid,
+        or a red hint when a range is backwards. Also gates the Start button while idle."""
+        eps, err = self.ep_picker.episodes()
+        if err:
+            self._episodes_valid = False
+            self.lbl_ep_feedback.setText(f"⚠  {err}")
+            self.lbl_ep_feedback.setStyleSheet("color:#ff6b6b; font-size:12px; background:transparent;")
+        else:
+            self._episodes_valid = True
+            noun = "episode" if len(eps) == 1 else "episodes"
+            self.lbl_ep_feedback.setText(f"✓  {len(eps)} {noun}   →   {compact_episode_spec(eps)}")
+            self.lbl_ep_feedback.setStyleSheet("color:#51cf66; font-size:12px; background:transparent;")
+        # Only touch the button while idle -- during a task the picker is disabled,
+        # and during a connection check we must not re-enable Start under the checker.
+        if self.ep_picker.isEnabled() and not self._checking:
+            site = self.combo_site.currentText()
+            valid_site = site not in ("No Profiles", "No profile selected", "")
+            self.btn_start.setEnabled(self._episodes_valid and valid_site)
+
     def set_inputs_enabled(self, enabled):
         self.btn_start.setEnabled(enabled)
-        self.txt_start.setEnabled(enabled)
-        self.txt_end.setEnabled(enabled)
+        self.ep_picker.setEnabled(enabled)
         self.spin_concurrency.setEnabled(enabled)
         self.txt_webhook.setEnabled(enabled)
         self.chk_headless.setEnabled(enabled)
         self.btn_profile.setEnabled(enabled)
+        if enabled:
+            self._update_episode_feedback()   # re-apply the invalid-spec Start gate
 
     def refresh_dropdown(self):
         self.combo_site.blockSignals(True)
@@ -469,8 +637,10 @@ class DownloaderWidget(QWidget):
             self.combo_site.addItem("No Profiles")
             self.lbl_url.setText("No profile selected")
             self.set_inputs_enabled(False)
+            self.btn_goto_profiles.show()
         else:
             self.set_inputs_enabled(True)
+            self.btn_goto_profiles.hide()
             self.combo_site.addItems(keys)
             last = app_settings.get("last_profile", "")
             if last and last in keys:
@@ -484,16 +654,19 @@ class DownloaderWidget(QWidget):
             if text in sites_data: 
                 self.lbl_url.setText(unquote(sites_data[text].get("url", "")))
                 app_settings["last_profile"] = text
-                prof_start = sites_data[text].get("last_start", "1")
-                prof_end = sites_data[text].get("last_end", "1")
-                if hasattr(self, 'txt_start'):
-                    self.txt_start.blockSignals(True)
-                    self.txt_start.setText(prof_start)
-                    self.txt_start.blockSignals(False)
-                if hasattr(self, 'txt_end'):
-                    self.txt_end.blockSignals(True)
-                    self.txt_end.setText(prof_end)
-                    self.txt_end.blockSignals(False)
+                spec = sites_data[text].get("last_episodes")
+                if not spec:
+                    # Migrate old profiles that stored separate start/end fields.
+                    s = sites_data[text].get("last_start")
+                    e = sites_data[text].get("last_end")
+                    if s and e:
+                        spec = s if s == e else f"{s}-{e}"
+                spec = spec or "1"
+                if hasattr(self, 'ep_picker'):
+                    self.ep_picker.blockSignals(True)
+                    self.ep_picker.set_spec(spec)
+                    self.ep_picker.blockSignals(False)
+                    self._update_episode_feedback()
                 save_config()
             else: 
                 self.lbl_url.setText("No profile selected")
@@ -504,6 +677,23 @@ class DownloaderWidget(QWidget):
         else:
             self.btn_start.setEnabled(start_en)
             self.btn_profile.setEnabled(prof_en)
+
+    def start_redownload(self, profile, episodes_str):
+        """Re-run a past download from the History tab: select the profile, set the
+        episode spec, and start."""
+        names = [self.combo_site.itemText(i) for i in range(self.combo_site.count())]
+        if profile not in names:
+            InfoBar.warning(title="Profile Missing",
+                            content=f"Profile '{profile}' no longer exists. Recreate it first.",
+                            orient=Qt.Orientation.Horizontal, isClosable=True,
+                            position=InfoBarPosition.TOP, duration=4000, parent=self)
+            return
+        self.combo_site.setCurrentText(profile)
+        # The stored episodes string ("1-12", "5", or "1-5, 8-12") seeds the picker.
+        self.ep_picker.set_spec((episodes_str or "").strip())
+        self._update_episode_feedback()
+        self.start_task()
+
     def start_task(self):
         site = self.combo_site.currentText()
         if not site or site in ["No Profiles", "No profile selected"]:
@@ -535,94 +725,30 @@ class DownloaderWidget(QWidget):
             )
             return
 
-        start_txt = self.txt_start.text().strip()
-        url_to_check = base_url.replace("{x}", start_txt if start_txt else "1")
-        if not url_to_check.startswith(("http://", "https://")):
-            url_to_check = "https://" + url_to_check
-
-        import urllib.parse
-        from urllib.error import HTTPError
-        import ssl
-        
-        # Proper URL encoding of non-ascii characters in URL components (e.g. Arabic)
-        try:
-            url_parsed = urllib.parse.urlsplit(url_to_check)
-            url_path = urllib.parse.quote(url_parsed.path)
-            url_query = urllib.parse.quote(url_parsed.query)
-            url_to_check = urllib.parse.urlunsplit((
-                url_parsed.scheme,
-                url_parsed.netloc,
-                url_path,
-                url_query,
-                url_parsed.fragment
-            ))
-        except Exception:
-            pass
-        # Perform the connection check
-        connection_ok = False
-        connection_error = ""
-        
-        try:
-            req = urllib.request.Request(
-                url_to_check, 
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-            )
-            # Tier 1: Try secure standard system SSL/TLS verification first
-            with urllib.request.urlopen(req, timeout=3.0):
-                connection_ok = True
-        except HTTPError:
-            # If server responds with an HTTP status (e.g. 403, 404, 500), it's alive!
-            connection_ok = True
-        except Exception as first_err:
-            first_err_str = str(first_err).lower()
-            # Check if the failure is specifically a certificate validation/handshake issue
-            is_ssl_issue = any(word in first_err_str for word in ["ssl", "cert", "handshake", "verification", "untrusted"])
-            
-            if is_ssl_issue:
-                # Tier 2: Targeted SSL Bypass (only trigger if verified check failed due to TLS validation error)
-                try:
-                    context = ssl._create_unverified_context()
-                    with urllib.request.urlopen(req, timeout=3.0, context=context):
-                        connection_ok = True
-                except HTTPError:
-                    connection_ok = True
-                except Exception as fallback_err:
-                    connection_error = str(fallback_err)
-            else:
-                connection_error = str(first_err)
-            
-        # Fallback to DNS resolution if blocked by Cloudflare (e.g. WinError 10054 / Connection Reset)
-        if not connection_ok:
-            import socket
-            try:
-                parsed = urllib.parse.urlsplit(url_to_check)
-                domain = parsed.netloc.split(':')[0]  # Remove port if present
-                if domain:
-                    # If the domain successfully resolves to an IP, the site is active and user has internet!
-                    socket.gethostbyname(domain)
-                    connection_ok = True
-            except Exception as dns_err:
-                connection_error = f"DNS resolution failed: {dns_err}"
-
-        if not connection_ok:
+        # Read the episode ranges up front so we can both validate them and use the
+        # first episode for the reachability check below.
+        episodes_list, ep_err = self.ep_picker.episodes()
+        if ep_err:
             InfoBar.warning(
-                title="Connection Failed",
-                content=f"Could not connect to the profile Base URL. Please check your internet connection or the URL itself.\nError: {connection_error}",
+                title="Invalid Episodes",
+                content=ep_err,
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,
-                duration=5000,
+                duration=4000,
                 parent=self
             )
             return
-        
+
+        # Fail fast on instant, local problems BEFORE the (blocking) network check,
+        # so a misconfigured profile or a bad folder reports immediately instead of
+        # freezing the UI for the connection timeout.
         total_steps = 0
         for _, steps in step_paths.items():
             if isinstance(steps, list):
                 for step in steps:
                     if step.get("xpath", "").strip():
                         total_steps += 1
-                        
         if total_steps == 0:
             InfoBar.warning(
                 title="No Automation Steps",
@@ -648,69 +774,82 @@ class DownloaderWidget(QWidget):
             )
             return
 
-        start_txt = self.txt_start.text().strip()
-        end_txt = self.txt_end.text().strip()
-        if not start_txt or not end_txt:
-            InfoBar.warning(
-                title="Episodes Required",
-                content="Please fill in both Start and End Episode fields.",
-                orient=Qt.Orientation.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=4000,
-                parent=self
-            )
-            return
-            
+        url_to_check = base_url.replace("{x}", str(episodes_list[0]))
+        if not url_to_check.startswith(("http://", "https://")):
+            url_to_check = "https://" + url_to_check
+
+        import urllib.parse
+        # Proper URL encoding of non-ascii characters in URL components (e.g. Arabic)
         try:
-            start_ep = int(start_txt)
-            end_ep = int(end_txt)
-            if start_ep <= 0 or end_ep <= 0:
-                raise ValueError()
-        except ValueError:
+            url_parsed = urllib.parse.urlsplit(url_to_check)
+            url_to_check = urllib.parse.urlunsplit((
+                url_parsed.scheme,
+                url_parsed.netloc,
+                urllib.parse.quote(url_parsed.path),
+                urllib.parse.quote(url_parsed.query),
+                url_parsed.fragment
+            ))
+        except Exception:
+            pass
+
+        # Everything else is validated; the only remaining step is a network
+        # reachability check, which we run off the UI thread so the Start click
+        # never freezes the window while the connection times out.
+        params = {
+            "site": site,
+            "episodes_list": episodes_list,
+            "target_dir": target_dir,
+            "headless": self.chk_headless.isChecked(),
+            "webhook": self.txt_webhook.text().strip(),
+            "selected_sound": app_settings.get("selected_sound", ""),
+            "volume": app_settings.get("volume", 100),
+            "concurrency": app_settings.get("concurrency", 3),
+        }
+
+        self._checking = True
+        self.btn_start.setEnabled(False)
+        self.btn_start.setText("Checking connection…")
+        self._conn_thread = ConnectionCheckThread(url_to_check)
+        self._conn_thread.result.connect(
+            lambda ok, err: self._on_connection_checked(ok, err, params))
+        self._conn_thread.start()
+
+    def _on_connection_checked(self, ok, err, params):
+        self._checking = False
+        self.btn_start.setText("Start Download")
+        self.btn_start.setEnabled(True)
+        if not ok:
             InfoBar.warning(
-                title="Invalid Episode Range",
-                content="Episodes must be valid positive numbers.",
+                title="Connection Failed",
+                content=f"Could not connect to the profile Base URL. Please check your internet connection or the URL itself.\nError: {err}",
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,
-                duration=4000,
+                duration=5000,
                 parent=self
             )
             return
+        self._begin_download(params)
 
-        if start_ep > end_ep:
-            InfoBar.warning(
-                title="Invalid Episode Range",
-                content="Start Episode cannot be greater than End Episode.",
-                orient=Qt.Orientation.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=4000,
-                parent=self
-            )
-            return
-
-        episodes_list = list(range(start_ep, end_ep + 1))
-        headless = self.chk_headless.isChecked()
-        webhook = self.txt_webhook.text().strip()
-        selected_sound = app_settings.get("selected_sound", "")
-        volume = app_settings.get("volume", 100)
-        concurrency = app_settings.get("concurrency", 3)
-
+    def _begin_download(self, p):
         with config_lock:
             app_settings["unfinished_session"] = {
-                "site": site,
-                "episodes": list(episodes_list),
-                "target_dir": target_dir,
-                "headless": headless,
-                "webhook": webhook,
-                "selected_sound": selected_sound,
-                "volume": volume,
-                "concurrency": concurrency
+                "site": p["site"],
+                "episodes": list(p["episodes_list"]),
+                "target_dir": p["target_dir"],
+                "headless": p["headless"],
+                "webhook": p["webhook"],
+                "selected_sound": p["selected_sound"],
+                "volume": p["volume"],
+                "concurrency": p["concurrency"],
             }
             save_config()
 
         signals.update_buttons.emit(False, True, False)
         signals.task_started.emit()
-        threading.Thread(target=run_selenium_task, args=(site, episodes_list, target_dir, headless, webhook, selected_sound, volume , concurrency), daemon=True).start()
+        threading.Thread(
+            target=run_selenium_task,
+            args=(p["site"], p["episodes_list"], p["target_dir"], p["headless"],
+                  p["webhook"], p["selected_sound"], p["volume"], p["concurrency"]),
+            daemon=True
+        ).start()

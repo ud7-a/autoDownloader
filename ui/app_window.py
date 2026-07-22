@@ -1,13 +1,15 @@
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import FluentWindow, FluentIcon as FIF
 
 from ui.downloader_tab import DownloaderWidget
+from ui.search_tab import AnimeSearchWidget
 from ui.manager_tab import SiteManagerWidget
 from ui.history_tab import HistoryWidget
 from ui.progress_tab import ProgressTab
+from ui.watchlist_tab import WatchlistWidget
 from core.signals import signals
-from utils.config import APP_VERSION, app_settings
+from utils.config import APP_VERSION, app_settings, get_watchlist
 
 class AppWindow(FluentWindow):
     def __init__(self):
@@ -40,28 +42,27 @@ class AppWindow(FluentWindow):
             QTimer.singleShot(50, self.maximize_window)
 
         self.downloader_interface = DownloaderWidget()
+        self.search_interface = AnimeSearchWidget(self)
         self.progress_interface = ProgressTab()
         self.manager_interface = SiteManagerWidget()
         self.history_interface = HistoryWidget()
+        self.watchlist_interface = WatchlistWidget()
 
         self.downloader_interface.setObjectName("downloader_interface")
+        self.search_interface.setObjectName("search_interface")
         self.progress_interface.setObjectName("progress_interface")
         self.manager_interface.setObjectName("manager_interface")
         self.history_interface.setObjectName("history_interface")
+        self.watchlist_interface.setObjectName("watchlist_interface")
 
         # Track if the progress tab has been added yet
         self.progress_added = False
 
         self.init_navigation()
         
-        # Enable visual Acrylic Material blend on side navigation to match premium WinUI 3 design
-        transparency_enabled = app_settings.get("transparency", True)
-        if transparency_enabled:
-            from utils.config import force_windows_transparency
-            force_windows_transparency()
-            
-        self.setMicaEffectEnabled(transparency_enabled)
-        self.navigationInterface.setAcrylicEnabled(transparency_enabled)
+        # Transparency (Mica/Acrylic) is forced OFF, regardless of system settings.
+        self.setMicaEffectEnabled(False)
+        self.navigationInterface.setAcrylicEnabled(False)
         
         # Disable the interface switching animation
         if hasattr(self, 'stackedWidget'):
@@ -76,9 +77,20 @@ class AppWindow(FluentWindow):
         
         # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
         self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
+        self.search_interface.profile_created_signal.connect(self.on_search_profile_created)
+        self.downloader_interface.goto_profiles_signal.connect(lambda: self.switchTo(self.manager_interface))
+        self.history_interface.redownload_signal.connect(self.on_redownload_from_history)
+
+        # Watchlist wiring: follow from Search, and download-new -> Downloader.
+        self.search_interface.follow_signal.connect(self.on_follow_anime)
+        self.watchlist_interface.download_new_signal.connect(self.on_watch_download_new)
 
         # Wire up the update signal
         signals.update_available.connect(self.prompt_update)
+
+        # Auto-check the Watchlist shortly after launch (only if anything is followed).
+        if get_watchlist():
+            QTimer.singleShot(8000, self.watchlist_interface.check_all)
 
     def prompt_update(self, latest_version, download_url):
         print(f"[UI] prompt_update TRIGGERED for version {latest_version}")
@@ -124,6 +136,27 @@ class AppWindow(FluentWindow):
             self.update_thread.error.connect(on_download_error)
             self.update_thread.start()
 
+    def on_redownload_from_history(self, profile, episodes_str):
+        self.switchTo(self.downloader_interface)
+        self.downloader_interface.start_redownload(profile, episodes_str)
+
+    def on_search_profile_created(self, _name):
+        # Search created a profile (and set it as last_profile); refresh the Downloader and jump there.
+        self.downloader_interface.refresh_dropdown()
+        self.switchTo(self.downloader_interface)
+
+    def on_follow_anime(self, title, url, domain, cover):
+        # A Search result was followed -> add to the Watchlist and jump there.
+        self.watchlist_interface.follow(title, url, domain, cover)
+        self.switchTo(self.watchlist_interface)
+
+    def on_watch_download_new(self, title, template, domain, max_ep, episodes_str):
+        # Create/reuse a profile for the followed anime and start its new episodes.
+        name = self.search_interface._create_profile(title, template, max_ep, domain=domain)
+        self.downloader_interface.refresh_dropdown()
+        self.switchTo(self.downloader_interface)
+        self.downloader_interface.start_redownload(name, episodes_str)
+
     def maximize_window(self):
         if hasattr(self, 'titleBar') and hasattr(self.titleBar, 'maxBtn'):
             self.titleBar.maxBtn.click()
@@ -133,6 +166,8 @@ class AppWindow(FluentWindow):
     def init_navigation(self):
         # We only add Downloader, Manager, and History at startup!
         self.addSubInterface(self.downloader_interface, FIF.DOWNLOAD, "Downloader")
+        self.addSubInterface(self.search_interface, FIF.SEARCH, "Search Anime")
+        self.addSubInterface(self.watchlist_interface, FIF.HEART, "Watchlist")
         self.addSubInterface(self.manager_interface, FIF.SETTING, "Profile Manager")
         self.addSubInterface(self.history_interface, FIF.HISTORY, "History")
 
@@ -179,5 +214,17 @@ class AppWindow(FluentWindow):
         app_settings["window_y"] = rect.y()
             
         from utils.config import save_config
-        save_config()
+        try:
+            save_config()
+        except Exception:
+            pass
+        # Tear the shared search browser down OFF the UI thread. A synchronous
+        # driver.quit() (or waiting on an in-flight search's lock) could otherwise
+        # freeze the window while it closes; as a daemon thread it can't block exit.
+        try:
+            import threading
+            from ui.search_tab import shutdown_shared_driver
+            threading.Thread(target=shutdown_shared_driver, daemon=True).start()
+        except Exception:
+            pass
         super().closeEvent(event)

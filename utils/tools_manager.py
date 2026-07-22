@@ -3,7 +3,7 @@ import sys
 import shutil
 import urllib.request
 import ssl
-from utils.config import UNRAR_PATH, ARIA2C_PATH, UBLOCK_CRX_PATH
+from utils.config import UNRAR_PATH, ARIA2C_PATH
 
 def _bundle_dir():
     """Directory holding the bundled tools: the frozen app's extract dir, or the repo when run from source."""
@@ -55,20 +55,6 @@ def download_file_safely(url, path, headers=None, timeout=15):
             except: pass
     return False
 
-def ensure_updater_exe():
-    """Silently downloads the updater.exe to the C: drive."""
-    UPDATER_DIR = r"C:\Auto Episodes Downloader"
-    UPDATER_PATH = os.path.join(UPDATER_DIR, "updater.exe")
-    
-    if not os.path.exists(UPDATER_DIR):
-        try: os.makedirs(UPDATER_DIR)
-        except Exception: pass 
-            
-    if not os.path.exists(UPDATER_PATH) or os.path.getsize(UPDATER_PATH) < 10000:
-        url = "" # You can fill this in later when you upload the updater to GitHub
-        if url:
-            download_file_safely(url, UPDATER_PATH)
-
 def ensure_unrar():
     if not os.path.exists(UNRAR_PATH) or os.path.getsize(UNRAR_PATH) < 100000:
         # Prefer the copy bundled with the installer; only download if the bundle is unavailable.
@@ -78,23 +64,6 @@ def ensure_unrar():
         if download_file_safely(url, UNRAR_PATH):
             if os.path.exists(UNRAR_PATH) and os.path.getsize(UNRAR_PATH) < 100000:
                 try: os.remove(UNRAR_PATH)
-                except: pass
-
-def ensure_ublock_lite():
-    if not os.path.exists(UBLOCK_CRX_PATH) or os.path.getsize(UBLOCK_CRX_PATH) < 100000:
-        url = "https://clients2.google.com/service/update2/crx?response=redirect&os=win&arch=x64&os_arch=x86_64&nacl_arch=x86-64&prod=chromecrx&prodchannel=&prodversion=147.0.0.0&acceptformat=crx2,crx3&x=id%3Dddkjiahejlhfcafbddmgiahcphecmpfh%26installsource%3Dondemand%26uc"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Upgrade-Insecure-Requests': '1'
-        }
-        if download_file_safely(url, UBLOCK_CRX_PATH, headers=headers):
-            if os.path.exists(UBLOCK_CRX_PATH) and os.path.getsize(UBLOCK_CRX_PATH) < 100000: 
-                try: os.remove(UBLOCK_CRX_PATH)
                 except: pass
 
 def ensure_aria2c():

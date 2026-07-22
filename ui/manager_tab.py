@@ -9,14 +9,15 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QFrame, QTabWidget, QFileDialog, QTabBar, QApplication)
 
 # THE UPGRADE: We removed FluentIcon and will use standard Emojis for the menu!
-from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, ComboBox, 
+from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, ComboBox,
                             SmoothScrollArea, MessageBoxBase, SubtitleLabel, MessageBox,
-                            RoundMenu, FluentIcon as FIF, ToolButton,
+                            RoundMenu, MenuAnimationType, FluentIcon as FIF, ToolButton,
                             InfoBar, InfoBarPosition)
 
 from utils.config import sites_data, config_lock, save_config
 from core.signals import signals
 from core.smart_picker import launch_path_picker
+from ui.styles import apply_danger_style
 
 
 # --- NATIVE FLUENT DIALOGS ---
@@ -57,39 +58,44 @@ class DuplicateProfileDialog(MessageBoxBase):
         self.url_entry = LineEdit()
         self.url_entry.setText(self.orig_data.get("url", ""))
         self.url_entry.textChanged.connect(self.auto_decode)
-        
-        btn_layout = QHBoxLayout()
-        btn_copy = PushButton("Copy {x}")
-        btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_copy.clicked.connect(lambda: QApplication.clipboard().setText("{x}"))
-        btn_fmt = PushButton("Auto-Format URL")
-        btn_fmt.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_fmt.clicked.connect(self.format_url)
-        btn_layout.addWidget(btn_copy)
-        btn_layout.addWidget(btn_fmt)
-        
+        # editingFinished covers manual typing; paste is auto-formatted inside
+        # auto_decode (detected by the bulk text jump).
+        self.url_entry.editingFinished.connect(self.format_url)
+        self._url_len = len(self.url_entry.text())   # baseline so preset text isn't seen as a paste
+
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(QLabel("New Profile Name:", styleSheet="margin-top: 10px; font-weight: bold; background: transparent;"))
         self.viewLayout.addWidget(self.name_entry)
         self.viewLayout.addWidget(QLabel("New Base URL:", styleSheet="margin-top: 10px; font-weight: bold; background: transparent;"))
         self.viewLayout.addWidget(self.url_entry)
-        self.viewLayout.addLayout(btn_layout)
         
         self.widget.setMinimumWidth(400)
         self.yesButton.setText("Save Duplicate")
 
     def auto_decode(self, text):
-        decoded = unquote(text)
-        if text != decoded: 
-            pos = self.url_entry.cursorPosition()
-            self.url_entry.setText(decoded)
-            self.url_entry.setCursorPosition(max(0, pos - (len(text) - len(decoded))))
-        
+        prev = getattr(self, '_url_len', 0)
+        self._url_len = len(text)
+        if getattr(self, '_url_busy', False):
+            return
+        self._url_busy = True
+        try:
+            decoded = unquote(text)
+            if text != decoded:
+                pos = self.url_entry.cursorPosition()
+                self.url_entry.setText(decoded)
+                self.url_entry.setCursorPosition(max(0, pos - (len(text) - len(decoded))))
+                text = decoded
+            # A jump of >1 char at once = a paste -> format immediately.
+            if len(text) - prev > 1:
+                self.format_url()
+        finally:
+            self._url_busy = False
+
     def format_url(self):
         current = self.url_entry.text().strip()
         if current.endswith('/'): current = current[:-1]
         self.url_entry.setText(re.sub(r'\d+$', '{x}', current))
-        
+
     def validate(self):
         n = self.name_entry.text().strip()
         if not n: return False
@@ -132,8 +138,9 @@ class SiteManagerWidget(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.original_profile_name = None 
-        
+        self.original_profile_name = None
+        self._loading = False   # suppress dirty-marking while a profile loads
+
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -184,29 +191,21 @@ class SiteManagerWidget(QWidget):
 
         layout.addWidget(QLabel("Profile Name:", styleSheet="font-weight: bold; margin-top: 5px; background: transparent;"))
         self.name_entry = LineEdit()
+        self.name_entry.textChanged.connect(self.mark_dirty)
         layout.addWidget(self.name_entry)
 
         layout.addWidget(QLabel("Base URL:", styleSheet="font-weight: bold; margin-top: 5px; background: transparent;"))
         self.url_entry = LineEdit()
-        self.url_entry.textChanged.connect(self.auto_decode_url) 
+        self.url_entry.textChanged.connect(self.mark_dirty)
+        self.url_entry.textChanged.connect(self.auto_decode_url)
+        # editingFinished covers manual typing; paste is auto-formatted inside
+        # auto_decode_url (detected by the bulk text jump).
+        self.url_entry.editingFinished.connect(self.format_url)
         layout.addWidget(self.url_entry)
-
-        tool_layout = QHBoxLayout()
-        btn_copy = PushButton("Copy {x}")
-        btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_copy.clicked.connect(self.copy_x)
-        
-        btn_fmt = PushButton("Auto-Format URL")
-        btn_fmt.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_fmt.clicked.connect(self.format_url)
-        
-        tool_layout.addWidget(btn_copy)
-        tool_layout.addWidget(btn_fmt)
-        tool_layout.addStretch(1)
-        layout.addLayout(tool_layout)
 
         layout.addWidget(QLabel("Next Episode Button Text (or XPath):", styleSheet="font-weight: bold; margin-top: 5px; background: transparent;"))
         self.next_entry = LineEdit()
+        self.next_entry.textChanged.connect(self.mark_dirty)
         layout.addWidget(self.next_entry)
 
         step_header = QHBoxLayout()
@@ -227,8 +226,10 @@ class SiteManagerWidget(QWidget):
 
         self.path_tabs = QTabWidget()
         self.path_tabs.setTabsClosable(True)
+        self.path_tabs.setMovable(True)   # drag path tabs to reorder; order is saved on Save
         self.path_tabs.tabCloseRequested.connect(self.show_tab_menu)
         self.path_tabs.currentChanged.connect(self.update_tab_button_styles)
+        self.path_tabs.tabBar().tabMoved.connect(self.mark_dirty)   # reorder = a change
         
         self.path_tabs.setStyleSheet("""
             QTabWidget::pane { 
@@ -263,17 +264,25 @@ class SiteManagerWidget(QWidget):
         # 2. UPGRADED DELETE BUTTON COLORING & DESIGN
         self.btn_del = PushButton(FIF.DELETE, "Delete Profile")
         self.btn_del.setObjectName("Danger")
+        apply_danger_style(self.btn_del)
         self.btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_del.setMinimumHeight(40)
         self.btn_del.clicked.connect(self.delete_profile)
         
-        btn_save = PrimaryPushButton("Save Profile")
-        btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_save.clicked.connect(self.save_profile)
-        
+        self.btn_discard = PushButton("Discard Changes")
+        self.btn_discard.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_discard.clicked.connect(self.discard_changes)
+        self.btn_discard.setEnabled(False)   # only usable when there are changes
+
+        self.btn_save = PrimaryPushButton("Save Profile")
+        self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_save.clicked.connect(self.save_profile)
+        self.btn_save.setEnabled(False)   # nothing changed yet
+
         btn_layout.addWidget(self.btn_del)
         btn_layout.addStretch()
-        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(self.btn_discard)
+        btn_layout.addWidget(self.btn_save)
         layout.addLayout(btn_layout)
 
         self.scroll.setWidget(self.content)
@@ -281,6 +290,21 @@ class SiteManagerWidget(QWidget):
         signals.add_picked_step.connect(lambda t, x: self.add_step_to_tab(t, x, "5.0"))
 
         self._initial_load_done = False
+
+    def mark_dirty(self, *args):
+        # Enable Save/Discard when anything in the profile changes (suppressed during load).
+        if getattr(self, '_loading', False):
+            return
+        self.btn_save.setEnabled(True)
+        self.btn_discard.setEnabled(True)
+
+    def mark_clean(self):
+        self.btn_save.setEnabled(False)
+        self.btn_discard.setEnabled(False)
+
+    def discard_changes(self):
+        # Reload the currently selected profile from disk, dropping unsaved edits.
+        self.load_profile(self.profile_combo.currentText())
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -328,12 +352,24 @@ class SiteManagerWidget(QWidget):
                         err.exec()
 
     def auto_decode_url(self, text):
-        decoded = unquote(text)
-        if text != decoded: 
-            pos = self.url_entry.cursorPosition()
-            self.url_entry.setText(decoded)
-            self.url_entry.setCursorPosition(max(0, pos - (len(text) - len(decoded))))
-        
+        prev = getattr(self, '_url_len', 0)
+        self._url_len = len(text)
+        if getattr(self, '_url_busy', False):
+            return
+        self._url_busy = True
+        try:
+            decoded = unquote(text)
+            if text != decoded:
+                pos = self.url_entry.cursorPosition()
+                self.url_entry.setText(decoded)
+                self.url_entry.setCursorPosition(max(0, pos - (len(text) - len(decoded))))
+                text = decoded
+            # A jump of >1 char at once = a paste -> format immediately.
+            if len(text) - prev > 1:
+                self.format_url()
+        finally:
+            self._url_busy = False
+
     def copy_x(self):
         QApplication.clipboard().setText("{x}")
         
@@ -362,6 +398,14 @@ class SiteManagerWidget(QWidget):
         btn.show()
         
         self.path_tabs.tabBar().setTabButton(self.path_tabs.indexOf(tab), QTabBar.ButtonPosition.RightSide, btn)
+
+        # 6-dots drag handle (visual cue that tabs can be dragged to reorder)
+        grip = QLabel("⠿")
+        grip.setToolTip("Drag this path to reorder")
+        grip.setStyleSheet("color: #888888; font-size: 16px; padding: 0 2px; background: transparent; border: none;")
+        grip.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.path_tabs.tabBar().setTabButton(self.path_tabs.indexOf(tab), QTabBar.ButtonPosition.LeftSide, grip)
+
         self.update_tab_button_styles()
             
         if steps:
@@ -369,6 +413,8 @@ class SiteManagerWidget(QWidget):
                 self.add_step_to_tab(tab, step.get("xpath", ""), str(step.get("delay", 5.0)))
         elif not name:
             self.add_step_to_tab(tab, "", "5.0")
+
+        self.mark_dirty()
 
     def add_step_to_current(self):
         tab = self.path_tabs.currentWidget()
@@ -396,6 +442,7 @@ class SiteManagerWidget(QWidget):
         
         btn_del = ToolButton(FIF.DELETE, self)
         btn_del.setObjectName("Danger")
+        apply_danger_style(btn_del)
         btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_del.setFixedSize(40, 40)
         c_layout.addWidget(xp_in, 1)
@@ -407,10 +454,14 @@ class SiteManagerWidget(QWidget):
         obj = {"card": card, "xpath": xp_in, "delay": dl_in}
         tab.step_widgets.append(obj)
         btn_del.clicked.connect(lambda: self.remove_step(tab, obj))
+        xp_in.textChanged.connect(self.mark_dirty)
+        dl_in.textChanged.connect(self.mark_dirty)
+        self.mark_dirty()   # adding a step is a change (suppressed during load)
 
     def remove_step(self, tab, obj):
         obj["card"].deleteLater()
         tab.step_widgets.remove(obj)
+        self.mark_dirty()
 
     def show_tab_menu(self, index):
         from PyQt6.QtGui import QAction
@@ -425,11 +476,13 @@ class SiteManagerWidget(QWidget):
             if dlg.exec():
                 new_name = dlg.result_text
                 self.path_tabs.setTabText(index, new_name)
-                
+                self.mark_dirty()
+
         def do_delete():
             widget = self.path_tabs.widget(index)
             self.path_tabs.removeTab(index)
             widget.deleteLater()
+            self.mark_dirty()
             
         # 2. Wire the actions directly to the functions (Bypassing the menu bug!)
         rename_action.triggered.connect(do_rename)
@@ -439,7 +492,15 @@ class SiteManagerWidget(QWidget):
         menu.addAction(rename_action)
         menu.addAction(delete_action)
         
-        menu.exec(QCursor.pos())
+        # Anchor the menu's top-left corner onto that tab's 3-dots button, so it
+        # always opens from the same spot instead of wherever the cursor was.
+        from PyQt6.QtCore import QPoint
+        dots = self.path_tabs.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+        if dots is not None:
+            pos = dots.mapToGlobal(QPoint(10, 5))
+        else:
+            pos = QCursor.pos()
+        menu.exec(pos, aniType=MenuAnimationType.NONE)
 
     def update_tab_button_styles(self, *args):
         import os
@@ -495,8 +556,9 @@ class SiteManagerWidget(QWidget):
                     """)
 
     def load_profile(self, choice):
-        if not choice: return 
-        
+        if not choice: return
+        self._loading = True   # don't mark dirty while populating fields
+
         current_path_name = None
         if self.path_tabs.count() > 0:
             current_path_name = self.path_tabs.tabText(self.path_tabs.currentIndex())
@@ -546,6 +608,10 @@ class SiteManagerWidget(QWidget):
             
             self.path_tabs.setCurrentIndex(target_idx)
 
+        # Freshly loaded profile == no unsaved changes.
+        self._loading = False
+        self.mark_clean()
+
     def duplicate_profile(self):
         if self.profile_combo.currentText() == "New Profile" and not self.name_entry.text().strip(): return
         self.save_profile() 
@@ -579,16 +645,23 @@ class SiteManagerWidget(QWidget):
             self.name_entry.setText("")
             return
         
-        old_start = "1"
-        old_end = "1"
+        def _episodes_of(cfg):
+            # Preserve the saved episode spec; migrate legacy start/end profiles.
+            spec = cfg.get("last_episodes")
+            if spec:
+                return spec
+            s, e = cfg.get("last_start"), cfg.get("last_end")
+            if s and e:
+                return s if s == e else f"{s}-{e}"
+            return "1"
+
+        old_episodes = "1"
         with config_lock:
             if name in sites_data:
-                old_start = sites_data[name].get("last_start", "1")
-                old_end = sites_data[name].get("last_end", "1")
+                old_episodes = _episodes_of(sites_data[name])
             elif self.original_profile_name in sites_data:
-                old_start = sites_data[self.original_profile_name].get("last_start", "1")
-                old_end = sites_data[self.original_profile_name].get("last_end", "1")
-                
+                old_episodes = _episodes_of(sites_data[self.original_profile_name])
+
             if self.original_profile_name and self.original_profile_name != name and self.original_profile_name in sites_data:
                 del sites_data[self.original_profile_name]
         
@@ -608,16 +681,25 @@ class SiteManagerWidget(QWidget):
             sites_data[name] = {
                 "url": self.url_entry.text().strip(), 
                 "next_btn_xpath": self.next_entry.text().strip(), 
-                "step_paths": s_paths, 
-                "last_start": old_start, 
-                "last_end": old_end
+                "step_paths": s_paths,
+                "last_episodes": old_episodes
             }
         save_config()
         self.refresh_combo(name)
         self.profile_saved_signal.emit()
+        self.mark_clean()   # saved -> no pending changes
 
     def delete_profile(self):
         name = self.name_entry.text().strip()
+        if not name:
+            return
+        w = MessageBox("Delete Profile",
+                       f"Permanently delete the profile '{name}'?\n\nThis cannot be undone.",
+                       self.window())
+        w.yesButton.setText("Delete")
+        w.cancelButton.setText("Cancel")
+        if not w.exec():
+            return
         with config_lock:
             if name in sites_data:
                 del sites_data[name]

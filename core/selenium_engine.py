@@ -29,6 +29,102 @@ active_engine_threads = []
 manual_driver = None
 active_aria2_processes = []
 
+# Per-host download throttle: never run more than PER_HOST_MAX aria2c downloads
+# against the same host at once, so a single host isn't hammered into a rate-limit.
+host_active = {}
+host_lock = threading.Lock()
+PER_HOST_MAX = 3
+
+def _host_of(u):
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(u).hostname or "").lower()
+    except Exception:
+        return ""
+
+def get_download_cookies(driver, dl_url):
+    """Collect the download host's cookies to hand to aria2c.
+
+    The download is intercepted from the chrome://downloads tab, where
+    driver.get_cookies() returns nothing (chrome:// pages have no cookies), so
+    session-gated hosts (e.g. workupload's `token` cookie) would otherwise be
+    lost and the server returns a small HTML block page instead of the file.
+    Pull every cookie via CDP and keep those valid for the download URL's host,
+    including parent-domain cookies (e.g. a .workupload.com cookie for
+    f54.workupload.com).
+    """
+    from urllib.parse import urlparse
+    host = (urlparse(dl_url).hostname or "").lower()
+    try:
+        all_cookies = driver.execute_cdp_cmd("Network.getAllCookies", {}).get("cookies", [])
+    except Exception:
+        all_cookies = driver.get_cookies()
+    matched = []
+    for c in all_cookies:
+        cdom = (c.get("domain") or "").lstrip(".").lower()
+        if cdom and (host == cdom or host.endswith("." + cdom)):
+            matched.append(c)
+    # Fall back to the old behaviour if nothing matched (harmless for hosts that
+    # don't gate downloads on cookies).
+    return matched or driver.get_cookies()
+
+def is_block_page(path):
+    """True if the downloaded file is too small to be a real video -- i.e. a block/
+    error/rate-limit page saved in place of the file. Episodes are always > 1 MB."""
+    try:
+        return os.path.exists(path) and os.path.getsize(path) < 1_000_000
+    except Exception:
+        return False
+
+def is_page_not_found(driver):
+    """True if the current page is a 404 / not-found page (covers Arabic sites)."""
+    try:
+        t = driver.title or ""
+        low = t.lower()
+        return ("غير موجود" in t) or ("404" in low) or ("not found" in low)
+    except Exception:
+        return False
+
+# Trailing "final episode" URL suffixes used by some Arabic sites (e.g. animerco:
+# ...الحلقة-12-والاخيرة/). Tried when the plain episode URL 404s.
+FINALE_SUFFIXES = ("-والاخيرة", "-والأخيرة", "-الاخيرة", "-الأخيرة")
+
+def episode_url_variants(url):
+    """Alternate episode URLs to try when the primary one is a not-found page.
+
+    Handles sites that split a single series across two URL slug patterns -- e.g.
+    animerco serves Bleach eps 1-62 as /episodes/انمي-bleach-الحلقة-N/ and eps
+    63-366 as /episodes/bleach-الحلقة-N/ -- by toggling the Arabic 'anime' (انمي-)
+    prefix, and sites that give the finale a special suffix, by appending it.
+    """
+    prefix_toggled = None
+    m = re.search(r"^(.*/episodes/)(.+?)(/?)$", url)
+    if m:
+        head, slug, tail = m.group(1), m.group(2), m.group(3)
+        if slug.startswith("انمي-"):
+            prefix_toggled = head + slug[len("انمي-"):] + tail
+        else:
+            prefix_toggled = head + "انمي-" + slug + tail
+
+    variants = []
+    # Prefix toggle first: it fixes a whole range of episodes (e.g. Bleach 1-62),
+    # whereas a finale suffix only fixes the single last episode.
+    if prefix_toggled and prefix_toggled != url:
+        variants.append(prefix_toggled)
+    for base in [url, prefix_toggled]:
+        if not base:
+            continue
+        stripped = base.rstrip("/")
+        for suf in FINALE_SUFFIXES:
+            variants.append(stripped + suf + "/")
+
+    seen, out = set(), []
+    for u in variants:
+        if u != url and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
 def parse_smart_xpath(raw_input):
     raw_input = raw_input.strip()
     if not raw_input: return ""
@@ -478,23 +574,38 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
 
     cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
     final_name = final_name if final_name else f"episode_{ep}.mp4"
-    global active_aria2_processes 
-    
+
     if ep not in ep_pause_events: ep_pause_events[ep] = threading.Event()
     if ep not in ep_cancel_events: ep_cancel_events[ep] = threading.Event()
 
+    # Some hosts (e.g. workupload) limit or reject multi-connection splitting
+    # ("Invalid range header", errorCode=8). On failure we step down the connection
+    # count to find the largest one that actually works, instead of dropping to 1.
+    conn_levels = [16, 8, 4, 2, 1]
+    conn_idx = 0
+    attempts = 0
+    max_attempts = 6       # cap retries so a dead/blocking host isn't hammered forever
+    verify_cert = True     # try with TLS verification first; drop it only on a cert error
+
     while True:
         if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) or ep_cancel_events[ep].is_set(): break
-        
+
+        attempts += 1
+        if attempts > max_attempts:
+            signals.update_active_download.emit(ep, "❌ Download failed after several attempts.")
+            break
+
+        conns = str(conn_levels[conn_idx])
         cmd = [
-            ARIA2C_PATH, "-c", "--auto-file-renaming=false", 
-            "-x", "16", "-s", "16", "-j", "16", 
-            "-k", "1M", "--min-split-size=1M", "--disk-cache=128M", 
+            ARIA2C_PATH, "-c", "--auto-file-renaming=false",
+            "-x", conns, "-s", conns, "-j", conns,
+            "-k", "1M", "--min-split-size=1M", "--disk-cache=128M",
             "--optimize-concurrent-downloads=true", "--disable-ipv6=true",
             "--file-allocation=none", "--summary-interval=1", "--auto-save-interval=1",
             "--connect-timeout=5", "--timeout=10", "--max-tries=5", "--retry-wait=2",
-            "--check-certificate=false"
         ]
+        # TLS: verify by default; fall back to no verification only after a cert error.
+        cmd.append("--check-certificate=true" if verify_cert else "--check-certificate=false")
         if ua: cmd.append(f"--user-agent={ua}")
         else: cmd.append("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         
@@ -522,10 +633,13 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
                 text=True, encoding='utf-8', errors='replace', creationflags=CREATE_NO_WINDOW
             )
-            active_aria2_processes.append(process) 
+            active_aria2_processes.append(process)
             ep_aria2_processes[ep] = process
-            
+            recent_lines = []
+
             for line in process.stdout:
+                recent_lines.append(line.rstrip())
+                if len(recent_lines) > 30: recent_lines = recent_lines[-30:]
                 if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) or ep_cancel_events[ep].is_set() or pause_event.is_set() or ep_pause_events[ep].is_set():
                     break
                     
@@ -544,15 +658,16 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                                 return val_str
                             pct = int(match.group(3))
                             speed = convert_unit(match.group(4)) + "/s"
-                            
-                            # Extract ETA
+                            total_size = convert_unit(match.group(2))   # full episode size
+
+                            # Time remaining, straight from aria2c's ETA field.
                             eta_str = ""
                             eta_match = re.search(r"ETA:([^ \]]+)", line)
                             if eta_match:
-                                eta_str = f"   •   ⏳ {eta_match.group(1)} left"
-                                
+                                eta_str = f"   •   Remaining: {eta_match.group(1)}"
+
                             signals.update_active_bar.emit(ep, pct)
-                            signals.update_active_download.emit(ep, f"⚡ {speed}   •   Progress: {pct}%{eta_str}")
+                            signals.update_active_download.emit(ep, f"⚡ {speed}   •   {pct}% of {total_size}{eta_str}")
                     except Exception: pass
                 elif "CN:" in line:
                     try:
@@ -567,15 +682,39 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                             return val_str
                         match_init = re.search(r"CN:(\d+)\s+DL:([^ \]]+)", line)
                         if match_init:
-                            conns = match_init.group(1)
+                            active_conns = match_init.group(1)
                             speed = convert_unit(match_init.group(2)) + "/s"
-                            signals.update_active_download.emit(ep, f"🔌 Connecting... (Conns: {conns}, Speed: {speed})")
+                            signals.update_active_download.emit(ep, f"🔌 Connecting... (Conns: {active_conns}, Speed: {speed})")
                     except Exception: pass
             
             process.wait()
             if process in active_aria2_processes: active_aria2_processes.remove(process)
             if ep in ep_aria2_processes: del ep_aria2_processes[ep]
-            if process.returncode == 0: process_finished_normally = True
+            if process.returncode == 0:
+                process_finished_normally = True
+            elif not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id or ep_cancel_events[ep].is_set() or pause_event.is_set() or ep_pause_events[ep].is_set()):
+                # Failed -> step down to fewer connections (server may limit
+                # splitting / ignore Range) to find the largest working count.
+                if conn_idx < len(conn_levels) - 1:
+                    conn_idx += 1
+                    signals.update_active_download.emit(ep, f"⚙ Retrying with {conn_levels[conn_idx]} connection(s)...")
+                    # Split count changed -> clear the partial + control file for a clean retry.
+                    for _f in (target_file, aria2_file):
+                        try: os.remove(_f)
+                        except Exception: pass
+                # A TLS/certificate failure -> retry once without verification.
+                if verify_cert and any(w in l.lower() for l in recent_lines for w in ("ssl", "certificate", "handshake")):
+                    verify_cert = False
+                    signals.update_active_download.emit(ep, "⚙ Certificate error — retrying without verification...")
+                # Genuine aria2c failure -- log the real output so the cause is visible.
+                try:
+                    with open(os.path.join(APP_DIR, "aria2c_error.log"), "a", encoding="utf-8") as _lf:
+                        _lf.write(f"\n=== Ep {ep}  rc={process.returncode}  {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                        _lf.write(f"URL: {url}\n")
+                        _lf.write(f"Cookies sent: {'yes' if cookie_str else 'NONE'} (len={len(cookie_str)})\n")
+                        _lf.write("aria2c output:\n" + "\n".join(recent_lines[-30:]) + "\n")
+                except Exception:
+                    pass
             
         except Exception as e:
             if process in active_aria2_processes: active_aria2_processes.remove(process)
@@ -593,6 +732,11 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) or ep_cancel_events[ep].is_set(): break
             continue 
             
+        # A tiny "completed" file is a block/error page, not the video -> treat as failed.
+        if process_finished_normally and is_block_page(target_file):
+            process_finished_normally = False
+            signals.update_active_download.emit(ep, "❌ Received a block/error page, not the video. Retrying...")
+
         if process_finished_normally:
             signals.update_active_bar.emit(ep, 100)
             signals.update_active_download.emit(ep, "Extraction & Cleanup...")
@@ -614,11 +758,17 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
             break 
         elif not pause_event.is_set() and not ep_pause_events[ep].is_set() and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) and not ep_cancel_events[ep].is_set():
             signals.update_active_download.emit(ep, "❌ Download Failed. Retrying...")
-            time.sleep(3)
+            time.sleep(min(3 * attempts, 30))   # backoff -- don't hammer the host
             
     if ep_cancel_events[ep].is_set() and not process_finished_normally:
         signals.remove_active_download.emit(ep)
-        
+
+    # Release this host's throttle slot (incremented before the thread was started).
+    with host_lock:
+        h = _host_of(url)
+        if host_active.get(h):
+            host_active[h] = max(0, host_active[h] - 1)
+
     on_episode_completed()
 
 def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_url, selected_sound, volume , concurrency):
@@ -811,7 +961,17 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                     driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": ep_temp_dir})
                     
                     driver.get(url)
-                    time.sleep(3) 
+                    time.sleep(3)
+
+                    # A site may serve this episode under a different URL slug (an
+                    # انمي- prefix, or a "final episode" suffix). If the primary URL
+                    # is a not-found page, retry the known alternate forms.
+                    if is_page_not_found(driver):
+                        for alt_url in episode_url_variants(url):
+                            driver.get(alt_url)
+                            time.sleep(2)
+                            if not is_page_not_found(driver):
+                                break
 
                     # Dynamic Captcha Solver Integration
                     try:
@@ -981,7 +1141,7 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 data_obj = json.loads(found_data)
                                 dl_url = data_obj['url']
                                 dl_fname = data_obj['filename']
-                                cookies = driver.get_cookies()
+                                cookies = get_download_cookies(driver, dl_url)
                                 ua = driver.execute_script("return navigator.userAgent;")
                                 
                                 # Close the successfully intercepted tab immediately to free up system memory
@@ -991,15 +1151,25 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                         driver.switch_to.window(driver.window_handles[0])
                                     except: pass
                                 
-                                # Concurrency throttle: wait here if all active slots are full
-                                while len([t for t in active_engine_threads if t.is_alive()]) >= MAX_CONCURRENT and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
+                                # Throttle: wait until an overall slot is free AND the
+                                # download's host is under its per-host cap.
+                                dl_host = _host_of(dl_url)
+                                while not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
+                                    alive = len([t for t in active_engine_threads if t.is_alive()])
+                                    with host_lock:
+                                        host_n = host_active.get(dl_host, 0)
+                                    if alive < MAX_CONCURRENT and host_n < PER_HOST_MAX:
+                                        break
                                     time.sleep(1)
-                                    
+
                                 if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
                                     break
-                                    
+
+                                with host_lock:
+                                    host_active[dl_host] = host_active.get(dl_host, 0) + 1
+
                                 signals.update_status.emit(f"Status: ▶ Starting download for Ep {x}...", "#2ecc71")
-                                t = threading.Thread(target=aria2c_downloader, 
+                                t = threading.Thread(target=aria2c_downloader,
                                                      args=(x, dl_url, dl_fname, cookies, ua, ep_temp_dir, cancel_event, on_episode_completed, process_downloaded_episode, my_task_id))
                                 t.start()
                                 active_engine_threads.append(t)
@@ -1015,8 +1185,8 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 
                     if not path_success: raise Exception("Interception failed")
                     
-                except Exception as e:
-                    signals.update_status.emit(f"Status: ⚠️ Attempt failed, retrying...", "#e74c3c")
+                except Exception:
+                    signals.update_status.emit("Status: ⚠️ Attempt failed, retrying...", "#e74c3c")
                     if len(driver.window_handles) > 1:
                         driver.close()
                         driver.switch_to.window(driver.window_handles[0])
@@ -1025,6 +1195,22 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
             if not path_success:
                 failed_eps.append(x)
                 signals.update_status.emit(f"Status: ❌ Failed to grab Episode {x} after 3 retries.", "#e74c3c")
+
+            # Close every tab this episode opened (episode page, ad/redirect tabs,
+            # chrome://downloads) and keep only the base tab, so Chrome tabs don't
+            # accumulate across episodes. aria2c downloads run independently of these.
+            try:
+                handles = driver.window_handles
+                base = handles[0]
+                for h in handles[1:]:
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except Exception:
+                        pass
+                driver.switch_to.window(base)
+            except Exception:
+                pass
 
         if not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
             signals.update_status.emit("Status: All downloads triggered! Waiting for files to finish...", "#f39c12")
@@ -1059,15 +1245,14 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                             vol = volume * 10 
                             mci_path = selected_sound.replace("\\", "/")
                             ctypes.windll.winmm.mciSendStringW('close custom_audio', None, 0, None)
-                            if mci_path.lower().endswith(".mp3"):
-                                ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" type mpegvideo alias custom_audio', None, 0, None)
-                            else:
-                                ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" alias custom_audio', None, 0, None)
+                            # Always open via mpegvideo so "setaudio volume" works;
+                            # the waveaudio device rejects it, ignoring the volume for .wav.
+                            ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" type mpegvideo alias custom_audio', None, 0, None)
                             ctypes.windll.winmm.mciSendStringW(f'setaudio custom_audio volume to {vol}', None, 0, None)
                             ctypes.windll.winmm.mciSendStringW('play custom_audio', None, 0, None)
                     except Exception: pass
             
-    except Exception as e:
+    except Exception:
         signals.update_status.emit("Status: ❌ Critical Error Occurred. Check console.", "#e74c3c")
         traceback.print_exc()
 
@@ -1090,7 +1275,19 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
             else:
                 status = "Success"
                 notes = "Completed successfully."
-            eps_str = f"{episodes_list[0]} - {episodes_list[-1]}" if len(episodes_list) > 1 else str(episodes_list[0])
+            # Compact the episode list back into a spec ("1-5, 8-12") so History is
+            # accurate and Re-download reproduces gapped selections exactly.
+            def _compact_spec(nums):
+                nums = sorted(set(nums))
+                out, i = [], 0
+                while i < len(nums):
+                    j = i
+                    while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+                        j += 1
+                    out.append(str(nums[i]) if i == j else f"{nums[i]}-{nums[j]}")
+                    i = j + 1
+                return ", ".join(out)
+            eps_str = _compact_spec(episodes_list) if episodes_list else ""
             log_history(site_key, eps_str, status, notes)
 
         if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):

@@ -148,14 +148,25 @@ class ProgressTab(QWidget):
             
         for ep_num in list(self.active_cards.keys()):
             self.remove_active_card(ep_num)
-        self.stack.setCurrentIndex(0) 
+        # Purge any leftover/orphan card widgets so a new download starts clean.
+        while self.active_tasks_layout.count():
+            item = self.active_tasks_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self.active_cards.clear()
+        self.stack.setCurrentIndex(0)
         self.progress.hide()
         self.lbl_prog.hide()
         self.lbl_prog.setText("")
 
     def add_active_card(self, ep_num):
+        # Never stack a second card for the same episode -- replace the old one,
+        # otherwise repeated add signals (retries/resume) leave orphan cards piling up.
+        if ep_num in self.active_cards:
+            self.remove_active_card(ep_num)
         if self.stack.currentIndex() != 1:
-            self.stack.setCurrentIndex(1) 
+            self.stack.setCurrentIndex(1)
             
         card = QFrame()
         # Native fluent semi-transparent card look!
@@ -276,10 +287,9 @@ class ProgressTab(QWidget):
         pause_event.set()
         self.btn_pause.hide()
         self.btn_resume.show()
-        
-        global active_aria2_processes
+
         for p in active_aria2_processes:
-            try: p.kill() 
+            try: p.kill()
             except: pass
             
         subprocess.run(["taskkill", "/F", "/IM", "aria2c.exe", "/T"], creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -304,8 +314,7 @@ class ProgressTab(QWidget):
         with config_lock:
             app_settings.pop("unfinished_session", None)
             save_config()
-        
-        global active_aria2_processes
+
         for p in active_aria2_processes:
             try: p.kill()
             except: pass

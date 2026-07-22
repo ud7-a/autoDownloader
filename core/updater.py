@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import urllib.request
 import subprocess
@@ -47,8 +48,18 @@ def check_for_updates_silently():
             data = json.loads(response.read().decode('utf-8'))
 
         latest_version = data.get('tag_name', '').replace("v", "")
-        
-        if latest_version and latest_version != APP_VERSION:
+
+        def _ver_tuple(v):
+            # Parse "4.1.1" -> (4, 1, 1); ignore any non-numeric parts.
+            parts = []
+            for p in v.split("."):
+                m = re.match(r"\d+", p.strip())
+                parts.append(int(m.group()) if m else 0)
+            return tuple(parts)
+
+        # Only prompt when the remote is genuinely NEWER (not merely different -- a
+        # downgrade must never trigger an "update").
+        if latest_version and _ver_tuple(latest_version) > _ver_tuple(APP_VERSION):
             print(f"[UPDATER] Found new version: {latest_version}. Current is {APP_VERSION}")
             for asset in data.get('assets', []):
                 if "Setup" in asset['name'] and asset['name'].endswith('.exe'):

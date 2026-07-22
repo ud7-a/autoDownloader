@@ -3,7 +3,6 @@ import sys
 import shutil
 import subprocess
 import ctypes
-import time
 
 def main():
     # 1. Determine where PyInstaller extracted the bundled directory
