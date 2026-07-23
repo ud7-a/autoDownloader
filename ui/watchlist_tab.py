@@ -107,16 +107,22 @@ class WatchlistCheckThread(QThread):
         total_lock = threading.Lock()
 
         def check(w):
+            if self.isInterruptionRequested():
+                return
             url = w.get("url", "")
             self.entry_status.emit(url, "Checking…")
             drv = pool.get()
             try:
-                found = AnimeDetailsThread("").detect_entries(url, want_covers=False, driver=drv)
+                found = AnimeDetailsThread("").detect_entries(
+                    url, want_covers=False, driver=drv,
+                    should_cancel=self.isInterruptionRequested)
                 reached = True
             except Exception:
                 found, reached = [], False
             finally:
                 pool.put(drv)
+            if self.isInterruptionRequested():
+                return
             if not reached:
                 # Couldn't load (network/blocked) -> leave the entry untouched.
                 self.entry_status.emit(url, "Check failed")

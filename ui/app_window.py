@@ -141,8 +141,10 @@ class AppWindow(FluentWindow):
         self.downloader_interface.start_redownload(profile, episodes_str)
 
     def on_search_profile_created(self, _name):
-        # Search created a profile (and set it as last_profile); refresh the Downloader and jump there.
+        # Search created a profile (and set it as last_profile); refresh both the
+        # Downloader dropdown and the Profile Manager list, then jump to the Downloader.
         self.downloader_interface.refresh_dropdown()
+        self.manager_interface.refresh_combo()
         self.switchTo(self.downloader_interface)
 
     def on_follow_anime(self, title, url, domain, cover):
@@ -151,11 +153,9 @@ class AppWindow(FluentWindow):
         self.switchTo(self.watchlist_interface)
 
     def on_watch_download_new(self, title, template, domain, max_ep, episodes_str):
-        # Create/reuse a profile for the followed anime and start its new episodes.
-        name = self.search_interface._create_profile(title, template, max_ep, domain=domain)
-        self.downloader_interface.refresh_dropdown()
+        # Download the new episodes directly -- no saved/duplicate profile is created.
         self.switchTo(self.downloader_interface)
-        self.downloader_interface.start_redownload(name, episodes_str)
+        self.downloader_interface.start_watch_download(title, template, domain, episodes_str)
 
     def maximize_window(self):
         if hasattr(self, 'titleBar') and hasattr(self.titleBar, 'maxBtn'):
@@ -218,13 +218,48 @@ class AppWindow(FluentWindow):
             save_config()
         except Exception:
             pass
-        # Tear the shared search browser down OFF the UI thread. A synchronous
-        # driver.quit() (or waiting on an in-flight search's lock) could otherwise
-        # freeze the window while it closes; as a daemon thread it can't block exit.
+
+        # Cancel any in-flight background detection threads so they return before
+        # their C++ objects are destroyed (avoids "QThread destroyed while running").
+        # Cancellation is cooperative (poll flags at loop boundaries), so a bounded
+        # wait keeps close prompt even if one is mid request.
+        threads = []
+        try:
+            threads += [t for t in getattr(self.search_interface, "_threads", []) if t and t.isRunning()]
+        except Exception:
+            pass
+        for obj, attr in ((self.watchlist_interface, "_check_thread"),
+                          (self.downloader_interface, "_conn_thread")):
+            try:
+                t = getattr(obj, attr, None)
+                if t and t.isRunning():
+                    threads.append(t)
+            except Exception:
+                pass
+        for t in threads:
+            try:
+                t.requestInterruption()   # cooperative: threads bail at loop boundaries
+            except Exception:
+                pass
+
+        # Tear the shared search browser down OFF the UI thread. This also unblocks
+        # any in-flight search/detail get() (it raises once the driver quits), so
+        # those threads return promptly. As a daemon it can't block exit.
         try:
             import threading
             from ui.search_tab import shutdown_shared_driver
             threading.Thread(target=shutdown_shared_driver, daemon=True).start()
         except Exception:
             pass
+
+        # Bounded wait so cancellation lands (threads return) before their C++
+        # objects are destroyed -- but never freeze close for long.
+        import time as _t
+        deadline = _t.time() + 3.0   # total budget across all threads
+        for t in threads:
+            try:
+                t.wait(max(1, int((deadline - _t.time()) * 1000)))
+            except Exception:
+                pass
+
         super().closeEvent(event)

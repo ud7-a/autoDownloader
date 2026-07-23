@@ -346,9 +346,11 @@ class SiteManagerWidget(QWidget):
                         with open(file_path, "w", encoding="utf-8") as f:
                             json.dump(sites_data[current_profile], f, indent=4, ensure_ascii=False)
                         msg = MessageBox("Success", "Profile exported successfully!", self)
+                        msg.cancelButton.hide()
                         msg.exec()
                     except Exception as e:
                         err = MessageBox("Error", f"Failed to export profile:\n{e}", self)
+                        err.cancelButton.hide()
                         err.exec()
 
     def auto_decode_url(self, text):

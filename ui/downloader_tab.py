@@ -86,11 +86,9 @@ class EpisodeRangePicker(QWidget):
 
         self.btn_add = PushButton(FIF.ADD, "Add another range")
         self.btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add.setMinimumHeight(36)
         self.btn_add.clicked.connect(self._on_add_clicked)
-        add_row = QHBoxLayout()
-        add_row.addWidget(self.btn_add)
-        add_row.addStretch()
-        root.addLayout(add_row)
+        root.addWidget(self.btn_add)   # full-width button
 
         self._add_row()   # always start with one range
 
@@ -111,7 +109,7 @@ class EpisodeRangePicker(QWidget):
         for sp, val in ((sp_from, a), (sp_to, b)):
             sp.setRange(0, 99999)
             sp.setValue(val)
-            sp.setFixedWidth(130)   # wide enough that the up/down arrows never cover the digits
+            sp.setMinimumWidth(80)   # keep the up/down arrows off the digits
             sp.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             sp.wheelEvent = lambda e: e.ignore()   # don't change value on scroll
         lbl_to = QLabel("to")
@@ -126,12 +124,12 @@ class EpisodeRangePicker(QWidget):
         btn_rm.setFixedSize(40, 40)
         btn_rm.setToolTip("Remove this range")
 
+        # From/To each take an equal (~50%) share of the row width.
         h.addWidget(lbl_from)
-        h.addWidget(sp_from)
+        h.addWidget(sp_from, 1)
         h.addWidget(lbl_to)
-        h.addWidget(sp_to)
+        h.addWidget(sp_to, 1)
         h.addWidget(btn_rm)
-        h.addStretch()
 
         entry = {"widget": row, "from": sp_from, "to": sp_to, "rm": btn_rm}
         btn_rm.clicked.connect(lambda: self._remove_row(entry))
@@ -197,43 +195,50 @@ class ConnectionCheckThread(QThread):
         self.url = url
 
     def run(self):
-        import urllib.request, urllib.parse, ssl, socket
-        from urllib.error import HTTPError
         ok, err = False, ""
-        req = urllib.request.Request(
-            self.url,
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        )
         try:
-            # Tier 1: standard TLS-verified reach.
-            with urllib.request.urlopen(req, timeout=5.0):
-                ok = True
-        except HTTPError:
-            ok = True   # any HTTP status means the server is alive
-        except Exception as first_err:
-            s = str(first_err).lower()
-            if any(w in s for w in ["ssl", "cert", "handshake", "verification", "untrusted"]):
-                # Tier 2: only if it failed on TLS validation, retry unverified.
-                try:
-                    ctx = ssl._create_unverified_context()
-                    with urllib.request.urlopen(req, timeout=5.0, context=ctx):
-                        ok = True
-                except HTTPError:
-                    ok = True
-                except Exception as fb:
-                    err = str(fb)
-            else:
-                err = str(first_err)
-        # Tier 3: DNS resolves -> site is up even if Cloudflare reset the socket.
-        if not ok:
+            import urllib.request, urllib.parse, ssl, socket
+            from urllib.error import HTTPError
+            req = urllib.request.Request(
+                self.url,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                         'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+            )
+            if self.isInterruptionRequested():
+                self.result.emit(False, "cancelled")
+                return
             try:
-                host = urllib.parse.urlsplit(self.url).netloc.split(':')[0]
-                if host:
-                    socket.gethostbyname(host)
+                # Tier 1: standard TLS-verified reach.
+                with urllib.request.urlopen(req, timeout=5.0):
                     ok = True
-            except Exception as dns_err:
-                err = f"DNS resolution failed: {dns_err}"
+            except HTTPError:
+                ok = True   # any HTTP status means the server is alive
+            except Exception as first_err:
+                s = str(first_err).lower()
+                if any(w in s for w in ["ssl", "cert", "handshake", "verification", "untrusted"]):
+                    # Tier 2: only if it failed on TLS validation, retry unverified.
+                    try:
+                        ctx = ssl._create_unverified_context()
+                        with urllib.request.urlopen(req, timeout=5.0, context=ctx):
+                            ok = True
+                    except HTTPError:
+                        ok = True
+                    except Exception as fb:
+                        err = str(fb)
+                else:
+                    err = str(first_err)
+            # Tier 3: DNS resolves -> site is up even if Cloudflare reset the socket.
+            if not ok:
+                try:
+                    host = urllib.parse.urlsplit(self.url).netloc.split(':')[0]
+                    if host:
+                        socket.gethostbyname(host)
+                        ok = True
+                except Exception as dns_err:
+                    err = f"DNS resolution failed: {dns_err}"
+        except Exception as e:
+            # Any unexpected failure must still report back, or Start stays disabled.
+            err = str(e)
         self.result.emit(ok, err)
 
 
@@ -593,10 +598,16 @@ class DownloaderWidget(QWidget):
 
     def _update_sound_controls(self):
         # Hide preview/volume when "None" is selected -- there is nothing to play.
-        is_none = app_settings.get("selected_sound", "") == SOUND_NONE
+        selected = app_settings.get("selected_sound", "")
+        is_none = selected == SOUND_NONE
         if hasattr(self, 'btn_play_sound'): self.btn_play_sound.setVisible(not is_none)
-        if hasattr(self, 'btn_delete_sound'): self.btn_delete_sound.setVisible(not is_none)
         if hasattr(self, 'volume_container'): self.volume_container.setVisible(not is_none)
+        # Delete only applies to user-added sounds. Disable it for None and the
+        # built-in default so it can't be spam-clicked (which stacked InfoBars).
+        if hasattr(self, 'btn_delete_sound'):
+            deletable = selected in app_settings.get("custom_sounds", [])
+            self.btn_delete_sound.setVisible(not is_none)
+            self.btn_delete_sound.setEnabled(deletable)
     def _update_episode_feedback(self):
         """Live total under the picker: friendly count + normalized spec when valid,
         or a red hint when a range is backwards. Also gates the Start button while idle."""
@@ -694,7 +705,84 @@ class DownloaderWidget(QWidget):
         self._update_episode_feedback()
         self.start_task()
 
+    def _warn(self, title, content):
+        InfoBar.warning(title=title, content=content, orient=Qt.Orientation.Horizontal,
+                        isClosable=True, position=InfoBarPosition.TOP, duration=4000, parent=self)
+
+    def start_watch_download(self, title, template, domain, episodes_str):
+        """Download the given episodes for a watched anime WITHOUT creating a saved
+        profile. Reuses an existing same-name profile if one exists, otherwise runs
+        against a transient in-memory profile that is discarded when the task ends."""
+        if self._checking:
+            return
+        ranges = spec_to_ranges(episodes_str)
+        episodes_list = sorted({e for a, b in ranges for e in range(a, b + 1)})
+        if not episodes_list:
+            self._warn("Nothing to Download", "No new episodes to download.")
+            return
+
+        target_dir = self.txt_dir.text().strip() or app_settings.get("download_dir", "")
+        if not target_dir or not os.path.exists(target_dir):
+            self._warn("Invalid Path", "Set a valid download folder in the Downloader tab first.")
+            return
+
+        # Folder / lookup key = the anime name (so videos land in a sensible folder).
+        site_key = "".join(c for c in title if c not in r'\/:*?"<>|').strip() or "Anime"
+
+        transient = site_key not in sites_data
+        if transient:
+            from ui.search_tab import resolve_site_flow
+            step_paths, next_btn = resolve_site_flow(domain)
+            if not any(isinstance(v, list) and v for v in step_paths.values()):
+                self._warn("No Download Steps",
+                           f"No automation steps configured for {domain}. Set up one "
+                           f"profile for this site in Profile Manager first.")
+                return
+            with config_lock:
+                sites_data[site_key] = {
+                    "url": template,
+                    "next_btn_xpath": next_btn,
+                    "step_paths": step_paths,
+                    "last_episodes": episodes_str,
+                    "_transient": True,   # in-memory only; never saved, removed on finish
+                }
+
+            def _cleanup(*_a):
+                with config_lock:
+                    if sites_data.get(site_key, {}).get("_transient"):
+                        sites_data.pop(site_key, None)
+                for sig in (signals.task_finished, signals.task_cancelled):
+                    try:
+                        sig.disconnect(_cleanup)
+                    except Exception:
+                        pass
+            signals.task_finished.connect(_cleanup)
+            signals.task_cancelled.connect(_cleanup)
+        else:
+            with config_lock:
+                sp = sites_data[site_key].get("step_paths", {}) or {}
+            if not any(isinstance(v, list) and v for v in sp.values()):
+                self._warn("No Download Steps",
+                           f"The profile '{site_key}' has no automation steps. Configure it first.")
+                return
+
+        self._begin_download({
+            "site": site_key,
+            "episodes_list": episodes_list,
+            "target_dir": target_dir,
+            "headless": self.chk_headless.isChecked(),
+            "webhook": self.txt_webhook.text().strip(),
+            "selected_sound": app_settings.get("selected_sound", ""),
+            "volume": app_settings.get("volume", 100),
+            "concurrency": app_settings.get("concurrency", 3),
+        })
+
     def start_task(self):
+        # Guard re-entry: a connection check already in flight (rapid clicks, or a
+        # History/Watchlist re-download firing while one runs) must not spawn a second
+        # ConnectionCheckThread and orphan the first (which would crash on GC).
+        if self._checking:
+            return
         site = self.combo_site.currentText()
         if not site or site in ["No Profiles", "No profile selected"]:
             InfoBar.warning(

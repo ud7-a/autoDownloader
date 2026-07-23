@@ -125,6 +125,35 @@ def episode_url_variants(url):
             out.append(u)
     return out
 
+def rewrite_gdrive_to_direct_download(driver, download_dir):
+    """If the active tab is a Google Drive file-preview page (…/file/d/<ID>/view),
+    navigate it to the direct-download URL so a large video shows the "Download
+    anyway" virus-scan confirm and can be intercepted. No-op for any other page.
+
+    animerco's download links redirect here (unlike witanime's, which land on the
+    download page directly), so this bridges the gap. The redirect can take a moment
+    to settle, so we poll briefly for the Drive file URL.
+    """
+    try:
+        for _ in range(12):
+            url = driver.current_url or ""
+            m = re.search(r"drive\.google\.com/file/d/([A-Za-z0-9_-]+)", url)
+            if m:
+                driver.get(f"https://drive.google.com/uc?export=download&id={m.group(1)}")
+                try:
+                    driver.execute_cdp_cmd("Page.setDownloadBehavior",
+                                           {"behavior": "allow", "downloadPath": download_dir})
+                except Exception:
+                    pass
+                return
+            # Already settled on a non-preview Drive/host page -> nothing to rewrite.
+            if "drive.google.com" in url and "/file/d/" not in url:
+                return
+            time.sleep(0.5)
+    except Exception:
+        pass
+
+
 def parse_smart_xpath(raw_input):
     raw_input = raw_input.strip()
     if not raw_input: return ""
@@ -1043,7 +1072,14 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 driver.switch_to.window(driver.window_handles[-1])
                                 driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": ep_temp_dir})
                                 current_tabs = new_tabs
-                                
+
+                                # A new tab that lands on a Google Drive file-preview
+                                # page (e.g. animerco's /links redirect) can't be
+                                # downloaded from /view -- rewrite it to the direct
+                                # download URL so the large-file "Download anyway"
+                                # confirm shows and the file can be intercepted.
+                                rewrite_gdrive_to_direct_download(driver, ep_temp_dir)
+
                                 # Dynamic Captcha Solver Integration for tab switch
                                 try:
                                     solve_captcha_if_present(driver, driver.current_url)

@@ -1,5 +1,6 @@
 import os
 import re
+import copy
 import time
 import base64
 import tempfile
@@ -7,7 +8,7 @@ import threading
 from collections import defaultdict
 from urllib.parse import urlparse, quote, unquote
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel)
 from qfluentwidgets import (LineEdit, PrimaryPushButton, ComboBox, ToolButton,
@@ -24,6 +25,50 @@ SUPPORTED_SITES = {
     "eta.animerco.org": "https://eta.animerco.org/?s={query}",
 }
 
+# Built-in download click-flows for supported sites, used when a freshly created
+# search profile has no existing same-domain profile to inherit steps from. Without
+# this a new profile would have empty step_paths and couldn't download.
+DEFAULT_SITE_FLOWS = {
+    "witanime.life": {
+        "next_btn_xpath": "الحلقة التالية",
+        "step_paths": {
+            "mediafire": [
+                {"xpath": "mediafire #last", "delay": 7.0},
+                {"xpath": '//*[@id="downloadButton"]', "delay": 3.0},
+            ],
+            "google drive": [
+                {"xpath": "google drive #last", "delay": 4.0},
+                {"xpath": "Download anyway", "delay": 3.0},
+            ],
+            "Workupload": [
+                {"xpath": "workupload #last", "delay": 5.0},
+                {"xpath": '//*[@id=\\"file\\"]/div[3]/div/a', "delay": 5.0},
+            ],
+        },
+    },
+    # animerco shows downloads as a table (رابط/خادم/جودة/لغة); each row's "تحميل"
+    # button opens a /links/<id> redirect that lands directly on the host. We target
+    # the Google Drive row by its favicon domain; the engine then rewrites the Drive
+    # file-preview page to a direct download so the "Download anyway" confirm appears.
+    "eta.animerco.org": {
+        "next_btn_xpath": "الحلقة التالية",
+        "step_paths": {
+            "google drive": [
+                {"xpath": "//tr[.//div[contains(@data-src,'drive.google')]]//a[contains(@class,'labeled')]",
+                 "delay": 5.0},
+                {"xpath": "Download anyway", "delay": 3.0},
+            ],
+            # Fallback: episodes that also offer MediaFire. The engine tries this
+            # path only if the Google Drive one above didn't find its row.
+            "mediafire": [
+                {"xpath": "//tr[.//div[contains(@data-src,'mediafire')]]//a[contains(@class,'labeled')]",
+                 "delay": 5.0},
+                {"xpath": '//*[@id="downloadButton"]', "delay": 3.0},
+            ],
+        },
+    },
+}
+
 
 def extract_domain(url):
     """Return the bare host (no scheme, no leading www.) for a URL or domain string."""
@@ -35,6 +80,28 @@ def extract_domain(url):
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def resolve_site_flow(domain):
+    """Return (step_paths, next_btn_xpath) for a download on `domain`: inherit the
+    same-domain profile with the most steps, else a built-in default flow. Shared by
+    the Search profile creator and the Watchlist direct downloader."""
+    paths, nxt, best = {}, "", -1
+    with config_lock:
+        for cfg in sites_data.values():
+            if extract_domain(cfg.get("url", "")) != domain:
+                continue
+            sp = cfg.get("step_paths", {}) or {}
+            count = sum(len(v) for v in sp.values() if isinstance(v, list))
+            if count > best:
+                best = count
+                paths = copy.deepcopy(sp)
+                nxt = cfg.get("next_btn_xpath", "")
+    if best <= 0 and domain in DEFAULT_SITE_FLOWS:
+        flow = DEFAULT_SITE_FLOWS[domain]
+        paths = copy.deepcopy(flow["step_paths"])
+        nxt = flow.get("next_btn_xpath", "")
+    return paths, nxt
 
 
 def _make_headless_driver():
@@ -321,6 +388,8 @@ class AnimeSearchThread(QThread):
         end = time.time() + timeout
         last = []
         while time.time() < end:
+            if self.isInterruptionRequested():
+                return last
             try:
                 r = driver.execute_async_script(_AUTODETECT_JS, self.query)
             except Exception:
@@ -407,14 +476,19 @@ class AnimeDetailsThread(QThread):
         else:
             self.error.emit("Could not detect episodes for this title.")
 
-    def detect_entries(self, anime_url, want_covers=True, driver=None):
+    def detect_entries(self, anime_url, want_covers=True, driver=None, should_cancel=None):
         """Synchronous episode detection for an anime page. Returns a list of
         entries [{"label","template","max_ep","poster","cover"}] (one per season,
         or a single flat entry), or []. Reused by search and the new-episode watcher.
 
         Pass an explicit `driver` to run on a caller-owned browser (the watcher's
         parallel pool); otherwise the shared search driver is acquired/released.
+        `should_cancel` is a predicate polled at loop boundaries so the caller can
+        abort a long detection (e.g. on app close); defaults to this thread's own
+        interruption flag.
         """
+        if should_cancel is None:
+            should_cancel = self.isInterruptionRequested
         # _find_season_links derives the base host from self.anime_url, so keep it in
         # sync (the watcher constructs this thread with an empty url and passes it here).
         self.anime_url = anime_url
@@ -432,6 +506,8 @@ class AnimeDetailsThread(QThread):
             seasons = []
             end = time.time() + 5.0
             while time.time() < end:
+                if should_cancel():
+                    return []
                 seasons = self._find_season_links(driver)
                 if seasons:
                     break
@@ -443,6 +519,8 @@ class AnimeDetailsThread(QThread):
             if seasons:
                 entries = []
                 for label, url, poster in seasons[:25]:
+                    if should_cancel():
+                        break
                     try:
                         driver.get(url)
                         tmpl, mx = self._derive_ready(driver, timeout=4.0)
@@ -912,12 +990,28 @@ class AnimeSearchWidget(QWidget):
         self._show_results()
         n = len(results)
         self.lbl_status.setText(f"{n} result{'s' if n != 1 else ''} · click a card to load it.")
-        cols = 5
-        for i, r in enumerate(results):
+        # Build cards in small batches, yielding to the event loop between each, so
+        # a big result set streams in instead of freezing the UI while every card's
+        # cover is decoded and rounded up front.
+        self._pending_results = list(results)
+        self._render_index = 0
+        self._render_gen = getattr(self, "_render_gen", 0) + 1
+        self._render_next_batch(self._render_gen)
+
+    def _render_next_batch(self, gen):
+        if gen != getattr(self, "_render_gen", 0):
+            return   # a newer search/clear superseded this render
+        cols, batch = 5, 8
+        end = min(self._render_index + batch, len(self._pending_results))
+        for i in range(self._render_index, end):
+            r = self._pending_results[i]
             card = AnimeResultCard(r["title"], r["link"], r["cover"], followable=True)
             card.selected.connect(self.on_result_selected)
             card.follow.connect(self._on_follow)
             self.grid.addWidget(card, i // cols, i % cols)
+        self._render_index = end
+        if end < len(self._pending_results):
+            QTimer.singleShot(0, lambda: self._render_next_batch(gen))
 
     def on_search_error(self, msg):
         self.btn_search.setEnabled(True)
@@ -992,15 +1086,10 @@ class AnimeSearchWidget(QWidget):
     def _create_profile(self, name, url_template, max_ep, domain=None):
         if domain is None:
             domain = self._current_domain()
-        # Inherit the click-flow from an existing profile on the same domain, if any.
-        inherited_paths, inherited_next = {}, ""
+        # Give the new profile a working download click-flow (inherit the best
+        # same-domain profile, else a built-in default).
+        inherited_paths, inherited_next = resolve_site_flow(domain)
         with config_lock:
-            for cfg in sites_data.values():
-                if extract_domain(cfg.get("url", "")) == domain:
-                    inherited_paths = cfg.get("step_paths", {})
-                    inherited_next = cfg.get("next_btn_xpath", "")
-                    break
-
             # Sanitize + de-duplicate the profile name.
             base = re.sub(r'[\\/:*?"<>|]', "", name).strip() or "Anime"
             final = base
@@ -1037,6 +1126,8 @@ class AnimeSearchWidget(QWidget):
         self.grid_host.show()
 
     def clear_grid(self):
+        # Invalidate any in-flight batched card render so it stops adding stale cards.
+        self._render_gen = getattr(self, "_render_gen", 0) + 1
         while self.grid.count():
             item = self.grid.takeAt(0)
             w = item.widget()

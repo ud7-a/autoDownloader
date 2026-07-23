@@ -9,7 +9,7 @@ PROFILE_DIR = os.path.join(APP_DIR, "SeleniumProfile")
 DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
-APP_VERSION = "4.2.0"
+APP_VERSION = "4.2.1"
 
 # --- GLOBAL LOCKS ---
 config_lock = threading.RLock()
@@ -144,8 +144,12 @@ def save_config():
             if settings_to_save.get("discord_webhook"):
                 settings_to_save["discord_webhook"] = encrypt_webhook(settings_to_save["discord_webhook"])
 
+            # Transient profiles (e.g. one-off Watchlist downloads) live in memory
+            # only -- never persist them to disk.
+            sites_to_save = {k: v for k, v in sites_data.items() if not v.get("_transient")}
+
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump({"settings": settings_to_save, "sites": sites_data}, f, indent=4, ensure_ascii=False)
+                json.dump({"settings": settings_to_save, "sites": sites_to_save}, f, indent=4, ensure_ascii=False)
     except Exception as e:
         # A disk/permission failure must never crash a UI slot that called save.
         print(f"Error saving config: {e}")
