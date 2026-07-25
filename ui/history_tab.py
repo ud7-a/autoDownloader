@@ -41,6 +41,11 @@ class HistoryWidget(QWidget):
         # Enable double click to play/preview
         self.table.cellDoubleClicked.connect(lambda row, col: self.play_download(row))
 
+        # Rebuild the visible rows' action buttons as the user scrolls.
+        self._action_rows = set()
+        self._row_meta = []
+        self.table.verticalScrollBar().valueChanged.connect(self._sync_action_widgets)
+
         # Fluent PushButton with styled danger design
         self.btn_clear_history = PushButton(FIF.DELETE, "Clear History")
         self.btn_clear_history.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -88,6 +93,8 @@ class HistoryWidget(QWidget):
 
     def refresh_data(self):
         self.table.setRowCount(0)
+        self._action_rows = set()      # rows that currently own an action-cell widget
+        self._row_meta = []            # (profile, episodes) per row, for the buttons
         conn = None
         try:
             with db_lock:
@@ -95,43 +102,82 @@ class HistoryWidget(QWidget):
                 c = conn.cursor()
                 c.execute("SELECT date, profile, episodes, status, notes FROM downloads_v2 ORDER BY id DESC")
                 rows = c.fetchall()
+                self.table.setRowCount(len(rows))
                 for row_idx, row_data in enumerate(rows):
-                    self.table.insertRow(row_idx)
                     for col_idx, item_data in enumerate(row_data):
                         item = QTableWidgetItem(str(item_data))
                         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        
-                        if col_idx == 3: 
+
+                        if col_idx == 3:
                             if item_data == "Success": item.setForeground(QColor("#2ecc71"))
                             elif item_data == "Failed": item.setForeground(QColor("#e74c3c"))
                             elif item_data == "Partial": item.setForeground(QColor("#f39c12"))
                             elif item_data == "Cancelled": item.setForeground(QColor("#aaaaaa"))
-                            
+
                         self.table.setItem(row_idx, col_idx, item)
-                        
-                    # Action cell: Watch + Re-download.
-                    cell = QWidget()
-                    cl = QHBoxLayout(cell)
-                    cl.setContentsMargins(4, 2, 4, 2)
-                    cl.setSpacing(6)
-                    play_btn = PushButton(FIF.PLAY, "Watch")
-                    play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    play_btn.setFixedHeight(28)
-                    play_btn.clicked.connect(lambda checked, r=row_idx: self.play_download(r))
-                    re_btn = PushButton(FIF.SYNC, "Re-download")
-                    re_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    re_btn.setFixedHeight(28)
-                    prof, eps = str(row_data[1]), str(row_data[2])
-                    re_btn.clicked.connect(lambda checked, p=prof, e=eps: self.redownload_signal.emit(p, e))
-                    cl.addWidget(play_btn)
-                    cl.addWidget(re_btn)
-                    self.table.setCellWidget(row_idx, 5, cell)
+
+                    self._row_meta.append((str(row_data[1]), str(row_data[2])))
         except Exception:
             pass
         finally:
             if conn:
                 try: conn.close()
                 except: pass
+        # Action buttons are built only for the rows on screen (see _sync_action_widgets):
+        # creating them for every row cost ~9ms each, freezing the tab for seconds on a
+        # long history.
+        self._sync_action_widgets()
+
+    def _make_action_cell(self, row_idx):
+        """Build the Watch + Re-download cell for one row."""
+        prof, eps = self._row_meta[row_idx]
+        cell = QWidget()
+        cl = QHBoxLayout(cell)
+        cl.setContentsMargins(4, 2, 4, 2)
+        cl.setSpacing(6)
+        play_btn = PushButton(FIF.PLAY, "Watch")
+        play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        play_btn.setFixedHeight(28)
+        play_btn.clicked.connect(lambda checked, r=row_idx: self.play_download(r))
+        re_btn = PushButton(FIF.SYNC, "Re-download")
+        re_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        re_btn.setFixedHeight(28)
+        re_btn.clicked.connect(lambda checked, p=prof, e=eps: self.redownload_signal.emit(p, e))
+        cl.addWidget(play_btn)
+        cl.addWidget(re_btn)
+        return cell
+
+    def _sync_action_widgets(self):
+        """Keep action buttons only for the visible rows (plus a small buffer), so the
+        table stays instant no matter how long the history is."""
+        if not getattr(self, "_row_meta", None):
+            return
+        vp = self.table.viewport()
+        first = self.table.rowAt(0)
+        last = self.table.rowAt(vp.height() - 1)
+        if first < 0:
+            first = 0
+        if last < 0:
+            # Viewport can't resolve a row yet (tab not shown / not laid out). Estimate
+            # how many rows fit instead of falling back to "all rows", which would
+            # rebuild every button and reintroduce the freeze this method prevents.
+            row_h = max(1, self.table.verticalHeader().defaultSectionSize())
+            visible = max(1, vp.height() // row_h)
+            last = min(self.table.rowCount() - 1, first + visible)
+        buffer_rows = 5
+        lo = max(0, first - buffer_rows)
+        hi = min(self.table.rowCount() - 1, last + buffer_rows)
+        wanted = set(range(lo, hi + 1))
+
+        for row in self._action_rows - wanted:
+            self.table.removeCellWidget(row, 5)
+        for row in wanted - self._action_rows:
+            self.table.setCellWidget(row, 5, self._make_action_cell(row))
+        self._action_rows = wanted
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_action_widgets()
 
     def play_download(self, row):
         profile_item = self.table.item(row, 1)

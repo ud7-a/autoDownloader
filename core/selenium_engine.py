@@ -5,6 +5,7 @@ import shutil
 import traceback
 import ctypes
 import re
+import collections
 import random
 import tempfile
 import subprocess
@@ -124,6 +125,42 @@ def episode_url_variants(url):
             seen.add(u)
             out.append(u)
     return out
+
+# Precompiled patterns + helper for parsing aria2c's progress output. These run on
+# every stdout line of every active download, so they are hoisted out of the loop.
+_ARIA_PROGRESS_RE = re.compile(r"([^ ]+)/([^ ]+)\((\d+)%\).*?DL:([^ \]]+)")
+_ARIA_ETA_RE = re.compile(r"ETA:([^ \]]+)")
+_ARIA_CONN_RE = re.compile(r"CN:(\d+)\s+DL:([^ \]]+)")
+_ARIA_UNIT_RE = re.compile(r"([\d\.]+)(K|M|G)iB")
+
+
+def _aria_convert_unit(val_str):
+    """Turn aria2c's KiB/MiB/GiB figure into a friendly KB/MB/GB string."""
+    m = _ARIA_UNIT_RE.match(val_str)
+    if not m:
+        return val_str
+    val, unit = float(m.group(1)), m.group(2)
+    if unit == 'K': return f"{val * 1.024:.1f} KB"
+    if unit == 'M': return f"{val * 1.048576:.2f} MB"
+    return f"{val * 1.07374:.2f} GB"
+
+
+_ARIA_ETA_PARTS_RE = re.compile(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
+
+
+def _format_eta(raw):
+    """Render aria2c's ETA ("1m5s", "45s", "1h2m3s") as MM:SS.
+
+    Minutes are never rolled up into hours, so an hour-plus wait reads 65:30 rather
+    than 1:05:30. Returns the raw value unchanged if it doesn't parse.
+    """
+    m = _ARIA_ETA_PARTS_RE.match((raw or "").strip())
+    if not m or not any(m.groups()):
+        return raw
+    hours, mins, secs = (int(g) if g else 0 for g in m.groups())
+    total_minutes = hours * 60 + mins
+    return f"{total_minutes:02d}:{secs:02d}"
+
 
 def rewrite_gdrive_to_direct_download(driver, download_dir):
     """If the active tab is a Google Drive file-preview page (…/file/d/<ID>/view),
@@ -664,55 +701,38 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
             )
             active_aria2_processes.append(process)
             ep_aria2_processes[ep] = process
-            recent_lines = []
+            # Bounded ring buffer: appending drops the oldest line for free, instead of
+            # re-slicing a list on every single line of output.
+            recent_lines = collections.deque(maxlen=30)
 
             for line in process.stdout:
                 recent_lines.append(line.rstrip())
-                if len(recent_lines) > 30: recent_lines = recent_lines[-30:]
                 if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) or ep_cancel_events[ep].is_set() or pause_event.is_set() or ep_pause_events[ep].is_set():
                     break
                     
                 if "%" in line and "DL:" in line:
                     try:
-                        match = re.search(r"([^ ]+)/([^ ]+)\((\d+)%\).*?DL:([^ \]]+)", line)
+                        match = _ARIA_PROGRESS_RE.search(line)
                         if match:
-                            def convert_unit(val_str):
-                                m = re.match(r"([\d\.]+)(K|M|G)iB", val_str)
-                                if m:
-                                    val = float(m.group(1))
-                                    unit = m.group(2)
-                                    if unit == 'K': return f"{val * 1.024:.1f} KB"
-                                    if unit == 'M': return f"{val * 1.048576:.2f} MB"
-                                    if unit == 'G': return f"{val * 1.07374:.2f} GB"
-                                return val_str
                             pct = int(match.group(3))
-                            speed = convert_unit(match.group(4)) + "/s"
-                            total_size = convert_unit(match.group(2))   # full episode size
+                            speed = _aria_convert_unit(match.group(4)) + "/s"
+                            total_size = _aria_convert_unit(match.group(2))   # full episode size
 
                             # Time remaining, straight from aria2c's ETA field.
                             eta_str = ""
-                            eta_match = re.search(r"ETA:([^ \]]+)", line)
+                            eta_match = _ARIA_ETA_RE.search(line)
                             if eta_match:
-                                eta_str = f"   •   Remaining: {eta_match.group(1)}"
+                                eta_str = f"   •   Remaining: {_format_eta(eta_match.group(1))}"
 
                             signals.update_active_bar.emit(ep, pct)
                             signals.update_active_download.emit(ep, f"⚡ {speed}   •   {pct}% of {total_size}{eta_str}")
                     except Exception: pass
                 elif "CN:" in line:
                     try:
-                        def convert_unit(val_str):
-                            m = re.match(r"([\d\.]+)(K|M|G)iB", val_str)
-                            if m:
-                                val = float(m.group(1))
-                                unit = m.group(2)
-                                if unit == 'K': return f"{val * 1.024:.1f} KB"
-                                if unit == 'M': return f"{val * 1.048576:.2f} MB"
-                                if unit == 'G': return f"{val * 1.07374:.2f} GB"
-                            return val_str
-                        match_init = re.search(r"CN:(\d+)\s+DL:([^ \]]+)", line)
+                        match_init = _ARIA_CONN_RE.search(line)
                         if match_init:
                             active_conns = match_init.group(1)
-                            speed = convert_unit(match_init.group(2)) + "/s"
+                            speed = _aria_convert_unit(match_init.group(2)) + "/s"
                             signals.update_active_download.emit(ep, f"🔌 Connecting... (Conns: {active_conns}, Speed: {speed})")
                     except Exception: pass
             
@@ -741,7 +761,7 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                         _lf.write(f"\n=== Ep {ep}  rc={process.returncode}  {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
                         _lf.write(f"URL: {url}\n")
                         _lf.write(f"Cookies sent: {'yes' if cookie_str else 'NONE'} (len={len(cookie_str)})\n")
-                        _lf.write("aria2c output:\n" + "\n".join(recent_lines[-30:]) + "\n")
+                        _lf.write("aria2c output:\n" + "\n".join(recent_lines) + "\n")
                 except Exception:
                     pass
             

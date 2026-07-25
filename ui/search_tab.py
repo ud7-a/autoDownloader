@@ -198,15 +198,19 @@ def shutdown_shared_driver():
 
 
 def _prune_cover_cache(cache_dir, max_files=300):
-    """Keep the cover cache bounded -- drop the oldest files beyond max_files."""
+    """Keep the cover cache bounded -- drop the oldest files beyond max_files.
+
+    Uses scandir so the is-file check and mtime come from the directory entry that
+    was already read, instead of two extra stat() syscalls per cached cover.
+    """
     try:
-        files = [os.path.join(cache_dir, f) for f in os.listdir(cache_dir)]
-        files = [f for f in files if os.path.isfile(f)]
+        with os.scandir(cache_dir) as it:
+            files = [(e.stat().st_mtime, e.path) for e in it if e.is_file()]
         if len(files) <= max_files:
             return
-        files.sort(key=lambda p: os.path.getmtime(p))
-        for f in files[:len(files) - max_files]:
-            try: os.remove(f)
+        files.sort(key=lambda t: t[0])
+        for _mtime, path in files[:len(files) - max_files]:
+            try: os.remove(path)
             except Exception: pass
     except Exception:
         pass
@@ -585,6 +589,11 @@ class AnimeDetailsThread(QThread):
         template, max_ep = self._derive_from_onclick(driver, onclicks)
         if not template:
             template, max_ep = self._derive_from_hrefs(hrefs)
+        if not template:
+            # Last resort: a movie/OVA or a series with a single uploaded episode.
+            # Both grouping strategies need >=2 links to infer a pattern, so these
+            # would otherwise look like "no episodes at all".
+            template, max_ep = self._derive_single(self._onclick_episode_urls(onclicks) + hrefs)
         return (template, max_ep) if template else ("", 0)
 
     def _find_season_links(self, driver):
@@ -663,6 +672,52 @@ class AnimeDetailsThread(QThread):
 
     # URL markers that identify a real episode link (vs movie/series/related noise).
     _EP_MARKERS = ("/episode", "/watch/", "/ep-", "/ep/", "الحلقة", "حلقة")
+
+    @staticmethod
+    def _onclick_episode_urls(onclicks):
+        """Decode witanime-style openEpisode('<base64>') handlers into plain URLs."""
+        urls = []
+        for oc in onclicks:
+            m = re.search(r"openEpisode\('([a-zA-Z0-9+/=]+)'\)", oc)
+            if not m:
+                continue
+            try:
+                urls.append(base64.b64decode(m.group(1)).decode("utf-8", "ignore"))
+            except Exception:
+                continue
+        return urls
+
+    def _derive_single(self, urls):
+        """Handle a page listing exactly ONE entry -- a movie/OVA, or a series whose
+        first episode is its only upload.
+
+        Movies have no episode number in the URL at all (e.g. .../episode/فيلم-<slug>-movie/),
+        so there is nothing to parameterise: the URL itself is the whole target and the
+        profile holds a single "episode 1". A lone numbered episode still gets a {x}
+        template so later uploads keep working.
+        """
+        seen, eps = set(), []
+        for u in urls:
+            if not u.startswith(("http://", "https://")):
+                continue
+            u = unquote(u).split("#")[0]
+            if not any(mk in u.lower() for mk in self._EP_MARKERS):
+                continue
+            if u not in seen:
+                seen.add(u)
+                eps.append(u)
+        if len(eps) != 1:
+            return "", 0
+        url = eps[0]
+        # A trailing episode number -> keep it parameterised (but ignore year-like runs).
+        m = None
+        for m in re.finditer(r'\d+', url):
+            pass
+        if m:
+            n = int(m.group(0))
+            if n >= 1 and not (1990 <= n <= 2035):
+                return url[:m.start()] + "{x}" + url[m.end():], n
+        return url, 1
 
     def _derive_from_hrefs(self, hrefs):
         """Group episode-looking URLs by replacing their last number with {x};
