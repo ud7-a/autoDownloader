@@ -1,0 +1,47 @@
+{
+    "url": "https://witanime.life/episode/mushoku-tensei-iii-isekai-ittara-honki-dasu-الحلقة-{x}",
+    "next_btn_xpath": "الحلقة التالية",
+    "step_paths": {
+        "mediafire": [
+            {
+                "xpath": "mediafire #last",
+                "delay": 7.0
+            },
+            {
+                "xpath": "//*[@id=\"downloadButton\"]",
+                "delay": 3.0
+            }
+        ],
+        "google drive": [
+            {
+                "xpath": "google drive #last",
+                "delay": 4.0
+            },
+            {
+                "xpath": "Download anyway",
+                "delay": 3.0
+            }
+        ],
+        "Workupload": [
+            {
+                "xpath": "workupload #last",
+                "delay": 5.0
+            },
+            {
+                "xpath": "//*[@id=\\\"file\\\"]/div[3]/div/a",
+                "delay": 5.0
+            }
+        ],
+        "rf": [
+            {
+                "xpath": "rf #last",
+                "delay": 11.0
+            },
+            {
+                "xpath": "//*[@id=\"downloadButton\"]",
+                "delay": 2.0
+            }
+        ]
+    },
+    "last_episodes": "1-6"
+}
