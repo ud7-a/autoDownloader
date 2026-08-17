@@ -3,7 +3,12 @@ import json
 import threading
 
 # --- GLOBAL CONSTANTS ---
-APP_DIR = r"C:\Auto Episodes Downloader"
+# Everything the app persists lives under APP_DIR. Setting AED_APP_DIR before import
+# redirects ALL of it (config, history DB, browser profile, tools) somewhere else --
+# tests point it at a temp folder so they can never read or overwrite real user data.
+DEFAULT_APP_DIR = r"C:\Auto Episodes Downloader"
+APP_DIR = os.environ.get("AED_APP_DIR") or DEFAULT_APP_DIR
+IS_ISOLATED = APP_DIR != DEFAULT_APP_DIR
 CONFIG_FILE = os.path.join(APP_DIR, "sites_config.json")
 PROFILE_DIR = os.path.join(APP_DIR, "SeleniumProfile")
 DB_FILE = os.path.join(APP_DIR, "download_history.db")
@@ -33,6 +38,9 @@ app_settings = {
     "unfinished_session": None,
     "captcha_provider": "Disabled",
     "captcha_api_key": "",
+    # Auto-tune how many episodes download at once from measured speed; the
+    # "concurrency" value above stays as the manual setting and the starting point.
+    "concurrency_auto": True,
     # Followed anime for the new-episode watcher. Each entry:
     # {"title", "url", "domain", "seen_max", "latest_template", "latest_max", "checked"}
     "watchlist": [],

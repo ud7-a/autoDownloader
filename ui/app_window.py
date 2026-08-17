@@ -1,6 +1,7 @@
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication
-from qfluentwidgets import FluentWindow, FluentIcon as FIF
+from qfluentwidgets import (FluentWindow, FluentIcon as FIF, MessageBoxBase,
+                            SubtitleLabel, BodyLabel, PushButton)
 
 from ui.downloader_tab import DownloaderWidget
 from ui.search_tab import AnimeSearchWidget
@@ -10,6 +11,106 @@ from ui.progress_tab import ProgressTab
 from ui.watchlist_tab import WatchlistWidget
 from core.signals import signals
 from utils.config import APP_VERSION, app_settings, get_watchlist
+
+VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts')
+
+
+class MissingEpisodesDialog(MessageBoxBase):
+    """Asks what to do when "Start Watching" is pressed but part of the download is
+    missing. `choice` is one of "start", "retry" or "cancel"."""
+
+    def __init__(self, missing, total, parent=None):
+        super().__init__(parent)
+        self.choice = "cancel"
+
+        from ui.downloader_tab import compact_episode_spec
+        n = len(missing)
+        heading = SubtitleLabel(f"{n} episode{'s' if n != 1 else ''} didn't download")
+        detail = BodyLabel(
+            f"Missing: {compact_episode_spec(missing)}\n"
+            f"{total - n} of {total} episodes are ready to watch."
+        )
+        detail.setWordWrap(True)
+        self.viewLayout.addWidget(heading)
+        self.viewLayout.addWidget(detail)
+
+        self.yesButton.setText("Start anyway")
+        self.cancelButton.setText("Cancel")
+        self.retryButton = PushButton("Retry missing episodes")
+        self.retryButton.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Sits between "Start anyway" and "Cancel".
+        self.buttonLayout.insertWidget(1, self.retryButton)
+
+        self.yesButton.clicked.connect(lambda: setattr(self, "choice", "start"))
+        self.retryButton.clicked.connect(self._on_retry)
+        self.cancelButton.clicked.connect(lambda: setattr(self, "choice", "cancel"))
+
+    def _on_retry(self):
+        self.choice = "retry"
+        self.accept()
+
+
+def _episode_files(folder, episodes):
+    """Map each episode number to its downloaded file, or None if it is missing.
+
+    Downloads are saved as "<profile> Ep<n>.<ext>"; the digit boundary stops "Ep5"
+    from matching "Ep50", and a duplicate lands as "Ep5 (2).mp4".
+    """
+    import os
+    import re
+    found = {}
+    try:
+        videos = [os.path.join(folder, f) for f in os.listdir(folder)
+                  if f.lower().endswith(VIDEO_EXTENSIONS)]
+    except Exception:
+        videos = []
+    for ep in sorted(set(episodes or [])):
+        pattern = re.compile(rf"Ep{ep}(?!\d)", re.IGNORECASE)
+        matches = sorted(v for v in videos if pattern.search(os.path.basename(v)))
+        found[ep] = matches[0] if matches else None
+    return found
+
+
+def _play_first_video(folder, parent=None, episodes=None):
+    """Open the first episode of the session that just finished.
+
+    `episodes` is that session's episode numbers. Downloads are saved as
+    "<profile> Ep<n>.<ext>", so we look for those specific numbers in order and play
+    the earliest one present -- otherwise a folder already holding episodes 1-4 would
+    start at 1 when the user just downloaded 5-10. Falls back to the naturally first
+    video (then the folder itself) when nothing matches.
+    """
+    import os
+    import re
+    from qfluentwidgets import InfoBar, InfoBarPosition
+
+    def warn(title, content):
+        InfoBar.warning(title=title, content=content, orient=Qt.Orientation.Horizontal,
+                        isClosable=True, position=InfoBarPosition.TOP,
+                        duration=4000, parent=parent)
+
+    if not folder or not os.path.isdir(folder):
+        warn("Folder Not Found", "The download folder no longer exists.")
+        return
+    try:
+        videos = [os.path.join(folder, f) for f in os.listdir(folder)
+                  if f.lower().endswith(VIDEO_EXTENSIONS)]
+    except Exception:
+        videos = []
+
+    target = next((p for p in _episode_files(folder, episodes).values() if p), None)
+
+    if target is None:
+        def natural_key(path):
+            name = os.path.basename(path)
+            return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)]
+        target = sorted(videos, key=natural_key)[0] if videos else folder
+
+    try:
+        os.startfile(target)
+    except Exception as e:
+        warn("Playback Error", f"Could not open it: {e}")
+
 
 class AppWindow(FluentWindow):
     def __init__(self):
@@ -69,11 +170,15 @@ class AppWindow(FluentWindow):
             self.stackedWidget.setAnimationEnabled(False)
         
         # --- THE FIX: Wiring up our signals ---
+        self._await_finish_dismiss = False   # finished tab is waiting to be dismissed
         signals.task_started.connect(self.show_active_tasks)
-        signals.task_cancelled.connect(self.hide_active_tasks)
-        
-        # When a download successfully finishes, trigger the delayed auto-hide!
-        signals.task_finished.connect(self.delayed_hide_active_tasks)
+        signals.task_cancelled.connect(lambda: self.hide_active_tasks())
+
+        # When downloads finish the tab stays put; it closes on "Start Watching" or
+        # as soon as the user navigates elsewhere.
+        signals.task_finished.connect(self.on_task_finished)
+        self.progress_interface.watch_requested.connect(self.on_start_watching)
+        self.stackedWidget.currentChanged.connect(self._dismiss_finished_tab_on_navigate)
         
         # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
         self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
@@ -84,6 +189,13 @@ class AppWindow(FluentWindow):
         # Watchlist wiring: follow from Search, and download-new -> Downloader.
         self.search_interface.follow_signal.connect(self.on_follow_anime)
         self.watchlist_interface.download_new_signal.connect(self.on_watch_download_new)
+        self.watchlist_interface.download_all_signal.connect(self.on_watch_download_all)
+        self.watchlist_interface.new_episodes_found.connect(self.on_new_episodes_found)
+
+        # Batch downloads run back-to-back: the engine handles one task at a time.
+        self._download_queue = []
+        signals.task_finished.connect(self._start_next_queued)
+        signals.task_cancelled.connect(self._clear_download_queue)
 
         # Wire up the update signal
         signals.update_available.connect(self.prompt_update)
@@ -147,6 +259,32 @@ class AppWindow(FluentWindow):
         self.manager_interface.refresh_combo()
         self.switchTo(self.downloader_interface)
 
+    def on_watch_download_all(self, items):
+        """Start a batch of Watchlist downloads; the rest are queued behind it."""
+        self._download_queue = list(items)
+        self._start_next_queued()
+
+    def _start_next_queued(self, _results=None):
+        if not self._download_queue:
+            return
+        title, template, domain, _max_ep, episodes_str = self._download_queue.pop(0)
+        self.switchTo(self.downloader_interface)
+        self.downloader_interface.start_watch_download(title, template, domain, episodes_str)
+
+    def _clear_download_queue(self):
+        """Cancelling one download abandons the whole batch."""
+        self._download_queue = []
+
+    def on_new_episodes_found(self, _count):
+        """A Watchlist check turned up new episodes -> take the user straight there.
+
+        Skipped while a download is running, so an auto-check can't yank the user off
+        the Active Tasks screen mid-download.
+        """
+        if self.progress_added:
+            return
+        self.switchTo(self.watchlist_interface)
+
     def on_follow_anime(self, title, url, domain, cover):
         # A Search result was followed -> add to the Watchlist and jump there.
         self.watchlist_interface.follow(title, url, domain, cover)
@@ -171,11 +309,15 @@ class AppWindow(FluentWindow):
         self.addSubInterface(self.manager_interface, FIF.SETTING, "Profile Manager")
         self.addSubInterface(self.history_interface, FIF.HISTORY, "History")
 
-    def hide_active_tasks(self):
+    def hide_active_tasks(self, switch_away=True):
         """Hides the Active Tasks tab completely"""
+        self._await_finish_dismiss = False
         self.navigationInterface.setEnabled(True)
         if self.progress_added:
-            self.switchTo(self.downloader_interface)
+            # Only pull the user back to the Downloader if they are still standing on
+            # the tab being removed -- otherwise leave them where they navigated to.
+            if switch_away and self.stackedWidget.currentWidget() is self.progress_interface:
+                self.switchTo(self.downloader_interface)
             self.navigationInterface.removeWidget(self.progress_interface.objectName())
             self.progress_added = False
 
@@ -192,16 +334,53 @@ class AppWindow(FluentWindow):
         # Automatically jump to the progress screen!
         self.switchTo(self.progress_interface)
 
-    def delayed_hide_active_tasks(self, _results=None):
-        """Waits exactly 2 seconds, then smoothly hides the tab"""
+    def on_task_finished(self, _results=None):
+        """Downloads finished: unlock navigation and KEEP the Active Tasks tab open.
+
+        It used to vanish on a 2s timer, which threw the result away before it could
+        be acted on. Now it stays until the user either presses "Start Watching" or
+        navigates to another tab.
+        """
         self.navigationInterface.setEnabled(True)
-        if hasattr(self, 'hide_timer') and self.hide_timer:
-            self.hide_timer.stop()
-            
-        self.hide_timer = QTimer()
-        self.hide_timer.setSingleShot(True)
-        self.hide_timer.timeout.connect(self.hide_active_tasks)
-        self.hide_timer.start(2000)
+        self._await_finish_dismiss = True
+
+    def _dismiss_finished_tab_on_navigate(self, _index=None):
+        """Drop the finished Active Tasks tab once the user moves somewhere else."""
+        if not getattr(self, "_await_finish_dismiss", False):
+            return
+        if self.stackedWidget.currentWidget() is self.progress_interface:
+            return   # still looking at the result
+        self._await_finish_dismiss = False
+        self.hide_active_tasks(switch_away=False)
+
+    def on_start_watching(self):
+        """Play the episodes that were just downloaded, then close the finished tab.
+
+        If part of the download never landed, ask first -- watching from a gap-ridden
+        folder is rarely what the user wants, and retrying is usually one click.
+        """
+        folder = getattr(self.downloader_interface, "last_download_folder", "")
+        episodes = getattr(self.downloader_interface, "last_download_episodes", [])
+        missing = [ep for ep, path in _episode_files(folder, episodes).items() if not path]
+
+        if missing:
+            dlg = MissingEpisodesDialog(missing, len(episodes), self)
+            dlg.exec()
+            if dlg.choice == "retry":
+                self._await_finish_dismiss = False
+                self.downloader_interface.retry_episodes(missing)
+                return
+            if dlg.choice != "start":
+                # Cancel: leave the finished tab and go back to the Downloader.
+                self._await_finish_dismiss = False
+                self.hide_active_tasks(switch_away=False)
+                self.switchTo(self.downloader_interface)
+                return
+
+        self._await_finish_dismiss = False
+        self.hide_active_tasks(switch_away=False)
+        self.switchTo(self.downloader_interface)
+        _play_first_video(folder, self, episodes)
 
     def closeEvent(self, event):
         app_settings["window_maximized"] = self.isMaximized()

@@ -134,6 +134,17 @@ _ARIA_CONN_RE = re.compile(r"CN:(\d+)\s+DL:([^ \]]+)")
 _ARIA_UNIT_RE = re.compile(r"([\d\.]+)(K|M|G)iB")
 
 
+_ARIA_UNIT_BYTES = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}
+
+
+def _aria_to_bytes(val_str):
+    """aria2c's "12.4MiB" -> raw bytes, for the concurrency controller's maths."""
+    m = _ARIA_UNIT_RE.match(val_str or "")
+    if not m:
+        return 0.0
+    return float(m.group(1)) * _ARIA_UNIT_BYTES.get(m.group(2), 1)
+
+
 def _aria_convert_unit(val_str):
     """Turn aria2c's KiB/MiB/GiB figure into a friendly KB/MB/GB string."""
     m = _ARIA_UNIT_RE.match(val_str)
@@ -238,91 +249,6 @@ def kill_stuck_chrome_processes():
         try: os.remove(os.path.join(PROFILE_DIR, lock))
         except: pass
 
-def auto_install_extensions():
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        import pyautogui
-        
-        kill_stuck_chrome_processes()
-        options = webdriver.ChromeOptions()
-        options.add_argument(f"--user-data-dir={PROFILE_DIR}")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("prefs", {"profile.exit_type": "Normal", "profile.exited_cleanly": True})
-        options.add_argument("--start-maximized")
-        options.add_argument("--force-dark-mode")
-        options.add_argument("--enable-features=WebContentsForceDark")
-        
-        service = Service()
-        service.creation_flags = CREATE_NO_WINDOW
-        driver = webdriver.Chrome(options=options, service=service)
-        
-        def install_one(url, name):
-            signals.update_status.emit(f"Status: ⚡ Installing {name}...", "#f39c12")
-            driver.get(url)
-            time.sleep(5)
-            
-            js_click_btn = """
-            // Target the button by its stable storefront jsname attribute first
-            let btn = document.querySelector('button[jsname="wQO0od"]');
-            if (btn) {
-                btn.click();
-                return true;
-            }
-            // Fallback to text matching
-            const buttons = document.querySelectorAll('button');
-            for (let b of buttons) {
-                if (b.innerText && (b.innerText.includes('Add to Chrome') || b.innerText.includes('إضافة') || b.innerText.includes('Chrome'))) {
-                    b.click();
-                    return true;
-                }
-            }
-            return false;
-            """
-            clicked = driver.execute_script(js_click_btn)
-            if clicked:
-                screen_w, screen_h = pyautogui.size()
-                
-                # Step 1: Force active window focus on Chrome by clicking safe neutral space in the center of the browser
-                time.sleep(2)
-                pyautogui.click(screen_w // 2, int(screen_h * 0.5))
-                time.sleep(1)
-                
-                # Step 2: Try multi-layered key sequences to hit the Add Extension button (handles different default button configurations)
-                # Attempt A: Left Arrow + Enter (standard shift to Add Extension)
-                pyautogui.press('left')
-                time.sleep(0.5)
-                pyautogui.press('enter')
-                
-                # Attempt B: Tab + Enter (alternate modal shift to Add Extension)
-                time.sleep(1.5)
-                pyautogui.press('tab')
-                time.sleep(0.5)
-                pyautogui.press('enter')
-                
-                # Attempt C: Shift+Tab + Enter (reverse shift to Add Extension)
-                time.sleep(1.5)
-                with pyautogui.hold('shift'):
-                    pyautogui.press('tab')
-                time.sleep(0.5)
-                pyautogui.press('enter')
-                
-                time.sleep(8) # Wait for download and configuration setup to finalize
-                    
-        # Install uBlock if missing
-        ublock_path = os.path.join(PROFILE_DIR, "Default", "Extensions", "ddkjiahejlhfcafbddmgiahcphecmpfh")
-        if not os.path.exists(ublock_path):
-            install_one("https://chromewebstore.google.com/detail/ublock-origin-lite/ddkjiahejlhfcafbddmgiahcphecmpfh", "uBlock Origin Lite")
-            
-        # Install Buster if missing
-        buster_path = os.path.join(PROFILE_DIR, "Default", "Extensions", "mpbjkejclgfgadiemmefgebjfooflfhl")
-        if not os.path.exists(buster_path):
-            install_one("https://chromewebstore.google.com/detail/buster-captcha-solver-for/mpbjkejclgfgadiemmefgebjfooflfhl", "Buster Captcha Solver")
-            
-        driver.quit()
-    except Exception as e:
-        print("Auto-install extensions failed:", e)
-
 def launch_visible_browser():
     global manual_driver
     signals.update_buttons.emit(False, False, False)
@@ -335,16 +261,25 @@ def launch_visible_browser():
             
         options = webdriver.ChromeOptions()
         options.add_argument(f"--user-data-dir={PROFILE_DIR}")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        # "enable-logging" is excluded so Chrome does not open its own console window
+        # alongside the browser -- that black log window is alarming and useless to users.
+        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         options.add_experimental_option("prefs", {"profile.exit_type": "Normal", "profile.exited_cleanly": True})
         options.add_argument("--start-maximized")
         options.add_argument("--force-dark-mode")
         options.add_argument("--enable-features=WebContentsForceDark")
+        options.add_argument("--log-level=3")   # fatal only
+        from utils.browser_flags import apply_dns_flags
+        apply_dns_flags(options)   # resolve via Google Public DNS, not the machine's
 
+        # chromedriver's own log still goes to a file for diagnostics, but
+        # --enable-chrome-logs is NOT used: it is what spawned the console window.
         log_path = os.path.join(APP_DIR, "chromedriver.log")
-        service = Service(service_args=["--log-level=ALL", "--enable-chrome-logs"], log_output=log_path)
+        service = Service(log_output=log_path)
         service.creation_flags = CREATE_NO_WINDOW
         manual_driver = webdriver.Chrome(options=options, service=service)
+        from core import adblock
+        adblock.apply(manual_driver)
         manual_driver.get("chrome://extensions/")
         signals.update_status.emit("Status: Profile browser open. Manage your sessions/logins, then close to continue.", "#f39c12")
     except Exception as e:
@@ -358,7 +293,11 @@ def create_browser(download_dir, headless=True):
 
     options = webdriver.ChromeOptions()
     options.add_argument(f"--user-data-dir={PROFILE_DIR}")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    # "enable-logging" excluded: it makes Chrome open a separate console window.
+    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    options.add_argument("--log-level=3")
+    from utils.browser_flags import apply_dns_flags
+    apply_dns_flags(options)   # resolve via Google Public DNS, not the machine's
     os.makedirs(download_dir, exist_ok=True)
     prefs = {
         "profile.exit_type": "Normal", "profile.exited_cleanly": True,
@@ -403,7 +342,14 @@ def create_browser(download_dir, headless=True):
     service = Service()
     service.creation_flags = CREATE_NO_WINDOW
     driver = webdriver.Chrome(options=options, service=service)
-    driver.set_page_load_timeout(45) 
+    driver.set_page_load_timeout(45)
+    # Real ad blocker first (hides leftover ad slots and disarms popunders, which a
+    # URL blocklist cannot); fall back to request blocking if it cannot be loaded.
+    from core import extensions, adblock
+    if extensions.load_into(driver):
+        signals.update_status.emit("Status: 🛡️ Ad blocker active.", "#2ecc71")
+    else:
+        adblock.apply(driver)
     return driver
 
 def solve_captcha_if_present(driver, url):
@@ -628,7 +574,7 @@ def solve_captcha_if_present(driver, url):
     except Exception as e:
         signals.update_status.emit(f"Status: ❌ Captcha error: {e}", "#ff4c4c")
 
-def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, on_episode_completed, process_callback=None, my_task_id=0):
+def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, on_episode_completed, process_callback=None, my_task_id=0, controller=None):
     if not os.path.exists(ARIA2C_PATH):
         from utils.tools_manager import ensure_aria2c
         signals.update_active_download.emit(ep, "⚡ Bootstrapping downloader...")
@@ -718,6 +664,13 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                             speed = _aria_convert_unit(match.group(4)) + "/s"
                             total_size = _aria_convert_unit(match.group(2))   # full episode size
 
+                            # Feed the auto-concurrency controller: size / speed is
+                            # this episode's projected total time.
+                            if controller is not None:
+                                controller.record_progress(ep,
+                                                           _aria_to_bytes(match.group(2)),
+                                                           _aria_to_bytes(match.group(4)))
+
                             # Time remaining, straight from aria2c's ETA field.
                             eta_str = ""
                             eta_match = _ARIA_ETA_RE.search(line)
@@ -742,6 +695,10 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
             if process.returncode == 0:
                 process_finished_normally = True
             elif not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id or ep_cancel_events[ep].is_set() or pause_event.is_set() or ep_pause_events[ep].is_set()):
+                # A genuine failure often means the host is pushing back, so ease off
+                # the number of parallel downloads rather than hammering it harder.
+                if controller is not None:
+                    controller.record_failure(f"download error (rc={process.returncode})")
                 # Failed -> step down to fewer connections (server may limit
                 # splitting / ignore Range) to find the largest working count.
                 if conn_idx < len(conn_levels) - 1:
@@ -784,6 +741,9 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
         # A tiny "completed" file is a block/error page, not the video -> treat as failed.
         if process_finished_normally and is_block_page(target_file):
             process_finished_normally = False
+            # The clearest rate-limit signal there is: back the concurrency off hard.
+            if controller is not None:
+                controller.record_failure("block page from the host")
             signals.update_active_download.emit(ep, "❌ Received a block/error page, not the video. Retrying...")
 
         if process_finished_normally:
@@ -839,7 +799,13 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
     task_started = False
     episode_temp_dirs = {} 
     
-    MAX_CONCURRENT = concurrency
+    # Auto mode tunes the number of parallel downloads from measured speed; manual
+    # mode pins it to the user's value. Either way the throttle reads controller.limit.
+    from core.concurrency import ConcurrencyController
+    with config_lock:
+        auto_concurrency = bool(app_settings.get("concurrency_auto", True))
+    controller = ConcurrencyController(start=concurrency, enabled=auto_concurrency)
+    signals.concurrency_changed.emit(controller.describe())
     active_engine_threads = []
     episodes_completed_count = 0
 
@@ -968,13 +934,9 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
         signals.update_status.emit("Status: Cleaning up...", "#f39c12")
         kill_stuck_chrome_processes()
 
-        # Check if extensions are installed in the persistent profile
-        ublock_path = os.path.join(PROFILE_DIR, "Default", "Extensions", "ddkjiahejlhfcafbddmgiahcphecmpfh")
-        buster_path = os.path.join(PROFILE_DIR, "Default", "Extensions", "mpbjkejclgfgadiemmefgebjfooflfhl")
-        if not os.path.exists(ublock_path) or not os.path.exists(buster_path):
-            signals.update_status.emit("Status: ⚡ Checking and installing browser extensions...", "#f39c12")
-            auto_install_extensions()
-
+        # Ads are suppressed by blocking their requests (see core.adblock) rather than
+        # by installing an extension, which current Chrome no longer permits an app to
+        # do unattended. Nothing to set up here, so downloads start straight away.
         driver = create_browser(download_dir, headless)
         wait = WebDriverWait(driver, 10)
 
@@ -1211,10 +1173,14 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 # download's host is under its per-host cap.
                                 dl_host = _host_of(dl_url)
                                 while not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
+                                    previous_limit = controller.limit
+                                    limit = controller.evaluate()   # acts once per window
+                                    if limit != previous_limit:
+                                        signals.concurrency_changed.emit(controller.describe())
                                     alive = len([t for t in active_engine_threads if t.is_alive()])
                                     with host_lock:
                                         host_n = host_active.get(dl_host, 0)
-                                    if alive < MAX_CONCURRENT and host_n < PER_HOST_MAX:
+                                    if alive < limit and host_n < PER_HOST_MAX:
                                         break
                                     time.sleep(1)
 
@@ -1226,7 +1192,7 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
 
                                 signals.update_status.emit(f"Status: ▶ Starting download for Ep {x}...", "#2ecc71")
                                 t = threading.Thread(target=aria2c_downloader,
-                                                     args=(x, dl_url, dl_fname, cookies, ua, ep_temp_dir, cancel_event, on_episode_completed, process_downloaded_episode, my_task_id))
+                                                     args=(x, dl_url, dl_fname, cookies, ua, ep_temp_dir, cancel_event, on_episode_completed, process_downloaded_episode, my_task_id, controller))
                                 t.start()
                                 active_engine_threads.append(t)
                                 path_success = True

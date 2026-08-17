@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Windows-only by necessity, not preference: the app drives Chrome through
+    # Windows paths, ships .exe helpers, and installs to C:\, so a Linux runner
+    # would test something the users never run.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: python tools/lint.py
+
+      - name: Import check
+        # Catches a missing dependency or a syntax error in a module that the unit
+        # tests happen not to import, which would otherwise only surface after
+        # PyInstaller had spent minutes building a broken exe.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -c "import main, ui.app_window, core.selenium_engine, core.extensions, core.schedule, core.concurrency, core.adblock; print('imports OK')"
+
+      - name: Unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -v
+
+  build:
+    # Proves the release build still compiles on every push. It does not publish
+    # anything -- release.yml does that on a tag.
+    runs-on: windows-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Build app and installer
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tools/build_release.py
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoDownloader_Setup
+          path: dist/AutoDownloader_Setup.exe
+          retention-days: 14
+          if-no-files-found: error

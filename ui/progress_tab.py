@@ -1,5 +1,5 @@
 import subprocess
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPainter, QPen, QColor
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QStackedWidget, QFrame
 
@@ -35,6 +35,8 @@ class WinUICheckmark(QWidget):
 
 
 class ProgressTab(QWidget):
+    watch_requested = pyqtSignal()   # "Start Watching" pressed on the success screen
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -85,6 +87,17 @@ class ProgressTab(QWidget):
         s_layout.addWidget(self.checkmark, alignment=Qt.AlignmentFlag.AlignCenter)
         lbl_done = QLabel("All downloads completed!", styleSheet="color: #2ecc71; margin-top: 20px; font-size: 20px; font-weight: bold;")
         s_layout.addWidget(lbl_done, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Offer to play what was just downloaded. This tab stays open until the user
+        # either clicks here or navigates away, so the result is never yanked away
+        # before it can be acted on.
+        self.btn_watch = PrimaryPushButton(FIF.PLAY, "Start Watching")
+        self.btn_watch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_watch.setMinimumHeight(40)
+        self.btn_watch.setFixedWidth(220)
+        self.btn_watch.clicked.connect(self.watch_requested.emit)
+        s_layout.addSpacing(18)
+        s_layout.addWidget(self.btn_watch, alignment=Qt.AlignmentFlag.AlignCenter)
         self.stack.addWidget(self.page_success)
 
         layout.addWidget(self.stack, 1)

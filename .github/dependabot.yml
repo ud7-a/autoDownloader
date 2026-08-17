@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Runtime deps are pinned exactly so CI builds match local ones. Dependabot opens
+  # a PR when a pin goes stale; CI then builds the app and installer on that PR, so a
+  # dependency that breaks PyInstaller or Qt shows up before it reaches a release.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      python-deps:
+        patterns: ['*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']

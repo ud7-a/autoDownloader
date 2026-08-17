@@ -250,6 +250,13 @@ class DownloaderWidget(QWidget):
 
         self._episodes_valid = True
         self._checking = False   # True while the async connection check is in flight
+        # True whenever the inputs are disabled -- a task is running OR there is no
+        # profile to run. Toggling auto/manual must not re-enable controls in either.
+        self._inputs_locked = False
+        self.last_download_folder = ""    # set per task, used by "Start Watching"
+        self.last_download_episodes = []  # episode numbers of the most recent task
+        self.last_download_params = None  # full task args, for retrying failed episodes
+        self.last_watch_meta = None       # (title, template, domain) of a Watchlist task
 
         # Debounced config saver -- coalesces rapid setting edits into one disk write.
         self._save_timer = QTimer(self)
@@ -325,6 +332,12 @@ class DownloaderWidget(QWidget):
 
 
         main_layout.addWidget(QLabel("Concurrent Downloads (Max Active Episode Downloading):", styleSheet="font-weight: bold; margin-top: 5px; background: transparent;"))
+        self.chk_auto_concurrency = CheckBox("Choose automatically from my connection speed")
+        self.chk_auto_concurrency.setChecked(app_settings.get("concurrency_auto", True))
+        self.chk_auto_concurrency.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_auto_concurrency.stateChanged.connect(self.on_auto_concurrency_toggled)
+        main_layout.addWidget(self.chk_auto_concurrency)
+
         self.spin_concurrency = SpinBox()
         self.spin_concurrency.setRange(1, 6) # Allow 1 to 6 simultaneous downloads
         self.spin_concurrency.setValue(app_settings.get("concurrency", 3)) # Default to 3
@@ -332,6 +345,11 @@ class DownloaderWidget(QWidget):
         self.spin_concurrency.setFocusPolicy(Qt.FocusPolicy.StrongFocus) # Click and Tab focus only, no Wheel focus!
         self.spin_concurrency.wheelEvent = lambda e: e.ignore() # Pass scroll events to parent
         main_layout.addWidget(self.spin_concurrency)
+
+        self.lbl_concurrency_hint = QLabel("")
+        self.lbl_concurrency_hint.setWordWrap(True)
+        self.lbl_concurrency_hint.setStyleSheet("color: #888888; font-size: 11px; background: transparent;")
+        main_layout.addWidget(self.lbl_concurrency_hint)
 
         main_layout.addWidget(QLabel("Notification Sound:", styleSheet="font-weight: bold; margin-top: 5px;"))
         sound_layout = QHBoxLayout()
@@ -427,8 +445,10 @@ class DownloaderWidget(QWidget):
         outer_layout.addWidget(self.scroll)
 
         signals.update_buttons.connect(self.set_buttons)
+        signals.concurrency_changed.connect(self.on_concurrency_changed)
         self.refresh_dropdown()
         self._update_episode_feedback()   # populate the live preview for the initial value
+        self.on_auto_concurrency_toggled()   # sync the spin box + hint to the saved mode
         QTimer.singleShot(1000, self.check_and_prompt_resume)
 
     def check_and_prompt_resume(self):
@@ -561,6 +581,8 @@ class DownloaderWidget(QWidget):
 
         site = self.combo_site.currentText()
         app_settings["concurrency"] = self.spin_concurrency.value()
+        if hasattr(self, 'chk_auto_concurrency'):
+            app_settings["concurrency_auto"] = self.chk_auto_concurrency.isChecked()
 
         with config_lock:
             if site and site != "No Profiles" and site in sites_data:
@@ -628,10 +650,29 @@ class DownloaderWidget(QWidget):
             valid_site = site not in ("No Profiles", "No profile selected", "")
             self.btn_start.setEnabled(self._episodes_valid and valid_site)
 
+    def on_auto_concurrency_toggled(self, _state=None):
+        """Auto mode owns the value, so the spin box becomes a starting point only."""
+        auto = self.chk_auto_concurrency.isChecked()
+        self.spin_concurrency.setEnabled(not auto and not self._inputs_locked)
+        self.lbl_concurrency_hint.setText(
+            "Starts here, then adjusts during the download to keep each episode "
+            "around a minute to a minute and a half."
+            if auto else
+            "Fixed at this value for every download."
+        )
+        self.save_settings()
+
+    def on_concurrency_changed(self, text):
+        """Live state from the running task (e.g. 'Concurrent: 3 (auto · ~72s/episode)')."""
+        self.lbl_concurrency_hint.setText(text)
+
     def set_inputs_enabled(self, enabled):
+        self._inputs_locked = not enabled
         self.btn_start.setEnabled(enabled)
         self.ep_picker.setEnabled(enabled)
-        self.spin_concurrency.setEnabled(enabled)
+        # In auto mode the controller owns the value, so the box stays read-only.
+        self.spin_concurrency.setEnabled(enabled and not self.chk_auto_concurrency.isChecked())
+        self.chk_auto_concurrency.setEnabled(enabled)
         self.txt_webhook.setEnabled(enabled)
         self.chk_headless.setEnabled(enabled)
         self.btn_profile.setEnabled(enabled)
@@ -705,6 +746,36 @@ class DownloaderWidget(QWidget):
         self._update_episode_feedback()
         self.start_task()
 
+    def retry_episodes(self, episodes):
+        """Re-download just `episodes` from the most recent task.
+
+        A Watchlist download runs against a transient profile that is discarded when
+        the task ends, so in that case the task is rebuilt from the stored template
+        rather than looked up by name.
+        """
+        episodes = sorted(set(episodes or []))
+        if not episodes:
+            return False
+        params = self.last_download_params
+        if not params:
+            self._warn("Nothing to Retry", "The previous download's details are no longer available.")
+            return False
+
+        if params["site"] not in sites_data:
+            meta = self.last_watch_meta
+            if not meta:
+                self._warn("Nothing to Retry",
+                           "That download used a temporary profile that no longer exists.")
+                return False
+            title, template, domain = meta
+            self.start_watch_download(title, template, domain, compact_episode_spec(episodes))
+            return True
+
+        retry = dict(params)
+        retry["episodes_list"] = episodes
+        self._begin_download(retry)
+        return True
+
     def _warn(self, title, content):
         InfoBar.warning(title=title, content=content, orient=Qt.Orientation.Horizontal,
                         isClosable=True, position=InfoBarPosition.TOP, duration=4000, parent=self)
@@ -728,6 +799,8 @@ class DownloaderWidget(QWidget):
 
         # Folder / lookup key = the anime name (so videos land in a sensible folder).
         site_key = "".join(c for c in title if c not in r'\/:*?"<>|').strip() or "Anime"
+        # Kept so a retry can rebuild the transient profile after it is cleaned up.
+        self.last_watch_meta = (title, template, domain)
 
         transient = site_key not in sites_data
         if transient:
@@ -920,6 +993,13 @@ class DownloaderWidget(QWidget):
         self._begin_download(params)
 
     def _begin_download(self, p):
+        # Remember where these episodes land, and which ones they are, so
+        # "Start Watching" opens the first episode of THIS session rather than
+        # whatever happens to sort first in a folder full of older downloads.
+        safe = "".join(c for c in p["site"] if c not in r'\/:*?"<>|').strip()
+        self.last_download_folder = os.path.join(p["target_dir"], safe)
+        self.last_download_episodes = list(p["episodes_list"])
+        self.last_download_params = dict(p)   # lets us re-run just the failed episodes
         with config_lock:
             app_settings["unfinished_session"] = {
                 "site": p["site"],

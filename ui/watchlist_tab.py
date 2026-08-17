@@ -10,10 +10,18 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 
 from qfluentwidgets import (PushButton, PrimaryPushButton, SimpleCardWidget, SmoothScrollArea,
                             ToolButton, FluentIcon as FIF, InfoBar, InfoBarPosition,
-                            IndeterminateProgressRing)
+                            IndeterminateProgressRing, MessageBoxBase, SubtitleLabel,
+                            BodyLabel, CheckBox)
 
 from utils.config import (get_watchlist, remove_watch, update_watch, app_settings, APP_DIR)
-from ui.styles import apply_danger_style, rounded_pixmap
+from ui.styles import apply_danger_style, apply_tinted_style, rounded_pixmap
+
+
+def _today_key():
+    """Today as one of the schedule's canonical day keys."""
+    from core.schedule import DAY_ORDER
+    # DAY_ORDER starts on Saturday; Python's weekday() has Monday as 0.
+    return DAY_ORDER[(time.localtime().tm_wday + 2) % 7]
 
 
 def _persist_cover(url, cover_path):
@@ -153,10 +161,129 @@ class WatchlistCheckThread(QThread):
         self.all_done.emit(total[0])
 
 
+class ScheduleThread(QThread):
+    """Scrape both sites' weekly schedules and work out each followed anime's day."""
+    done = pyqtSignal(dict)      # {watch url -> day key}
+    failed = pyqtSignal(str)
+
+    def __init__(self, entries):
+        super().__init__()
+        self.entries = list(entries)
+
+    def run(self):
+        from core.schedule import fetch_schedule, find_day, SCHEDULE_URLS
+        from ui.search_tab import _make_headless_driver
+        driver = None
+        try:
+            driver = _make_headless_driver()
+            items = []
+            for domain in SCHEDULE_URLS:
+                if self.isInterruptionRequested():
+                    return
+                try:
+                    items += fetch_schedule(driver, domain)
+                except Exception:
+                    continue     # one site being down shouldn't lose the other
+            if not items:
+                self.failed.emit("Couldn't read the release schedules.")
+                return
+            self.done.emit({w.get("url"): find_day(w, items) for w in self.entries})
+        except Exception as e:
+            self.failed.emit(str(e))
+        finally:
+            if driver is not None:
+                try: driver.quit()
+                except Exception: pass
+
+
+class EpisodeSelectDialog(MessageBoxBase):
+    """Tick which of an anime's new episodes to download.
+
+    Everything starts checked, so confirming without touching anything behaves the
+    same as the plain "Download new" button. `selected` holds the chosen episode
+    numbers once the dialog is accepted.
+    """
+
+    def __init__(self, title, episodes, parent=None):
+        super().__init__(parent)
+        self.selected = []
+        self._boxes = {}
+
+        heading = SubtitleLabel(f"Select episodes — {title}")
+        heading.setWordWrap(True)
+        self.viewLayout.addWidget(heading)
+
+        n = len(episodes)
+        self.lbl_count = BodyLabel("")
+        self.viewLayout.addWidget(self.lbl_count)
+
+        # Scrolls, so a long backlog stays usable instead of a dialog taller than the screen.
+        scroll = SmoothScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(260 if n > 6 else max(80, n * 36))
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        host = QWidget()
+        host.setStyleSheet("background: transparent;")
+        col = QVBoxLayout(host)
+        col.setContentsMargins(4, 4, 4, 4)
+        col.setSpacing(6)
+        col.setAlignment(Qt.AlignmentFlag.AlignTop)
+        for ep in episodes:
+            cb = CheckBox(f"Episode {ep}")
+            cb.setChecked(True)
+            cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            cb.stateChanged.connect(self._refresh_count)
+            self._boxes[ep] = cb
+            col.addWidget(cb)
+        scroll.setWidget(host)
+        self.viewLayout.addWidget(scroll)
+
+        # Bulk actions sit under the list, aligned left, with solid backgrounds so
+        # they read as buttons rather than plain text.
+        tools = QHBoxLayout()
+        tools.setSpacing(8)
+        btn_all = PushButton("Select all")
+        btn_none = PushButton("Clear")
+        for b in (btn_all, btn_none):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setMinimumHeight(32)
+        # WinUI 3 dark theme: the primary action uses AccentFillColorDefault
+        # (SystemAccentColorLight2 = #4CC2FF, the Windows default blue) with black
+        # text, dimming on hover/press. The secondary action uses the neutral
+        # ControlFillColor ramp with white text.
+        apply_tinted_style(btn_all, "#4CC2FF", "#48B2E9", "#43A2D2", text="#000000")
+        apply_tinted_style(btn_none, "#2D2D2D", "#353535", "#272727", text="#FFFFFF")
+        btn_all.clicked.connect(lambda: self._set_all(True))
+        btn_none.clicked.connect(lambda: self._set_all(False))
+        tools.addWidget(btn_all)
+        tools.addWidget(btn_none)
+        tools.addStretch()
+        self.viewLayout.addLayout(tools)
+
+        self.widget.setMinimumWidth(420)
+        self.yesButton.setText("Download selected")
+        self.cancelButton.setText("Cancel")
+        self.yesButton.clicked.connect(self._collect)
+        self._refresh_count()
+
+    def _set_all(self, state):
+        for cb in self._boxes.values():
+            cb.setChecked(state)
+
+    def _refresh_count(self):
+        chosen = sum(1 for cb in self._boxes.values() if cb.isChecked())
+        self.lbl_count.setText(f"{chosen} of {len(self._boxes)} selected")
+        self.yesButton.setEnabled(chosen > 0)
+
+    def _collect(self):
+        self.selected = [ep for ep, cb in self._boxes.items() if cb.isChecked()]
+
+
 class WatchCard(SimpleCardWidget):
     check_one = pyqtSignal(str)                  # url
     remove_one = pyqtSignal(str)                 # url
     download_new = pyqtSignal(str)               # url
+    select_episodes = pyqtSignal(str)            # url -- pick a subset to download
 
     def __init__(self, entry, parent=None):
         super().__init__(parent)
@@ -203,6 +330,13 @@ class WatchCard(SimpleCardWidget):
         self.btn_download.clicked.connect(lambda: self.download_new.emit(self.url))
         root.addWidget(self.btn_download)
 
+        # Only worth showing when there is an actual choice to make (2+ new episodes).
+        self.btn_select = PushButton(FIF.CHECKBOX, "Select episodes")
+        self.btn_select.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_select.setToolTip("Pick which of the new episodes to download")
+        self.btn_select.clicked.connect(lambda: self.select_episodes.emit(self.url))
+        root.addWidget(self.btn_select)
+
         self.btn_check = PushButton(FIF.SYNC, "Check")
         self.btn_check.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_check.clicked.connect(lambda: self.check_one.emit(self.url))
@@ -238,6 +372,8 @@ class WatchCard(SimpleCardWidget):
             else:
                 self.lbl_status.setText(f"✓ Up to date  (ep {seen})")
             self.btn_download.setEnabled(False)
+        # With a single new episode there is nothing to choose between.
+        self.btn_select.setVisible(new_count > 1)
 
     def set_status_text(self, text):
         self.lbl_status.setText(text)
@@ -247,11 +383,15 @@ class WatchCard(SimpleCardWidget):
 class WatchlistWidget(QWidget):
     # (title, template, domain, max_ep, episodes_str) -> create/refresh profile + download
     download_new_signal = pyqtSignal(str, str, str, int, str)
+    download_all_signal = pyqtSignal(list)  # [(title, template, domain, max_ep, episodes_str), ...]
+    new_episodes_found = pyqtSignal(int)   # total new episodes -> main window opens this tab
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cards = {}          # url -> WatchCard
+        self._day_headers = []    # release-day group headings, rebuilt with the cards
         self._check_thread = None
+        self._schedule_thread = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
@@ -268,6 +408,12 @@ class WatchlistWidget(QWidget):
         self.spinner.setFixedSize(24, 24)
         self.spinner.hide()
         header.addWidget(self.spinner)
+
+        self.btn_download_all = PrimaryPushButton(FIF.DOWNLOAD, "Download all new")
+        self.btn_download_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_download_all.setToolTip("Download the new episodes of every followed anime, one after another")
+        self.btn_download_all.clicked.connect(self.download_all_new)
+        header.addWidget(self.btn_download_all)
 
         self.btn_check_all = PushButton(FIF.SYNC, "Check all now")
         self.btn_check_all.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -309,13 +455,44 @@ class WatchlistWidget(QWidget):
 
         entries = get_watchlist()
         self.empty.setVisible(not entries)
+        pending = sum(1 for e in entries if self._pending_download(e) is not None)
+        self.btn_download_all.setEnabled(pending > 0)
+        self.btn_download_all.setText(
+            f"Download all new ({pending})" if pending else "Download all new")
+        # Drop old day headers too -- they are rebuilt with the cards below.
+        for h in self._day_headers:
+            h.setParent(None)
+            h.deleteLater()
+        self._day_headers.clear()
+
+        # Group by release day, in week order, with unscheduled titles last.
+        from core.schedule import DAY_ORDER, DAY_LABELS
+        buckets = {}
         for e in entries:
-            card = WatchCard(e)
-            card.check_one.connect(self.check_one)
-            card.remove_one.connect(self.remove_one)
-            card.download_new.connect(self.on_download_new)
-            self.col.insertWidget(self.col.count() - 1, card)   # keep empty label last
-            self._cards[e.get("url", "")] = card
+            buckets.setdefault(e.get("release_day") or "", []).append(e)
+        ordered = [(d, buckets[d]) for d in DAY_ORDER if d in buckets]
+        if "" in buckets:
+            ordered.append(("", buckets[""]))
+
+        today = _today_key()
+        for day, group in ordered:
+            label = DAY_LABELS.get(day, "Day not known yet")
+            if day and day == today:
+                label += "  ·  today"
+            header = QLabel(f"{label}   ({len(group)})")
+            header.setStyleSheet(
+                "color: #FFFFFF; background: transparent; font-size: 17px; "
+                "font-weight: bold; padding: 10px 2px 2px 2px;")
+            self.col.insertWidget(self.col.count() - 1, header)
+            self._day_headers.append(header)
+            for e in group:
+                card = WatchCard(e)
+                card.check_one.connect(self.check_one)
+                card.remove_one.connect(self.remove_one)
+                card.download_new.connect(self.on_download_new)
+                card.select_episodes.connect(self.on_select_episodes)
+                self.col.insertWidget(self.col.count() - 1, card)   # keep empty label last
+                self._cards[e.get("url", "")] = card
 
     def follow(self, title, url, domain, cover=""):
         """Add an anime to the watchlist (called from Search) and check it once."""
@@ -329,6 +506,7 @@ class WatchlistWidget(QWidget):
             InfoBar.success("Now Watching", f"'{title}' added to your Watchlist.",
                             position=InfoBarPosition.TOP, duration=3000, parent=self.window())
             self._start_check([w for w in get_watchlist() if w.get("url") == url])
+            self.refresh_schedule()   # a new follow has no release day yet
         else:
             InfoBar.info("Already Watching", f"'{title}' is already in your Watchlist.",
                          position=InfoBarPosition.TOP, duration=3000, parent=self.window())
@@ -375,31 +553,117 @@ class WatchlistWidget(QWidget):
         if card:
             card.apply_entry(next((w for w in get_watchlist() if w.get("url") == url), {}))
 
+    def refresh_schedule(self):
+        """Look up each followed anime's release day from the sites' schedule pages."""
+        entries = get_watchlist()
+        if not entries or (self._schedule_thread and self._schedule_thread.isRunning()):
+            return
+        th = ScheduleThread(entries)
+        th.done.connect(self._on_schedule_done)
+        th.failed.connect(lambda _msg: None)   # a missing schedule is not worth nagging about
+        self._schedule_thread = th
+        th.start()
+
+    def _on_schedule_done(self, days):
+        changed = False
+        for url, day in days.items():
+            existing = next((w for w in get_watchlist() if w.get("url") == url), None)
+            if existing is not None and existing.get("release_day") != day:
+                update_watch(url, release_day=day)
+                changed = True
+        if changed:
+            self.refresh_cards()
+
     def _on_all_done(self, total_new):
         self.spinner.hide()
         self.btn_check_all.setEnabled(True)
+        self.refresh_schedule()   # days can change between seasons, so re-read them
         if total_new > 0:
             _play_notify_sound()
+            # Bring the user straight here so the new episodes are actually seen.
+            self.new_episodes_found.emit(total_new)
             InfoBar.success(
                 "New Episodes Available",
                 f"{total_new} new episode{'s' if total_new != 1 else ''} across your Watchlist.",
                 position=InfoBarPosition.TOP, duration=6000, parent=self.window())
 
     # ---- download new ----
-    def on_download_new(self, url):
-        w = next((x for x in get_watchlist() if x.get("url") == url), None)
-        if not w:
-            return
+    @staticmethod
+    def _pending_download(w):
+        """Return (title, template, domain, latest, episodes_str) for an entry with
+        unwatched episodes, or None if it has nothing new / no usable template."""
         seen = w.get("seen_max") or 0
         latest = w.get("latest_max") or 0
         template = w.get("latest_template", "")
         if not template or latest <= seen:
+            return None
+        episodes_str = f"{seen + 1}-{latest}" if latest > seen + 1 else str(latest)
+        return (w.get("title", "Anime"), template, w.get("domain", ""), latest, episodes_str)
+
+    def on_download_new(self, url):
+        w = next((x for x in get_watchlist() if x.get("url") == url), None)
+        if not w:
+            return
+        item = self._pending_download(w)
+        if item is None:
             InfoBar.info("Nothing New", "No new episodes to download right now.",
                          position=InfoBarPosition.TOP, duration=3000, parent=self.window())
             return
-        episodes_str = f"{seen + 1}-{latest}" if latest > seen + 1 else str(latest)
         # Acknowledge: from now on these count as seen.
-        update_watch(url, seen_max=latest, new_count=0)
+        update_watch(url, seen_max=item[3], new_count=0)
         self.refresh_cards()
-        self.download_new_signal.emit(w.get("title", "Anime"), template, w.get("domain", ""),
-                                      latest, episodes_str)
+        self.download_new_signal.emit(*item)
+
+    def on_select_episodes(self, url):
+        """Let the user pick a subset of one anime's new episodes, then download those."""
+        from ui.downloader_tab import compact_episode_spec
+        w = next((x for x in get_watchlist() if x.get("url") == url), None)
+        if not w:
+            return
+        item = self._pending_download(w)
+        if item is None:
+            InfoBar.info("Nothing New", "No new episodes to download right now.",
+                         position=InfoBarPosition.TOP, duration=3000, parent=self.window())
+            return
+        title, template, domain, latest, _spec = item
+        seen = w.get("seen_max") or 0
+        new_eps = list(range(seen + 1, latest + 1))
+
+        dlg = EpisodeSelectDialog(title, new_eps, self.window())
+        if not dlg.exec() or not dlg.selected:
+            return
+        chosen = sorted(dlg.selected)
+
+        # Only advance "seen" across the unbroken run the user actually took. Anything
+        # after a skipped episode stays flagged as new, so nothing is silently lost.
+        new_seen = seen
+        for ep in new_eps:
+            if ep in chosen:
+                new_seen = ep
+            else:
+                break
+        remaining = max(0, latest - new_seen)
+        update_watch(url, seen_max=new_seen, new_count=remaining)
+        self.refresh_cards()
+        self.download_new_signal.emit(title, template, domain, latest,
+                                      compact_episode_spec(chosen))
+
+    def download_all_new(self):
+        """Queue every followed anime that has new episodes. They download one after
+        another (the engine runs a single task at a time)."""
+        items = []
+        for w in get_watchlist():
+            item = self._pending_download(w)
+            if item is not None:
+                items.append((w["url"], item))
+        if not items:
+            InfoBar.info("Nothing New", "No new episodes across your Watchlist.",
+                         position=InfoBarPosition.TOP, duration=3000, parent=self.window())
+            return
+        # Acknowledge everything up front so a later check doesn't re-flag them.
+        for url, item in items:
+            update_watch(url, seen_max=item[3], new_count=0)
+        self.refresh_cards()
+        InfoBar.success("Queued", f"Downloading new episodes for {len(items)} anime.",
+                        position=InfoBarPosition.TOP, duration=4000, parent=self.window())
+        self.download_all_signal.emit([i for _, i in items])

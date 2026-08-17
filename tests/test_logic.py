@@ -14,6 +14,13 @@ import sys
 import tempfile
 import unittest
 
+# Isolate the app's data directory BEFORE importing anything from the app, so a test
+# can never touch the real config/history. tests/__init__.py normally does this; the
+# repeat here protects against running this module directly.
+os.environ.setdefault("AED_APP_DIR",
+                      os.path.join(tempfile.gettempdir(), "AutoEpisodesDownloader-tests"))
+os.makedirs(os.environ["AED_APP_DIR"], exist_ok=True)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ui.downloader_tab import compact_episode_spec, spec_to_ranges          # noqa: E402
@@ -22,6 +29,24 @@ from ui.search_tab import (extract_domain, _full_res, AnimeDetailsThread,   # no
 from core.selenium_engine import (_format_eta, _aria_convert_unit,          # noqa: E402
                                   parse_smart_xpath, episode_url_variants,
                                   is_block_page, _host_of)
+
+
+class IsolationGuardTests(unittest.TestCase):
+    """Tests must never read or write the real user data directory. If this fails,
+    stop and fix the isolation before running anything else -- a test that writes to
+    the live config can wipe the user's saved profiles."""
+
+    def test_app_dir_is_redirected(self):
+        from utils import config
+        self.assertTrue(config.IS_ISOLATED,
+                        f"tests are pointed at the REAL data dir: {config.APP_DIR}")
+
+    def test_paths_live_under_the_temp_dir(self):
+        from utils import config
+        self.assertNotEqual(config.APP_DIR, config.DEFAULT_APP_DIR)
+        for path in (config.CONFIG_FILE, config.DB_FILE, config.PROFILE_DIR):
+            self.assertTrue(path.startswith(config.APP_DIR), path)
+            self.assertNotIn(config.DEFAULT_APP_DIR, path)
 
 
 class EpisodeSpecTests(unittest.TestCase):
@@ -272,6 +297,244 @@ class SingleEntryDetectionTests(unittest.TestCase):
         self.assertEqual(AnimeDetailsThread._onclick_episode_urls(["doSomethingElse()"]), [])
 
 
+class ConcurrencyControllerTests(unittest.TestCase):
+    """The auto-concurrency controller aims to keep each episode landing inside a
+    target time band, and to retreat fast when a host pushes back."""
+
+    def make(self, start=3, enabled=True):
+        from core.concurrency import ConcurrencyController
+        self.now = 1000.0
+        return ConcurrencyController(start=start, enabled=enabled, clock=lambda: self.now)
+
+    def feed(self, ctl, seconds_per_episode, count=3):
+        """Report `count` downloads all projected to take `seconds_per_episode`."""
+        for ep in range(count):
+            # size / speed == projected seconds
+            ctl.record_progress(ep, seconds_per_episode * 1_000_000, 1_000_000)
+
+    def advance(self, ctl, windows=1, seconds=None):
+        self.now += seconds if seconds is not None else ctl.WINDOW + 1
+
+    def test_starts_at_the_given_value(self):
+        self.assertEqual(self.make(start=3).limit, 3)
+
+    def test_disabled_controller_never_moves(self):
+        ctl = self.make(start=2, enabled=False)
+        self.feed(ctl, 5)
+        self.advance(ctl)
+        self.assertEqual(ctl.evaluate(), 2)
+
+    def test_fast_episodes_add_a_download(self):
+        """Finishing well inside the band means the connection has headroom."""
+        ctl = self.make(start=2)
+        self.feed(ctl, 20)          # 20s per episode -- far below target
+        self.advance(ctl)
+        self.assertEqual(ctl.evaluate(), 3)
+
+    def test_slow_episodes_remove_a_download(self):
+        ctl = self.make(start=4)
+        self.feed(ctl, 200)         # way over the band
+        self.advance(ctl)
+        self.assertEqual(ctl.evaluate(), 3)
+
+    def test_on_target_holds_steady(self):
+        ctl = self.make(start=3)
+        for _ in range(5):
+            self.feed(ctl, 75)      # inside 60-90s
+            self.advance(ctl)
+            ctl.evaluate()
+        self.assertEqual(ctl.limit, 3)
+
+    def test_does_not_act_before_a_window_elapses(self):
+        ctl = self.make(start=2)
+        self.feed(ctl, 10)
+        self.advance(ctl, seconds=1)
+        self.assertEqual(ctl.evaluate(), 2)
+
+    def test_settles_between_changes(self):
+        """A change must be given time to take effect before judging it again."""
+        ctl = self.make(start=2)
+        self.feed(ctl, 20); self.advance(ctl)
+        self.assertEqual(ctl.evaluate(), 3)      # raised
+        for _ in range(ctl.SETTLE_WINDOWS):
+            self.feed(ctl, 20); self.advance(ctl)
+            self.assertEqual(ctl.evaluate(), 3)  # holds while settling
+        self.feed(ctl, 20); self.advance(ctl)
+        self.assertEqual(ctl.evaluate(), 4)      # free to raise again
+
+    def test_never_exceeds_the_ceiling(self):
+        ctl = self.make(start=6)
+        for _ in range(20):
+            self.feed(ctl, 5); self.advance(ctl); ctl.evaluate()
+        self.assertEqual(ctl.limit, ctl.MAX_LIMIT)
+
+    def test_slow_connection_floors_at_one(self):
+        """If even a single download blows past the band, one is already the best
+        we can do -- the connection is the limit, not the setting."""
+        ctl = self.make(start=3)
+        for _ in range(20):
+            self.feed(ctl, 600, count=1); self.advance(ctl); ctl.evaluate()
+        self.assertEqual(ctl.limit, ctl.MIN_LIMIT)
+        self.assertIn("connection", ctl.last_reason)
+
+    def test_failure_halves_immediately(self):
+        ctl = self.make(start=6)
+        ctl.record_failure("block page")
+        self.assertEqual(ctl.limit, 3)
+
+    def test_failure_does_not_go_below_one(self):
+        ctl = self.make(start=1)
+        ctl.record_failure("block page")
+        self.assertEqual(ctl.limit, 1)
+
+    def test_no_raising_during_failure_cooldown(self):
+        """Rate-limit bans are expensive, so probe back slowly, not immediately."""
+        ctl = self.make(start=4)
+        ctl.record_failure("429")
+        self.assertEqual(ctl.limit, 2)
+        for _ in range(3):           # past settle, still inside the cooldown
+            self.feed(ctl, 10); self.advance(ctl); ctl.evaluate()
+        self.assertEqual(ctl.limit, 2)
+
+    def test_raises_again_after_cooldown_expires(self):
+        ctl = self.make(start=4)
+        ctl.record_failure("429")
+        self.advance(ctl, seconds=ctl.FAILURE_COOLDOWN + 1)
+        for _ in range(ctl.SETTLE_WINDOWS + 1):
+            self.feed(ctl, 10); self.advance(ctl); ctl.evaluate()
+        self.assertGreater(ctl.limit, 2)
+
+    def test_stalled_downloads_are_ignored(self):
+        """A speed of zero says nothing about capacity."""
+        ctl = self.make(start=3)
+        ctl.record_progress(1, 500_000_000, 0)
+        self.advance(ctl)
+        self.assertEqual(ctl.evaluate(), 3)
+
+    def test_uses_the_median_not_one_outlier(self):
+        ctl = self.make(start=3)
+        for ep, secs in enumerate([70, 75, 4000]):   # one stuck download
+            ctl.record_progress(ep, secs * 1_000_000, 1_000_000)
+        self.advance(ctl)
+        self.assertEqual(ctl.evaluate(), 3)          # median 75s -> on target
+
+    def test_describe_mentions_mode(self):
+        auto = self.make(); manual = self.make(enabled=False)
+        self.assertIn("auto", auto.describe())
+        self.assertIn("manual", manual.describe())
+
+
+class ScheduleMatchingTests(unittest.TestCase):
+    """Matching a watchlist entry to its release day. witanime can be matched by URL;
+    animerco only publishes season links, so those fall back to titles."""
+
+    def setUp(self):
+        from core import schedule
+        self.s = schedule
+        self.items = [
+            {"day": "saturday", "title": "Bleach: Sennen Kessen-hen - Kashin-tan",
+             "url": "https://witanime.life/anime/bleach-sennen-kessen-hen-kashin-tan/"},
+            {"day": "sunday", "title": "Mushoku Tensei III: Isekai Ittara Honki Dasu",
+             "url": "https://eta.animerco.org/seasons/mushoku-tensei-iii-season-1/"},
+            {"day": "friday", "title": "Tensei shitara Slime Datta Ken Season 4",
+             "url": "https://eta.animerco.org/seasons/tensei-shitara-slime-datta-ken-season-4/"},
+        ]
+
+    def test_canonical_day_from_arabic(self):
+        self.assertEqual(self.s.canonical_day("السبت"), "saturday")
+        self.assertEqual(self.s.canonical_day("الاحد"), "sunday")   # both spellings
+        self.assertEqual(self.s.canonical_day("الأحد"), "sunday")
+
+    def test_canonical_day_from_panel_id(self):
+        self.assertEqual(self.s.canonical_day("wednesday"), "wednesday")
+        self.assertEqual(self.s.canonical_day("Friday"), "friday")
+
+    def test_canonical_day_rejects_junk(self):
+        self.assertIsNone(self.s.canonical_day("someday"))
+        self.assertIsNone(self.s.canonical_day(""))
+
+    def test_url_match_wins(self):
+        entry = {"title": "totally different name",
+                 "url": "https://witanime.life/anime/bleach-sennen-kessen-hen-kashin-tan/"}
+        self.assertEqual(self.s.find_day(entry, self.items), "saturday")
+
+    def test_url_match_ignores_trailing_slash(self):
+        entry = {"title": "x",
+                 "url": "https://witanime.life/anime/bleach-sennen-kessen-hen-kashin-tan"}
+        self.assertEqual(self.s.find_day(entry, self.items), "saturday")
+
+    def test_title_match_when_url_differs(self):
+        """The animerco case: watchlist holds /animes/, schedule holds /seasons/."""
+        entry = {"title": "Mushoku Tensei III: Isekai Ittara Honki Dasu",
+                 "url": "https://eta.animerco.org/animes/mushoku-tensei-iii/"}
+        self.assertEqual(self.s.find_day(entry, self.items), "sunday")
+
+    def test_season_markers_are_ignored(self):
+        """'4th Season' in the watchlist vs 'Season 4' on the schedule."""
+        entry = {"title": "Tensei shitara Slime Datta Ken 4th Season",
+                 "url": "https://eta.animerco.org/animes/tensei-shitara-slime-datta-ken/"}
+        self.assertEqual(self.s.find_day(entry, self.items), "friday")
+
+    def test_unknown_anime_returns_none(self):
+        entry = {"title": "Something Not Airing", "url": "https://x/animes/nope/"}
+        self.assertIsNone(self.s.find_day(entry, self.items))
+
+    def test_short_titles_do_not_latch_onto_longer_ones(self):
+        """A 3-letter name must not match every show containing those letters."""
+        entry = {"title": "Ble", "url": ""}
+        self.assertIsNone(self.s.find_day(entry, self.items))
+
+    def test_normalize_strips_case_punctuation_and_season(self):
+        n = self.s.normalize_title
+        self.assertEqual(n("Bleach: Sennen Kessen-hen!"), n("bleach sennen kessen hen"))
+        self.assertEqual(n("Grand Blue Season 3"), n("Grand Blue"))
+
+    def test_witanime_matches_only_the_airing_season_page(self):
+        """Each season is its own /anime/ page there, and by title they are
+        indistinguishable -- so a title guess would flag every season as airing."""
+        w = "https://witanime.life/anime/"
+        items = [{"day": "monday", "title": "Grand Blue Season 3",
+                  "url": w + "grand-blue-season-3/"}]
+        airing = {"title": "Grand Blue Season 3", "url": w + "grand-blue-season-3/"}
+        self.assertEqual(self.s.find_day(airing, items), "monday")
+        for title, slug in [("Grand Blue", "grand-blue/"),
+                            ("Grand Blue 2nd Season", "grand-blue-2nd-season/")]:
+            self.assertIsNone(self.s.find_day({"title": title, "url": w + slug}, items),
+                              f"{title} should not be treated as airing")
+
+    def test_season_number_extraction(self):
+        n = self.s.season_number
+        self.assertEqual(n("Grand Blue Season 3"), 3)
+        self.assertEqual(n("Hell Mode 2nd Season"), 2)
+        self.assertEqual(n("انمي X الموسم 2"), 2)
+        self.assertIsNone(n("Grand Blue"))
+
+    def test_only_the_airing_season_of_an_animerco_show(self):
+        items = [{"day": "sunday", "title": "Hell Mode Season 2",
+                  "url": "https://eta.animerco.org/seasons/hell-mode-season-2/"}]
+        self.assertTrue(self.s.is_season_scheduled("Hell Mode", "Season 2", items))
+        for label in ("Season 1", "Season 3"):
+            self.assertFalse(self.s.is_season_scheduled("Hell Mode", label, items), label)
+
+    def test_animerco_anime_level_still_matches_by_title(self):
+        """Its schedule never links the /animes/ page, so titles are all there is."""
+        items = [{"day": "sunday", "title": "Hell Mode Season 2",
+                  "url": "https://eta.animerco.org/seasons/hell-mode-season-2/"}]
+        entry = {"title": "Hell Mode", "url": "https://eta.animerco.org/animes/hell-mode/"}
+        self.assertEqual(self.s.find_day(entry, items), "sunday")
+
+    def test_day_order_starts_on_saturday(self):
+        """Both sites lay their week out starting Saturday."""
+        self.assertEqual(self.s.DAY_ORDER[0], "saturday")
+        self.assertEqual(len(self.s.DAY_ORDER), 7)
+        self.assertEqual(set(self.s.DAY_ORDER), set(self.s.DAY_LABELS))
+
+    def test_every_supported_site_has_a_schedule_url(self):
+        from ui.search_tab import SUPPORTED_SITES
+        for domain in SUPPORTED_SITES:
+            self.assertIn(domain, self.s.SCHEDULE_URLS, domain)
+
+
 class BlockPageTests(unittest.TestCase):
     """A tiny 'file' is really the host's rate-limit/forbidden HTML page, not a video."""
 
@@ -326,9 +589,16 @@ class SiteConfigTests(unittest.TestCase):
         self.assertIn("mediafire", paths)
         self.assertIn("data-src", paths["google drive"][0]["xpath"])
 
-    def test_witanime_has_its_three_hosts(self):
+    def test_witanime_has_all_its_hosts(self):
+        """Mirrors the maintained witanime profile export -- a dropped path here means
+        episodes silently fail on whichever host went missing."""
         paths = DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]
-        self.assertEqual(set(paths), {"mediafire", "google drive", "Workupload"})
+        self.assertEqual(set(paths), {"mediafire", "google drive", "Workupload", "rf"})
+
+    def test_witanime_path_order_is_preserved(self):
+        """The engine tries paths in order, so ordering is behaviour, not cosmetics."""
+        paths = DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]
+        self.assertEqual(list(paths), ["mediafire", "google drive", "Workupload", "rf"])
 
 
 if __name__ == "__main__":

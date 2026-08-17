@@ -4,17 +4,47 @@ from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QPainterPath
 from utils.config import APP_DIR
 
 
+_ROUNDED_CACHE = {}
+_ROUNDED_CACHE_MAX = 240
+
+
 def rounded_pixmap(path, w, h, radius=6):
     """Load an image, center-crop to w×h, and clip to rounded corners.
-    Returns a QPixmap, or None if the image can't be loaded."""
-    src = QPixmap(path)
-    if src.isNull():
+    Returns a QPixmap, or None if the image can't be loaded.
+
+    Posters are stored at full resolution, so decoding one at its native size just
+    to shrink it to a thumbnail is most of the cost of drawing a results grid.
+    QImageReader is asked for the scaled size up front, which lets the decoder do
+    the downscaling itself, and rendered results are cached so re-showing a grid
+    (a repeat search, a tab switch) costs nothing.
+    """
+    import math
+    from PyQt6.QtCore import QSize
+    from PyQt6.QtGui import QImageReader
+
+    try:
+        key = (path, os.path.getmtime(path), w, h, radius)
+    except OSError:
         return None
-    src = src.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                     Qt.TransformationMode.SmoothTransformation)
-    x = max(0, (src.width() - w) // 2)
-    y = max(0, (src.height() - h) // 2)
-    src = src.copy(x, y, w, h)
+    cached = _ROUNDED_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if size.isValid() and size.width() > 0 and size.height() > 0:
+        # Cover-fit: scale so both dimensions reach the target, then centre-crop.
+        factor = max(w / size.width(), h / size.height())
+        reader.setScaledSize(QSize(max(w, int(math.ceil(size.width() * factor))),
+                                   max(h, int(math.ceil(size.height() * factor)))))
+    image = reader.read()
+    if image.isNull():
+        return None
+    x = max(0, (image.width() - w) // 2)
+    y = max(0, (image.height() - h) // 2)
+    image = image.copy(x, y, w, h)
+
     out = QPixmap(w, h)
     out.fill(Qt.GlobalColor.transparent)
     p = QPainter(out)
@@ -22,8 +52,12 @@ def rounded_pixmap(path, w, h, radius=6):
     clip = QPainterPath()
     clip.addRoundedRect(QRectF(0, 0, w, h), radius, radius)
     p.setClipPath(clip)
-    p.drawPixmap(0, 0, src)
+    p.drawImage(0, 0, image)
     p.end()
+
+    if len(_ROUNDED_CACHE) >= _ROUNDED_CACHE_MAX:
+        _ROUNDED_CACHE.pop(next(iter(_ROUNDED_CACHE)))
+    _ROUNDED_CACHE[key] = out
     return out
 
 
@@ -47,6 +81,25 @@ def apply_danger_style(btn):
         background-color: rgba(255, 77, 77, 0.2); color: rgba(255, 255, 255, 0.3);
         border: 1px solid rgba(255, 77, 77, 0.2);
     }}
+    """
+    setCustomStyleSheet(btn, qss, qss)
+
+
+def apply_tinted_style(btn, base, hover, pressed, text="#ffffff"):
+    """Give a qfluentwidgets button a solid coloured background.
+
+    Same reasoning as apply_danger_style: qfluentwidgets ships its own per-widget
+    stylesheet, so a plain setStyleSheet gets overridden and the button stays grey.
+    """
+    from qfluentwidgets import setCustomStyleSheet
+    cls = type(btn).__name__
+    qss = f"""
+    {cls} {{
+        background-color: {base}; color: {text};
+        border: 1px solid {base}; border-radius: 6px;
+    }}
+    {cls}:hover {{ background-color: {hover}; border: 1px solid {hover}; color: {text}; }}
+    {cls}:pressed {{ background-color: {pressed}; border: 1px solid {pressed}; color: {text}; }}
     """
     setCustomStyleSheet(btn, qss, qss)
 

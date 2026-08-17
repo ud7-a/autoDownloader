@@ -44,6 +44,10 @@ DEFAULT_SITE_FLOWS = {
                 {"xpath": "workupload #last", "delay": 5.0},
                 {"xpath": '//*[@id=\\"file\\"]/div[3]/div/a', "delay": 5.0},
             ],
+            "rf": [
+                {"xpath": "rf #last", "delay": 11.0},
+                {"xpath": '//*[@id="downloadButton"]', "delay": 2.0},
+            ],
         },
     },
     # animerco shows downloads as a table (رابط/خادم/جودة/لغة); each row's "تحميل"
@@ -80,6 +84,54 @@ def extract_domain(url):
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def friendly_browser_error(message, domain=""):
+    """Turn a raw Selenium/Chrome failure into something a user can act on.
+
+    Chrome reports network problems as net::ERR_* inside a long chromedriver
+    stacktrace; showing that verbatim tells the user nothing about what went wrong.
+    """
+    raw = str(message or "")
+    # Match on the message only. The stacktrace mentions "chromedriver" on every
+    # single error, which would otherwise swallow genuinely unknown failures.
+    head = raw.split("Stacktrace:")[0]
+    site = domain or "the website"
+    mapping = [
+        ("ERR_NAME_NOT_RESOLVED",
+         f"Couldn't look up {site}. The address didn't resolve, which usually means "
+         f"your DNS server or network is blocking it, or the site has moved."),
+        ("ERR_INTERNET_DISCONNECTED",
+         "No internet connection. Reconnect and try again."),
+        ("ERR_PROXY_CONNECTION_FAILED",
+         "Your proxy refused the connection. Check your proxy or VPN settings."),
+        ("ERR_TUNNEL_CONNECTION_FAILED",
+         "A proxy or VPN blocked the connection to this website."),
+        ("ERR_CONNECTION_TIMED_OUT",
+         f"{site} took too long to respond. It may be down or slow right now."),
+        ("ERR_TIMED_OUT",
+         f"{site} took too long to respond. It may be down or slow right now."),
+        ("ERR_CONNECTION_REFUSED",
+         f"{site} refused the connection."),
+        ("ERR_CONNECTION_RESET",
+         f"The connection to {site} was reset -- often a network filter or the site "
+         f"blocking automated traffic."),
+        ("ERR_CONNECTION_CLOSED",
+         f"The connection to {site} closed unexpectedly."),
+        ("ERR_CERT_", f"{site} has an invalid security certificate."),
+        ("ERR_BLOCKED_BY", f"Your network or an extension blocked access to {site}."),
+        ("session not created",
+         "Chrome and the automation driver don't match. Updating Chrome usually fixes it."),
+        ("cannot find chrome binary",
+         "Google Chrome wasn't found on this computer. Install Chrome and try again."),
+        ("chromedriver", "The browser engine failed to start."),
+    ]
+    for needle, friendly in mapping:
+        if needle.lower() in head.lower():
+            return friendly
+    # Unknown failure: show only the first line, never the stacktrace dump.
+    first = head.strip().splitlines()
+    return first[0][:200] if first else "Unknown error."
 
 
 def resolve_site_flow(domain):
@@ -139,7 +191,13 @@ def _make_headless_driver():
         "profile.managed_default_content_settings.images": 2,
         "profile.default_content_setting_values.notifications": 2,
     })
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    # "enable-logging" excluded: it makes Chrome open a separate console window.
+    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    options.add_argument("--log-level=3")
+    # Resolve the supported sites through Google Public DNS rather than the machine's
+    # resolver, which on some networks fails to resolve them at all.
+    from utils.browser_flags import apply_dns_flags
+    apply_dns_flags(options)
     service = Service()
     service.creation_flags = CREATE_NO_WINDOW
     driver = webdriver.Chrome(options=options, service=service)
@@ -223,7 +281,14 @@ _AUTODETECT_JS = r"""
 var query = arguments[0];
 var callback = arguments[1];
 try {
-    let words = query.toLowerCase().split(/\s+/).filter(w => w.length > 1);
+    // Single characters are normally dropped as noise, but if that leaves nothing
+    // the user really did search for one letter -- keep it, or every card is
+    // rejected and a valid search returns empty. Such a query matches almost any
+    // title, so `broad` then demands a poster to keep nav/genre links out.
+    let all = query.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+    let words = all.filter(w => w.length > 1);
+    let broad = false;
+    if (words.length === 0) { words = all; broad = true; }
     let matches = (t) => {
         if (!t || words.length === 0) return false;
         let lt = t.toLowerCase();
@@ -237,6 +302,16 @@ try {
             if (m && /^https?:/.test(m[1])) return m[1];
         }
         return '';
+    };
+    // Lazy-loading attribute on ANY element, not just <img>. animerco hangs the real
+    // poster off the card's own anchor (data-src) and only paints a spinner
+    // placeholder into background-image until the card scrolls into view -- so
+    // reading this is what makes covers appear without waiting on lazy-load.
+    let lazyUrl = (el) => {
+        if (!el || !el.getAttribute) return '';
+        let ds = el.getAttribute('data-src') || el.getAttribute('data-lazy-src')
+              || el.getAttribute('data-original') || el.getAttribute('data-bg') || '';
+        return /^https?:/.test(ds) ? ds : '';
     };
     // Pull an image URL out of an <img> (real src or lazy attr), skipping placeholders.
     let imgUrl = (img) => {
@@ -265,6 +340,14 @@ try {
                 if (!cover) cover = imgUrl(img);
                 if (!altTitle) altTitle = (img.getAttribute('alt') || img.getAttribute('title') || '').trim();
             }
+            // Lazy attribute first: it holds the real poster even before the image
+            // has loaded, whereas background-image is still a placeholder then.
+            if (!cover) cover = lazyUrl(sc);
+            if (!cover) {
+                for (let e of sc.querySelectorAll('[data-src],[data-lazy-src],[data-original],[data-bg]')) {
+                    let u = lazyUrl(e); if (u) { cover = u; break; }
+                }
+            }
             if (!cover) {
                 let b = bgUrl(sc);
                 if (b) cover = b;
@@ -273,7 +356,7 @@ try {
             if (cover && (title || altTitle)) break;
         }
         let finalTitle = title || altTitle;
-        if (finalTitle && matches(finalTitle)) {
+        if (finalTitle && matches(finalTitle) && (!broad || cover)) {
             seen[link] = 1;
             results.push({ title: finalTitle, link: link, img: cover });
         }
@@ -302,20 +385,39 @@ fetch(src)
 # of one per image -- the main search speed-up.
 _FETCH_IMGS_JS = r"""
 var srcs = arguments[0];
-var callback = arguments[1];
-Promise.all(srcs.map(function(src) {
+var maxEdge = arguments[1];
+var callback = arguments[2];
+// Downscale inside the browser before handing the bytes back. A poster is often
+// 150KB+ at full size but only ~20KB once resized to what we actually draw, and
+// everything here crosses the automation channel base64-encoded (a third larger
+// again) -- so shrinking first is most of the cost of loading a grid of covers.
+// The blob comes from fetch(), so the canvas is not tainted and can be exported.
+function shrink(blob) {
+    return createImageBitmap(blob).then(function (bmp) {
+        var scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
+        var w = Math.max(1, Math.round(bmp.width * scale));
+        var h = Math.max(1, Math.round(bmp.height * scale));
+        var canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+        bmp.close();
+        return canvas.toDataURL('image/jpeg', 0.85);
+    });
+}
+function asDataUrl(blob) {          // fallback if the canvas route is unavailable
+    return new Promise(function (res) {
+        var fr = new FileReader();
+        fr.onloadend = function () { res(fr.result); };
+        fr.onerror = function () { res(''); };
+        fr.readAsDataURL(blob);
+    });
+}
+Promise.all(srcs.map(function (src) {
     return fetch(src)
-        .then(function(r) { return r.blob(); })
-        .then(function(b) {
-            return new Promise(function(res) {
-                var fr = new FileReader();
-                fr.onloadend = function() { res(fr.result); };
-                fr.onerror = function() { res(''); };
-                fr.readAsDataURL(b);
-            });
-        })
-        .catch(function() { return ''; });
-})).then(function(results) { callback(results); });
+        .then(function (r) { return r.blob(); })
+        .then(function (b) { return shrink(b).catch(function () { return asDataUrl(b); }); })
+        .catch(function () { return ''; });
+})).then(function (results) { callback(results); });
 """
 
 
@@ -335,6 +437,30 @@ def _full_res(url):
     return _WP_SIZE_RE.sub("", url or "")
 
 
+# Covers are drawn at 164px in search results and 56px in the Watchlist, so anything
+# past ~500px is wasted download, transfer and decode time.
+COVER_MAX_EDGE = 500
+_WP_SIZE_DIMS = re.compile(r'-(\d{2,4})x(\d{2,4})(?=\.(?:jpg|jpeg|png|webp)(?:$|\?))', re.I)
+
+
+def _best_cover_url(url):
+    """Pick the cheapest version of a cover that is still sharp on screen.
+
+    WordPress serves sized variants next to the original. A listing that already
+    links a reasonably large one (witanime's 323x470) is used as-is instead of
+    upgrading to the multi-hundred-KB original, while a tiny lazy-load thumbnail
+    (animerco's 90x135) is still swapped for the full image so it does not look soft.
+    """
+    url = (url or "").strip()
+    m = _WP_SIZE_DIMS.search(url)
+    if m:
+        width, height = int(m.group(1)), int(m.group(2))
+        if width >= 300 or height >= 400:
+            return url          # already big enough for the sizes we draw
+        return _full_res(url)   # a thumbnail -- fetch the original instead
+    return url
+
+
 def download_covers(driver, img_urls, cache_dir=None):
     """Download image URLs (from the current same-origin page) to local cache files.
 
@@ -349,7 +475,7 @@ def download_covers(driver, img_urls, cache_dir=None):
     paths = [""] * len(img_urls)
     to_fetch = []  # (index, url, cache_path)
     for i, url in enumerate(img_urls):
-        url = _full_res((url or "").strip())
+        url = _best_cover_url(url)
         if not url or url.startswith("data:"):
             continue
         key = hashlib.md5(url.encode("utf-8", "replace")).hexdigest()[:16]
@@ -361,7 +487,8 @@ def download_covers(driver, img_urls, cache_dir=None):
 
     if to_fetch:
         try:
-            data_urls = driver.execute_async_script(_FETCH_IMGS_JS, [f[1] for f in to_fetch]) or []
+            data_urls = driver.execute_async_script(
+                _FETCH_IMGS_JS, [f[1] for f in to_fetch], COVER_MAX_EDGE) or []
         except Exception:
             data_urls = []
         for j, (i, _url, p) in enumerate(to_fetch):
@@ -369,6 +496,7 @@ def download_covers(driver, img_urls, cache_dir=None):
             if isinstance(du, str) and du.startswith("data:image"):
                 try:
                     with open(p, "wb") as f:
+                        # Already downscaled in the browser, so it lands ready to draw.
                         f.write(base64.b64decode(du.split(",", 1)[1]))
                     paths[i] = p
                 except Exception:
@@ -849,15 +977,21 @@ class AnimeResultCard(SimpleCardWidget):
         btn.clicked.connect(self._trigger)
         btn_row.addWidget(btn, 1)
 
+        self.btn_follow = None
         if followable:
-            btn_follow = ToolButton(FIF.HEART)
-            btn_follow.setFixedSize(34, 34)
-            btn_follow.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_follow.setToolTip("Watch for new episodes")
-            btn_follow.clicked.connect(lambda: self.follow.emit(self.title, self.href, self.cover_path))
-            btn_row.addWidget(btn_follow)
+            self.btn_follow = ToolButton(FIF.HEART)
+            self.btn_follow.setFixedSize(34, 34)
+            self.btn_follow.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.btn_follow.setToolTip("Watch for new episodes")
+            self.btn_follow.clicked.connect(
+                lambda: self.follow.emit(self.title, self.href, self.cover_path))
+            btn_row.addWidget(self.btn_follow)
 
         layout.addLayout(btn_row)
+
+    def set_followable(self, followable):
+        if self.btn_follow is not None:
+            self.btn_follow.setVisible(bool(followable))
 
     def _trigger(self):
         if self._on_load is not None:
@@ -1056,7 +1190,9 @@ class AnimeSearchWidget(QWidget):
     def _render_next_batch(self, gen):
         if gen != getattr(self, "_render_gen", 0):
             return   # a newer search/clear superseded this render
-        cols, batch = 5, 8
+        # Smaller batches keep each event-loop tick short, so scrolling and clicking
+        # stay responsive while a large result set streams in.
+        cols, batch = 5, 4
         end = min(self._render_index + batch, len(self._pending_results))
         for i in range(self._render_index, end):
             r = self._pending_results[i]
@@ -1071,7 +1207,8 @@ class AnimeSearchWidget(QWidget):
     def on_search_error(self, msg):
         self.btn_search.setEnabled(True)
         self.lbl_status.setText("")
-        self._show_state("⚠️", "Search failed", msg)
+        self._show_state("⚠️", "Search failed",
+                         friendly_browser_error(msg, self._current_domain()))
 
     def _on_follow(self, title, href, cover):
         # Hand off to the Watchlist tab (via the main window), using the current site.
@@ -1083,6 +1220,7 @@ class AnimeSearchWidget(QWidget):
         self._show_state("", f"Loading “{title}”…", "Detecting episodes and seasons…", busy=True)
         self._pending_title = title
         self._pending_cover = cover_path
+        self._pending_href = href     # season cards follow the parent anime page
         th = AnimeDetailsThread(href)
         th.finished.connect(self.on_details_finished)
         th.error.connect(self.on_details_error)
@@ -1107,13 +1245,19 @@ class AnimeSearchWidget(QWidget):
         self.lbl_status.setText(f"'{title}' has {len(entries)} seasons — pick one to load.")
         default_cover = getattr(self, "_pending_cover", "")
         cols = 5
+        parent_href = getattr(self, "_pending_href", "")
         for i, e in enumerate(entries):
             label = e.get("label") or f"Season {i + 1}"
             mx = e.get("max_ep", 1)
             name = f"{title} - {label}"
             cover = e.get("cover") or default_cover   # season's own poster, else the anime's
-            card = AnimeResultCard(f"{label}  ·  {mx} eps", "", cover, button_text="Load Season",
+            card = AnimeResultCard(f"{label}  ·  {mx} eps", parent_href, cover,
+                                   button_text="Load Season", followable=True,
                                    on_load=lambda n=name, tm=e["template"], m=mx: self._load_season(n, tm, m))
+            # Following a season still follows the parent anime -- that is the page
+            # the watcher re-reads each check -- so pass the show's real title/URL.
+            card.follow.connect(lambda _t, _h, _c, t=title, h=parent_href, cv=cover:
+                                self._on_follow(t, h, cv))
             self.grid.addWidget(card, i // cols, i % cols)
 
     def _load_season(self, name, template, max_ep):
@@ -1133,9 +1277,10 @@ class AnimeSearchWidget(QWidget):
         self.profile_created_signal.emit(name)
 
     def on_details_error(self, msg):
+        friendly = friendly_browser_error(msg, self._current_domain())
         self.lbl_status.setText("")
-        self._show_state("⚠️", "Couldn't load this title", msg)
-        InfoBar.error("Detection Failed", msg,
+        self._show_state("⚠️", "Couldn't load this title", friendly)
+        InfoBar.error("Detection Failed", friendly,
                       position=InfoBarPosition.TOP, duration=5000, parent=self.window())
 
     def _create_profile(self, name, url_template, max_ep, domain=None):
