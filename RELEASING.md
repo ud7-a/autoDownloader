@@ -59,6 +59,18 @@ wrapper that also deploys to `C:\Auto Episodes Downloader\App`. Because CI canno
 it, `tools/build_release.py` holds its own copy of the PyInstaller flags. **Change one,
 change the other.**
 
+## Do not add a second release script
+
+`publish.py` used to build and publish releases from the maintainer's machine. It kept
+its own copy of the PyInstaller flags, those flags drifted, and 4.3.0 shipped with
+PyInstaller's default icon instead of the app's — the `--icon` argument was simply
+missing from a list nobody had touched in months. It also called `gh release create`
+itself, which collided with the workflow's own publish step.
+
+It is retired. `tools/build_release.py` is the only thing that builds a release, and
+the workflow is the only thing that publishes one. A local script that duplicates
+either will drift the same way.
+
 ## Checks before pushing
 
 ```bash

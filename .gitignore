@@ -3,9 +3,12 @@ build/
 dist/
 *.spec
 
-# Local dev/release tooling -- kept on the maintainer's machine, not published
+# Local dev/release tooling -- kept on the maintainer's machine, not published.
+# publish.py is retired: it carried its own copy of the PyInstaller flags, drifted
+# out of sync, and shipped 4.3.0 with no app icon. Releases now go through
+# .github/workflows/release.yml. See RELEASING.md.
 exeCompile.py
-publish.py
+publish.py*
 
 # Package Deliverables (Uploaded directly to Releases)
 *.zip
