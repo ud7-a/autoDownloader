@@ -14,7 +14,7 @@ PROFILE_DIR = os.path.join(APP_DIR, "SeleniumProfile")
 DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
-APP_VERSION = "4.3.0"
+APP_VERSION = "4.3.1"
 
 # --- GLOBAL LOCKS ---
 config_lock = threading.RLock()
