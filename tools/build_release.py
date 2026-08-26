@@ -46,7 +46,14 @@ APP_FLAGS = [
     "--exclude-module", "PyQt5",
     # Trim packages installed in the dev environment but never imported by the app.
     # Every extra file costs launch time (disk I/O + antivirus scanning).
-    # numpy/scipy/PIL are NOT excluded: qfluentwidgets imports them.
+    # numpy and PIL stay: qfluentwidgets genuinely uses them.
+    #
+    # scipy does NOT stay. qfluentwidgets imports gaussian_filter for one thing --
+    # AcrylicLabel's blur -- and this app forces Mica and Acrylic off, so that code
+    # never runs. It was still costing 48 MB across 85 files on every cold start.
+    # utils.fast_start already stubs the import out; its fallback now returns the
+    # image unblurred when scipy is absent, so nothing can crash on it.
+    "--exclude-module", "scipy",
     "--exclude-module", "cv2",
     "--exclude-module", "Pythonwin",
     "--exclude-module", "tkinter",
