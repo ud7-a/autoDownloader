@@ -1,0 +1,128 @@
+{
+  "dns_hosts": [
+    "witanime.life",
+    "www.witanime.life",
+    "eta.animerco.org",
+    "animerco.org",
+    "www.animerco.org",
+    "www.mediafire.com",
+    "mediafire.com",
+    "drive.google.com",
+    "drive.usercontent.google.com",
+    "workupload.com",
+    "www.workupload.com",
+    "mp4upload.com",
+    "www.mp4upload.com",
+    "yourupload.com",
+    "www.yourupload.com",
+    "mega.nz"
+  ],
+  "path_hosts": {
+    "4shared": [
+      "4shared.com"
+    ],
+    "google drive": [
+      "drive.google.com",
+      "drive.usercontent.google.com",
+      "docs.google.com",
+      "googleusercontent.com"
+    ],
+    "mediafire": [
+      "mediafire.com"
+    ],
+    "mega": [
+      "mega.nz",
+      "mega.io"
+    ],
+    "workupload": [
+      "workupload.com"
+    ],
+    "yourupload": [
+      "yourupload.com"
+    ]
+  },
+  "schedule_match": {
+    "eta.animerco.org": "title",
+    "witanime.life": "url"
+  },
+  "schedule_urls": {
+    "eta.animerco.org": "https://eta.animerco.org/schedule/",
+    "witanime.life": "https://witanime.life/مواعيد-الحلقات/"
+  },
+  "site_flows": {
+    "eta.animerco.org": {
+      "next_btn_xpath": "الحلقة التالية",
+      "step_paths": {
+        "google drive": [
+          {
+            "delay": 5.0,
+            "xpath": "//tr[.//div[contains(@data-src,'drive.google')]]//a[contains(@class,'labeled')]"
+          },
+          {
+            "delay": 3.0,
+            "xpath": "Download anyway"
+          }
+        ],
+        "mediafire": [
+          {
+            "delay": 5.0,
+            "xpath": "//tr[.//div[contains(@data-src,'mediafire')]]//a[contains(@class,'labeled')]"
+          },
+          {
+            "delay": 3.0,
+            "xpath": "//*[@id=\"downloadButton\"]"
+          }
+        ]
+      }
+    },
+    "witanime.life": {
+      "next_btn_xpath": "الحلقة التالية",
+      "step_paths": {
+        "Workupload": [
+          {
+            "delay": 5.0,
+            "xpath": "workupload #last"
+          },
+          {
+            "delay": 5.0,
+            "xpath": "//*[@id=\\\"file\\\"]/div[3]/div/a"
+          }
+        ],
+        "google drive": [
+          {
+            "delay": 3.0,
+            "xpath": "google drive #last"
+          },
+          {
+            "delay": 2.0,
+            "xpath": "Download anyway"
+          }
+        ],
+        "mediafire": [
+          {
+            "delay": 7.0,
+            "xpath": "mediafire #last"
+          },
+          {
+            "delay": 3.0,
+            "xpath": "//*[@id=\"downloadButton\"]"
+          }
+        ],
+        "rf": [
+          {
+            "delay": 11.0,
+            "xpath": "rf #last"
+          },
+          {
+            "delay": 2.0,
+            "xpath": "//*[@id=\"downloadButton\"]"
+          }
+        ]
+      }
+    }
+  },
+  "supported_sites": {
+    "eta.animerco.org": "https://eta.animerco.org/?s={query}",
+    "witanime.life": "https://witanime.life/?search_param=animes&s={query}"
+  }
+}
