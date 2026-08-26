@@ -11,7 +11,7 @@ import tempfile
 import subprocess
 import threading
 import urllib.request
-from subprocess import CREATE_NO_WINDOW 
+from subprocess import CREATE_NO_WINDOW
 
 from core.signals import signals
 from utils.config import PROFILE_DIR, ARIA2C_PATH, UNRAR_PATH, APP_DIR, sites_data, app_settings, config_lock, progress_lock
@@ -200,6 +200,41 @@ def rewrite_gdrive_to_direct_download(driver, download_dir):
             time.sleep(0.5)
     except Exception:
         pass
+
+
+# Hosts each download path is allowed to end up on. The download buttons on these
+# sites are wrapped in ad redirects, so a click sometimes lands on an interstitial
+# instead of the file -- fast.io's "Google Drive alternatives" page is a common one.
+# Landing there silently burns the path: the next step's button never appears, the
+# 35s interception window expires, and the episode is reported as failed even though
+# other mirrors on the page would have worked. Checking where the click actually went
+# lets the engine abandon that path immediately and try the next one.
+PATH_HOSTS = {
+    "google drive": ("drive.google.com", "drive.usercontent.google.com",
+                     "docs.google.com", "googleusercontent.com"),
+    "mediafire": ("mediafire.com",),
+    "workupload": ("workupload.com",),
+    "mega": ("mega.nz", "mega.io"),
+    "4shared": ("4shared.com",),
+    "yourupload": ("yourupload.com",),
+}
+
+
+def tab_matches_path(url, path_name):
+    """True when `url` is somewhere this download path is supposed to end up.
+
+    Unknown path names pass: profiles are user-editable and can legitimately point at
+    a host this table has never heard of, so an unrecognised name must not block them.
+    A blank host also passes -- the tab is probably still on about:blank, which the
+    normal waits already handle.
+    """
+    hosts = PATH_HOSTS.get((path_name or "").strip().lower())
+    if not hosts:
+        return True
+    host = _host_of(url)
+    if not host:
+        return True
+    return any(host == h or host.endswith("." + h) for h in hosts)
 
 
 def parse_smart_xpath(raw_input):
@@ -780,7 +815,7 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
 
     on_episode_completed()
 
-def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_url, selected_sound, volume , concurrency):
+def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_url, selected_sound, volume , concurrency, step_paths_override=None):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -828,7 +863,11 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
             config = sites_data.get(site_key, {})
             
         url_template = config.get("url", "")
-        step_paths = config.get("step_paths", {"Path 1": config.get("steps", [])})
+        # A caller can pin the click-flow for this run. Watchlist downloads use it to
+        # force the built-in flow for supported sites, so a same-named profile with
+        # hand-edited steps can't change how the episode is fetched. The profile in
+        # sites_data is left untouched -- it belongs to the user.
+        step_paths = step_paths_override or config.get("step_paths", {"Path 1": config.get("steps", [])})
         safe_site_name = "".join(c for c in site_key if c not in r'\/:*?"<>|').strip()
 
         profile_folder_path = os.path.join(download_dir, safe_site_name)
@@ -1013,8 +1052,19 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                             signals.update_status.emit(f"Status: [{path_name}] Clicking Step {step_idx + 1}...", "#ffffff")
                             
                             xpaths_to_try = [xpath, xpath.replace("text()", "@value")]
-                            if step_idx == 0 and 'google drive' in raw_xpath.lower():
-                                xpaths_to_try.append("//ul[contains(@class, 'download-links')]//a")
+                            if step_idx == 0 and "#" in raw_xpath:
+                                # Same button, matched on the anchor's whole string value
+                                # instead of a bare text node, for layouts that wrap the
+                                # label in an extra element. The previous fallback here
+                                # matched *any* anchor in the download list, so when the
+                                # real button was slow to appear it happily opened a
+                                # different host than the one this path is for.
+                                label = raw_xpath.split("#", 1)[0].strip().lower().replace("'", "")
+                                if label:
+                                    xpaths_to_try.append(
+                                        "//a[contains(@class,'download-link')]"
+                                        "[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                                        f" 'abcdefghijklmnopqrstuvwxyz'), '{label}')]")
 
                             btn = None
                             for xp in xpaths_to_try:
@@ -1061,6 +1111,26 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 # download URL so the large-file "Download anyway"
                                 # confirm shows and the file can be intercepted.
                                 rewrite_gdrive_to_direct_download(driver, ep_temp_dir)
+
+                                # Only new tabs are checked. The original tab is still
+                                # the episode page, whose host is never one of this
+                                # path's hosts, so guarding it would fail every path.
+                                if not tab_matches_path(driver.current_url, path_name):
+                                    landed = _host_of(driver.current_url) or "an unknown page"
+                                    signals.update_status.emit(
+                                        f"Status: ⚠️ [{path_name}] led to {landed}, not the file. Trying another mirror...",
+                                        "#f39c12")
+                                    try:
+                                        driver.close()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        driver.switch_to.window(driver.window_handles[0])
+                                    except Exception:
+                                        pass
+                                    current_tabs = len(driver.window_handles)
+                                    path_failed = True
+                                    break
 
                                 # Dynamic Captcha Solver Integration for tab switch
                                 try:

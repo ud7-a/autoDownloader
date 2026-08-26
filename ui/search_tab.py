@@ -37,8 +37,8 @@ DEFAULT_SITE_FLOWS = {
                 {"xpath": '//*[@id="downloadButton"]', "delay": 3.0},
             ],
             "google drive": [
-                {"xpath": "google drive #last", "delay": 4.0},
-                {"xpath": "Download anyway", "delay": 3.0},
+                {"xpath": "google drive #last", "delay": 3.0},
+                {"xpath": "Download anyway", "delay": 2.0},
             ],
             "Workupload": [
                 {"xpath": "workupload #last", "delay": 5.0},
@@ -135,9 +135,22 @@ def friendly_browser_error(message, domain=""):
 
 
 def resolve_site_flow(domain):
-    """Return (step_paths, next_btn_xpath) for a download on `domain`: inherit the
-    same-domain profile with the most steps, else a built-in default flow. Shared by
-    the Search profile creator and the Watchlist direct downloader."""
+    """Return (step_paths, next_btn_xpath) for a download on `domain`. Shared by the
+    Search profile creator and the Watchlist direct downloader.
+
+    A built-in flow always wins for the sites shipped support for. These selectors are
+    maintained against the live site, whereas an older profile for the same domain can
+    carry stale steps or delays that were hand-edited for one anime -- and the previous
+    behaviour (inherit the same-domain profile with the most steps) copied exactly that
+    into every newly loaded anime and every watchlist download.
+
+    Domains with no built-in flow still inherit from the richest same-domain profile,
+    since that is the only source of steps they have.
+    """
+    if domain in DEFAULT_SITE_FLOWS:
+        flow = DEFAULT_SITE_FLOWS[domain]
+        return copy.deepcopy(flow["step_paths"]), flow.get("next_btn_xpath", "")
+
     paths, nxt, best = {}, "", -1
     with config_lock:
         for cfg in sites_data.values():
@@ -149,10 +162,6 @@ def resolve_site_flow(domain):
                 best = count
                 paths = copy.deepcopy(sp)
                 nxt = cfg.get("next_btn_xpath", "")
-    if best <= 0 and domain in DEFAULT_SITE_FLOWS:
-        flow = DEFAULT_SITE_FLOWS[domain]
-        paths = copy.deepcopy(flow["step_paths"])
-        nxt = flow.get("next_btn_xpath", "")
     return paths, nxt
 
 

@@ -18,12 +18,23 @@ _STUBBED = ("scipy", "scipy.ndimage", "scipy.ndimage.filters")
 
 
 def _lazy_gaussian_filter(*args, **kwargs):
-    """Load the real scipy on first actual use and delegate to it."""
+    """Load the real scipy on first actual use and delegate to it.
+
+    scipy is excluded from the frozen build (48 MB of files that never execute -- the
+    only caller is AcrylicLabel's blur, and Mica/Acrylic are forced off), so in the
+    packaged app the import below simply isn't satisfiable. Blur is cosmetic, so the
+    unblurred image is returned rather than raising: a missing decoration must never
+    take the window down. Running from source, where scipy is installed, still gets
+    the genuine filter.
+    """
     for name in _STUBBED:
         mod = sys.modules.get(name)
         if getattr(mod, "__aed_stub__", False):
             del sys.modules[name]
-    from scipy.ndimage import gaussian_filter
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        return args[0] if args else None
     return gaussian_filter(*args, **kwargs)
 
 

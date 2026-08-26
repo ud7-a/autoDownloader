@@ -9,6 +9,7 @@ built on -- the places where a silent regression would quietly break real downlo
 (wrong episode ranges, unreachable episode URLs, mis-detected seasons).
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -23,12 +24,17 @@ os.makedirs(os.environ["AED_APP_DIR"], exist_ok=True)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ui.downloader_tab import compact_episode_spec, spec_to_ranges          # noqa: E402
+from ui.downloader_tab import (compact_episode_spec, spec_to_ranges,        # noqa: E402
+                               encode_check_url)
 from ui.search_tab import (extract_domain, _full_res, AnimeDetailsThread,   # noqa: E402
-                           SUPPORTED_SITES, DEFAULT_SITE_FLOWS)
+                           SUPPORTED_SITES, DEFAULT_SITE_FLOWS, resolve_site_flow)
+from utils.config import sites_data, config_lock            # noqa: E402
 from core.selenium_engine import (_format_eta, _aria_convert_unit,          # noqa: E402
                                   parse_smart_xpath, episode_url_variants,
-                                  is_block_page, _host_of)
+                                  is_block_page, _host_of, tab_matches_path,
+                                  PATH_HOSTS)
+from core.schedule import SCHEDULE_URLS, SCHEDULE_MATCH                     # noqa: E402
+from utils.browser_flags import DEFAULT_HOSTS                               # noqa: E402
 
 
 class IsolationGuardTests(unittest.TestCase):
@@ -553,6 +559,269 @@ class BlockPageTests(unittest.TestCase):
 
     def test_missing_file_is_not_a_block_page(self):
         self.assertFalse(is_block_page(os.path.join(tempfile.gettempdir(), "does-not-exist.bin")))
+
+
+class CheckUrlEncodingTests(unittest.TestCase):
+    """The Base URL is requested to test reachability. Raw Arabic in it used to raise
+    UnicodeEncodeError before any request went out, so both HTTP tiers were skipped
+    and every such profile silently fell through to the DNS-only check."""
+
+    def test_arabic_path_is_encoded(self):
+        out = encode_check_url("https://witanime.life/episode/one-piece-الحلقة-444/")
+        out.encode("ascii")   # must not raise -- this is what urllib does internally
+        self.assertTrue(out.startswith("https://witanime.life/episode/one-piece-"))
+        self.assertIn("%D8%A7", out)
+
+    def test_already_encoded_url_is_unchanged(self):
+        url = "https://witanime.life/episode/one-piece-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-444/"
+        self.assertEqual(encode_check_url(url), url)
+
+    def test_encoding_is_idempotent(self):
+        raw = "https://witanime.life/episode/one-piece-الحلقة-444/"
+        once = encode_check_url(raw)
+        self.assertEqual(encode_check_url(once), once)
+
+    def test_plain_ascii_url_is_unchanged(self):
+        url = "https://example.com/ep/1/"
+        self.assertEqual(encode_check_url(url), url)
+
+    def test_host_and_scheme_are_preserved(self):
+        out = encode_check_url("https://eta.animerco.org/episodes/بليتش-الحلقة-5/")
+        self.assertTrue(out.startswith("https://eta.animerco.org/"))
+
+    def test_query_is_kept(self):
+        out = encode_check_url("https://example.com/dl?id=abc&export=download")
+        self.assertEqual(out, "https://example.com/dl?id=abc&export=download")
+
+    def test_blank_url_does_not_crash(self):
+        self.assertEqual(encode_check_url(""), "")
+        self.assertEqual(encode_check_url(None), "")
+
+
+class SiteFlowPrecedenceTests(unittest.TestCase):
+    """Loading an anime and downloading from the Watchlist must use the built-in flow
+    for supported sites. Before this, both inherited the same-domain profile with the
+    most steps, so one hand-edited profile silently became the template for every new
+    anime and every watchlist download."""
+
+    def setUp(self):
+        with config_lock:
+            self._saved = dict(sites_data)
+            sites_data.clear()
+
+    def tearDown(self):
+        with config_lock:
+            sites_data.clear()
+            sites_data.update(self._saved)
+
+    def test_builtin_wins_over_an_existing_profile(self):
+        with config_lock:
+            sites_data["Old Anime"] = {
+                "url": "https://witanime.life/episode/whatever-{x}/",
+                "next_btn_xpath": "WRONG",
+                # deliberately richer than the built-in, which used to win on count
+                "step_paths": {"mediafire": [{"xpath": "junk", "delay": 99.0},
+                                             {"xpath": "junk2", "delay": 99.0},
+                                             {"xpath": "junk3", "delay": 99.0}]},
+            }
+        paths, nxt = resolve_site_flow("witanime.life")
+        self.assertEqual(paths, DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"])
+        self.assertEqual(nxt, DEFAULT_SITE_FLOWS["witanime.life"]["next_btn_xpath"])
+        self.assertNotIn("junk", str(paths))
+
+    def test_returned_flow_is_a_copy(self):
+        """The caller writes this into a profile; mutating it must not corrupt the
+        shipped default for every later download in the same session."""
+        paths, _ = resolve_site_flow("witanime.life")
+        paths["mediafire"][0]["delay"] = 123.0
+        self.assertNotEqual(
+            DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]["mediafire"][0]["delay"],
+            123.0)
+
+    def test_unsupported_domain_still_inherits_from_a_profile(self):
+        with config_lock:
+            sites_data["Custom"] = {
+                "url": "https://example.com/ep-{x}/",
+                "next_btn_xpath": "next",
+                "step_paths": {"host": [{"xpath": "a", "delay": 1.0}]},
+            }
+        paths, nxt = resolve_site_flow("example.com")
+        self.assertEqual(paths, {"host": [{"xpath": "a", "delay": 1.0}]})
+        self.assertEqual(nxt, "next")
+
+    def test_unsupported_domain_with_no_profile_is_empty(self):
+        paths, nxt = resolve_site_flow("nowhere.invalid")
+        self.assertEqual(paths, {})
+        self.assertEqual(nxt, "")
+
+
+class WitanimeTemplateTests(unittest.TestCase):
+    """Pins the shipped witanime flow to the template it is meant to be. A stray edit
+    to a delay or an xpath here changes downloads for every anime on the site."""
+
+    EXPECTED = {
+        "mediafire": [("mediafire #last", 7.0), ('//*[@id="downloadButton"]', 3.0)],
+        "google drive": [("google drive #last", 3.0), ("Download anyway", 2.0)],
+        "Workupload": [("workupload #last", 5.0),
+                       ('//*[@id=\\"file\\"]/div[3]/div/a', 5.0)],
+        "rf": [("rf #last", 11.0), ('//*[@id="downloadButton"]', 2.0)],
+    }
+
+    def test_flow_matches_the_template(self):
+        flow = DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]
+        self.assertEqual(list(flow), list(self.EXPECTED), "path names or order changed")
+        for name, steps in self.EXPECTED.items():
+            self.assertEqual(len(flow[name]), len(steps), f"{name}: step count changed")
+            for i, (xpath, delay) in enumerate(steps):
+                self.assertEqual(flow[name][i]["xpath"], xpath, f"{name}[{i}] xpath")
+                self.assertEqual(float(flow[name][i]["delay"]), delay, f"{name}[{i}] delay")
+
+    def test_next_button_is_the_arabic_next_episode_label(self):
+        self.assertEqual(DEFAULT_SITE_FLOWS["witanime.life"]["next_btn_xpath"],
+                         "الحلقة التالية")
+
+
+class ScipyDeferralTests(unittest.TestCase):
+    """scipy is excluded from the frozen build (48 MB that never executes), so in the
+    packaged app the lazy import cannot be satisfied. Blur is decoration; losing it
+    must never take the window down."""
+
+    def test_blur_returns_the_unblurred_image_when_scipy_is_absent(self):
+        from utils import fast_start
+        names = ("scipy", "scipy.ndimage", "scipy.ndimage.filters")
+        saved = [(n, n in sys.modules, sys.modules.get(n)) for n in names]
+        try:
+            for n in names:
+                sys.modules[n] = None      # makes `from scipy...` raise ImportError
+            image = ["untouched"]
+            self.assertIs(fast_start._lazy_gaussian_filter(image, 3), image)
+        finally:
+            for n, existed, mod in saved:
+                if existed:
+                    sys.modules[n] = mod
+                else:
+                    sys.modules.pop(n, None)
+
+    def test_blur_with_no_arguments_does_not_raise(self):
+        from utils import fast_start
+        names = ("scipy", "scipy.ndimage", "scipy.ndimage.filters")
+        saved = [(n, n in sys.modules, sys.modules.get(n)) for n in names]
+        try:
+            for n in names:
+                sys.modules[n] = None
+            self.assertIsNone(fast_start._lazy_gaussian_filter())
+        finally:
+            for n, existed, mod in saved:
+                if existed:
+                    sys.modules[n] = mod
+                else:
+                    sys.modules.pop(n, None)
+
+
+class SiteRegistryParityTests(unittest.TestCase):
+    """Pins what the shipped sites currently do.
+
+    These values drive real downloads: a changed selector or delay silently breaks
+    every episode for that site, and the Google Drive delays had already drifted from
+    the intended template once before anyone noticed. The fixture is the picture of
+    current behaviour, so changing it has to be a deliberate act -- regenerate with
+    `py tools/snapshot_sites.py` and say why in the commit."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "fixtures", "sites_snapshot.json")
+        with open(path, encoding="utf-8") as f:
+            cls.snap = json.load(f)
+
+    def test_search_urls_unchanged(self):
+        self.assertEqual(SUPPORTED_SITES, self.snap["supported_sites"])
+
+    def test_site_flows_unchanged(self):
+        self.assertEqual(DEFAULT_SITE_FLOWS, self.snap["site_flows"])
+
+    def test_path_hosts_unchanged(self):
+        self.assertEqual({k: list(v) for k, v in PATH_HOSTS.items()},
+                         self.snap["path_hosts"])
+
+    def test_schedule_config_unchanged(self):
+        self.assertEqual(SCHEDULE_URLS, self.snap["schedule_urls"])
+        self.assertEqual(SCHEDULE_MATCH, self.snap["schedule_match"])
+
+    def test_dns_hosts_unchanged(self):
+        self.assertEqual(list(DEFAULT_HOSTS), self.snap["dns_hosts"])
+
+
+class DownloadDestinationTests(unittest.TestCase):
+    """A download button on these sites can be wrapped in an ad redirect and land on
+    an interstitial instead of the file. Landing there wastes the whole 35s
+    interception window and reports the episode as failed, so the engine checks where
+    the click actually went before committing to it."""
+
+    def test_real_drive_download_url_is_accepted(self):
+        # The URL witanime's Google Drive button actually opens.
+        self.assertTrue(tab_matches_path(
+            "https://drive.usercontent.google.com/download?id=1o_XPNYu&export=download",
+            "google drive"))
+
+    def test_drive_preview_url_is_accepted(self):
+        self.assertTrue(tab_matches_path(
+            "https://drive.google.com/file/d/1o_XPNYu/view", "google drive"))
+
+    def test_fast_io_interstitial_is_rejected(self):
+        # The page reported in the wild instead of the file.
+        self.assertFalse(tab_matches_path(
+            "https://www.fast.io/alternatives/google-drive/?utm_source=mfftr_error",
+            "google drive"))
+
+    def test_a_different_mirror_is_rejected_for_this_path(self):
+        self.assertFalse(tab_matches_path(
+            "https://www.mediafire.com/file/abc/ep.mp4", "google drive"))
+        self.assertTrue(tab_matches_path(
+            "https://www.mediafire.com/file/abc/ep.mp4", "mediafire"))
+
+    def test_subdomains_of_an_allowed_host_are_accepted(self):
+        self.assertTrue(tab_matches_path(
+            "https://f54.workupload.com/download/xyz", "workupload"))
+
+    def test_lookalike_domain_is_rejected(self):
+        # endswith() on a bare name would wrongly accept this.
+        self.assertFalse(tab_matches_path(
+            "https://mediafire.com.evil.example/file", "mediafire"))
+
+    def test_unknown_path_name_is_allowed_through(self):
+        # Profiles are user-editable; an unrecognised path must not be blocked.
+        self.assertTrue(tab_matches_path("https://example.com/x", "some custom host"))
+
+    def test_blank_url_is_allowed_through(self):
+        # about:blank while the tab is still opening -- the normal waits handle it.
+        self.assertTrue(tab_matches_path("", "google drive"))
+        self.assertTrue(tab_matches_path("about:blank", "google drive"))
+
+    def test_path_name_matching_ignores_case_and_padding(self):
+        self.assertTrue(tab_matches_path(
+            "https://drive.google.com/uc?export=download&id=1", "  Google Drive  "))
+
+    def test_major_shipped_paths_are_covered(self):
+        """The hosts worth guarding must stay mapped as flows are edited. Paths whose
+        host isn't known (witanime's 'rf') are deliberately absent: an unmapped path
+        passes the check rather than being blocked, so guessing its host would risk
+        rejecting a download that was actually fine."""
+        shipped = {p.strip().lower()
+                   for flow in DEFAULT_SITE_FLOWS.values()
+                   for p in flow["step_paths"]}
+        for name in ("google drive", "mediafire", "workupload"):
+            if name in shipped:
+                self.assertIn(name, PATH_HOSTS, f"'{name}' lost its expected hosts")
+
+    def test_mapped_hosts_are_bare_domains(self):
+        """Hosts are compared with == and endswith('.'+host), so a scheme, path or
+        leading dot in this table would silently never match anything."""
+        for name, hosts in PATH_HOSTS.items():
+            for h in hosts:
+                self.assertNotIn("/", h, f"{name}: '{h}' should be a bare domain")
+                self.assertFalse(h.startswith("."), f"{name}: '{h}' has a leading dot")
+                self.assertEqual(h, h.lower(), f"{name}: '{h}' should be lowercase")
 
 
 class SiteConfigTests(unittest.TestCase):

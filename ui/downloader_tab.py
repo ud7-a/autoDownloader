@@ -185,6 +185,25 @@ class EpisodeRangePicker(QWidget):
         self._update_remove_buttons()
 
 
+def encode_check_url(url):
+    """Percent-encode a Base URL's path/query so it can be requested.
+
+    These profiles' Base URLs often hold raw Arabic (…/episode/one-piece-الحلقة-444/),
+    and urllib's Request() raises UnicodeEncodeError on a non-ASCII URL before any
+    request goes out. Already-encoded URLs pass through unchanged ('%' stays safe), so
+    this is idempotent.
+    """
+    import urllib.parse
+    sp = urllib.parse.urlsplit(url or "")
+    return urllib.parse.urlunsplit((
+        sp.scheme,
+        sp.netloc,
+        urllib.parse.quote(sp.path, safe="/%~"),
+        urllib.parse.quote(sp.query, safe="=&%~"),
+        "",
+    ))
+
+
 class ConnectionCheckThread(QThread):
     """Check a profile's Base URL is reachable, off the UI thread -- so clicking
     Start never freezes the window while the network connection times out."""
@@ -199,8 +218,11 @@ class ConnectionCheckThread(QThread):
         try:
             import urllib.request, urllib.parse, ssl, socket
             from urllib.error import HTTPError
+            # Encode first: a raw-Arabic Base URL would otherwise raise
+            # UnicodeEncodeError here and skip both reachability tiers below.
+            check_url = encode_check_url(self.url)
             req = urllib.request.Request(
-                self.url,
+                check_url,
                 headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                          'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
             )
@@ -229,13 +251,30 @@ class ConnectionCheckThread(QThread):
                     err = str(first_err)
             # Tier 3: DNS resolves -> site is up even if Cloudflare reset the socket.
             if not ok:
+                host = urllib.parse.urlsplit(self.url).netloc.split(':')[0]
                 try:
-                    host = urllib.parse.urlsplit(self.url).netloc.split(':')[0]
                     if host:
                         socket.gethostbyname(host)
                         ok = True
                 except Exception as dns_err:
-                    err = f"DNS resolution failed: {dns_err}"
+                    # Tier 4: the machine's resolver is the problem, not the site. ISP
+                    # resolvers routinely return NXDOMAIN for these domains, and every
+                    # tier above this one goes through that same resolver, so the check
+                    # failed while the download would have worked: all three browsers
+                    # pass --host-resolver-rules built from Google Public DNS (see
+                    # utils.browser_flags). Ask the same resolver they use before
+                    # blocking Start over a name the browser can resolve fine.
+                    resolved = False
+                    if host:
+                        try:
+                            from utils.browser_flags import google_resolve
+                            resolved = bool(google_resolve(host))
+                        except Exception:
+                            resolved = False
+                    if resolved:
+                        ok = True
+                    else:
+                        err = f"DNS resolution failed: {dns_err}"
         except Exception as e:
             # Any unexpected failure must still report back, or Start stays disabled.
             err = str(e)
@@ -802,10 +841,18 @@ class DownloaderWidget(QWidget):
         # Kept so a retry can rebuild the transient profile after it is cleaned up.
         self.last_watch_meta = (title, template, domain)
 
+        # Watchlist downloads always run the built-in flow on supported sites, so an
+        # existing profile with the same name and hand-edited steps can't change how
+        # the episode is fetched. The flow is pinned for this run only and passed to
+        # the engine directly: sites_data is left alone because that profile is the
+        # user's, and save_config() (which _begin_download calls) drops _transient
+        # entries -- shadowing a real profile under its own key would delete it.
+        from ui.search_tab import resolve_site_flow, DEFAULT_SITE_FLOWS
+        step_paths, next_btn = resolve_site_flow(domain)
+        pinned_flow = step_paths if domain in DEFAULT_SITE_FLOWS else None
+
         transient = site_key not in sites_data
         if transient:
-            from ui.search_tab import resolve_site_flow
-            step_paths, next_btn = resolve_site_flow(domain)
             if not any(isinstance(v, list) and v for v in step_paths.values()):
                 self._warn("No Download Steps",
                            f"No automation steps configured for {domain}. Set up one "
@@ -831,7 +878,9 @@ class DownloaderWidget(QWidget):
                         pass
             signals.task_finished.connect(_cleanup)
             signals.task_cancelled.connect(_cleanup)
-        else:
+        elif pinned_flow is None:
+            # Only an unsupported site falls back to the existing profile's steps, so
+            # that profile is the one that has to be configured.
             with config_lock:
                 sp = sites_data[site_key].get("step_paths", {}) or {}
             if not any(isinstance(v, list) and v for v in sp.values()):
@@ -848,6 +897,7 @@ class DownloaderWidget(QWidget):
             "selected_sound": app_settings.get("selected_sound", ""),
             "volume": app_settings.get("volume", 100),
             "concurrency": app_settings.get("concurrency", 3),
+            "step_paths_override": pinned_flow,
         })
 
     def start_task(self):
@@ -1018,6 +1068,7 @@ class DownloaderWidget(QWidget):
         threading.Thread(
             target=run_selenium_task,
             args=(p["site"], p["episodes_list"], p["target_dir"], p["headless"],
-                  p["webhook"], p["selected_sound"], p["volume"], p["concurrency"]),
+                  p["webhook"], p["selected_sound"], p["volume"], p["concurrency"],
+                  p.get("step_paths_override")),
             daemon=True
         ).start()

@@ -117,9 +117,9 @@ class AppWindow(FluentWindow):
         super().__init__()
 
         self.setWindowTitle(f"Auto Episodes Downloader | Version {APP_VERSION}")
-        
+
         self.setMinimumSize(1100, 700)
-        
+
         # Load saved window position/geometry
         desktop = QApplication.primaryScreen().availableGeometry()
         w, h = desktop.width(), desktop.height()
@@ -137,7 +137,7 @@ class AppWindow(FluentWindow):
             target_x, target_y = w // 2 - target_w // 2, h // 2 - target_h // 2
             
         self.setGeometry(target_x, target_y, target_w, target_h)
-        
+
         # Defer maximization slightly to prevent any Windows 7 title bar flash
         if app_settings.get("window_maximized", False):
             QTimer.singleShot(50, self.maximize_window)
@@ -160,7 +160,7 @@ class AppWindow(FluentWindow):
         self.progress_added = False
 
         self.init_navigation()
-        
+
         # Transparency (Mica/Acrylic) is forced OFF, regardless of system settings.
         self.setMicaEffectEnabled(False)
         self.navigationInterface.setAcrylicEnabled(False)
@@ -179,6 +179,7 @@ class AppWindow(FluentWindow):
         signals.task_finished.connect(self.on_task_finished)
         self.progress_interface.watch_requested.connect(self.on_start_watching)
         self.stackedWidget.currentChanged.connect(self._dismiss_finished_tab_on_navigate)
+        self.stackedWidget.currentChanged.connect(self._sync_manager_to_downloader)
         
         # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
         self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
@@ -352,6 +353,21 @@ class AppWindow(FluentWindow):
             return   # still looking at the result
         self._await_finish_dismiss = False
         self.hide_active_tasks(switch_away=False)
+
+    def _sync_manager_to_downloader(self, _index=None):
+        """Opening the profile manager shows the profile the downloader is set to.
+
+        Without this the manager loads whichever profile is first in the config, so a
+        user who picked a profile on the Downloader tab and came here to edit it was
+        looking at a different one -- easy to edit the wrong profile by mistake.
+        """
+        if self.stackedWidget.currentWidget() is not self.manager_interface:
+            return
+        try:
+            self.manager_interface.show_profile(
+                self.downloader_interface.combo_site.currentText())
+        except Exception:
+            pass   # never let a dropdown sync block tab navigation
 
     def on_start_watching(self):
         """Play the episodes that were just downloaded, then close the finished tab.

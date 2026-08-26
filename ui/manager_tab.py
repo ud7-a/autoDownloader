@@ -306,6 +306,33 @@ class SiteManagerWidget(QWidget):
         # Reload the currently selected profile from disk, dropping unsaved edits.
         self.load_profile(self.profile_combo.currentText())
 
+    def show_profile(self, name):
+        """Select `name` in the dropdown so this tab shows the profile the downloader
+        is set to, instead of whichever profile happens to be first in the config.
+
+        Skipped while edits are pending: switching profiles reloads every field from
+        disk, which would throw away work the user hasn't saved yet. The Save button
+        being enabled is what "pending" means here.
+        """
+        name = (name or "").strip()
+        if not name or name in ("No Profiles", "New Profile", "No profile selected"):
+            return
+        with config_lock:
+            if name not in sites_data:
+                return
+        if self.profile_combo.currentText() == name:
+            return
+        if self.btn_save.isEnabled():
+            return
+
+        # Counts as the initial load, so showEvent doesn't overwrite this with the
+        # first profile in the config (either ordering of the two ends up correct).
+        self._initial_load_done = True
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.setCurrentText(name)
+        self.profile_combo.blockSignals(False)
+        self.load_profile(name)
+
     def showEvent(self, event):
         super().showEvent(event)
         if not self._initial_load_done:
