@@ -34,6 +34,11 @@ AD_URL_PATTERNS = [
     # Trackers and analytics beacons
     "*google-analytics.com*", "*googletagmanager.com*", "*histats.com*",
     "*statcounter.com*", "*hotjar.com*", "*scorecardresearch.com*",
+    # Interstitial landing pages a download link can be redirected to instead of the
+    # file. These are not ad servers, so an ad blocker's filter lists do not carry
+    # them, but they hijack the download tab and are what the user actually sees.
+    # None of them is a file host the downloader uses.
+    "*fast.io*",
 ]
 
 

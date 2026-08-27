@@ -378,13 +378,18 @@ def create_browser(download_dir, headless=True):
     service.creation_flags = CREATE_NO_WINDOW
     driver = webdriver.Chrome(options=options, service=service)
     driver.set_page_load_timeout(45)
-    # Real ad blocker first (hides leftover ad slots and disarms popunders, which a
-    # URL blocklist cannot); fall back to request blocking if it cannot be loaded.
+    # The two blockers do different jobs, so both are applied rather than one being
+    # a fallback for the other. The extension hides leftover ad slots and disarms
+    # popunders, which a URL blocklist cannot; the blocklist refuses the request at
+    # the network layer, including a navigation to a known interstitial, which the
+    # extension's filter lists do not cover because such pages are not ad servers.
+    # Running the blocklist only when the extension failed left the users who had a
+    # working extension with no protection against exactly that redirect.
     from core import extensions, adblock
-    if extensions.load_into(driver):
+    loaded = extensions.load_into(driver)
+    adblock.apply(driver)
+    if loaded:
         signals.update_status.emit("Status: 🛡️ Ad blocker active.", "#2ecc71")
-    else:
-        adblock.apply(driver)
     return driver
 
 def solve_captcha_if_present(driver, url):
@@ -1035,7 +1040,6 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                         
                         signals.update_status.emit(f"Status: [{path_name}] Executing...", "#ffffff")
                         path_failed = False
-                        current_tabs = len(driver.window_handles)
 
                         for step_idx, step in enumerate(steps):
                             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
@@ -1078,7 +1082,11 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 signals.update_status.emit(f"Status: ❌ Could not find button for Step {step_idx + 1}", "#e74c3c")
                                 break 
 
-                            try: 
+                            # Recorded per click so the tabs this click opened can be
+                            # told apart individually, not just counted.
+                            before_handles = list(driver.window_handles)
+
+                            try:
                                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
                                 time.sleep(0.5)
                                 # ALWAYS use JS click first to bypass invisible ad overlays!
@@ -1099,11 +1107,74 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 time.sleep(0.5)
                                 slept += 0.5
 
-                            new_tabs = len(driver.window_handles)
-                            if new_tabs > current_tabs:
-                                driver.switch_to.window(driver.window_handles[-1])
-                                driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": ep_temp_dir})
-                                current_tabs = new_tabs
+                            new_handles = [h for h in driver.window_handles
+                                           if h not in before_handles]
+                            if new_handles:
+                                # One click can open more than one tab: the file, plus
+                                # whatever popunder or interstitial the page threw up.
+                                # Every new tab is examined and the one belonging to this
+                                # path is kept. Judging only the newest tab meant an ad
+                                # arriving last condemned the whole path, throwing away a
+                                # perfectly good download tab that opened beside it.
+                                #
+                                # Explicit host matches win. A tab still on about:blank
+                                # is mid-redirect and matches everything, so it is only
+                                # accepted when nothing resolved -- otherwise a blank ad
+                                # tab could be preferred over the real file.
+                                keeper = None
+                                for handle in new_handles:
+                                    try:
+                                        driver.switch_to.window(handle)
+                                    except Exception:
+                                        continue
+                                    url = driver.current_url
+                                    if _host_of(url) and tab_matches_path(url, path_name):
+                                        keeper = handle
+                                        break
+
+                                if keeper is None:
+                                    for handle in reversed(new_handles):
+                                        try:
+                                            driver.switch_to.window(handle)
+                                        except Exception:
+                                            continue
+                                        if not _host_of(driver.current_url):
+                                            keeper = handle
+                                            break
+
+                                if keeper is None:
+                                    landed = ""
+                                    try:
+                                        driver.switch_to.window(new_handles[-1])
+                                        landed = _host_of(driver.current_url)
+                                    except Exception:
+                                        pass
+                                    signals.update_status.emit(
+                                        f"Status: ⚠️ [{path_name}] led to {landed or 'an unknown page'}, "
+                                        f"not the file. Trying another mirror...", "#f39c12")
+
+                                # Close every other tab this click opened, so an ad can
+                                # neither be downloaded from nor pile up across episodes.
+                                for handle in new_handles:
+                                    if handle == keeper:
+                                        continue
+                                    try:
+                                        driver.switch_to.window(handle)
+                                        driver.close()
+                                    except Exception:
+                                        pass
+
+                                try:
+                                    driver.switch_to.window(keeper or driver.window_handles[0])
+                                except Exception:
+                                    pass
+
+                                if keeper is None:
+                                    path_failed = True
+                                    break
+
+                                driver.execute_cdp_cmd("Page.setDownloadBehavior",
+                                                       {"behavior": "allow", "downloadPath": ep_temp_dir})
 
                                 # A new tab that lands on a Google Drive file-preview
                                 # page (e.g. animerco's /links redirect) can't be
@@ -1111,26 +1182,6 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 # download URL so the large-file "Download anyway"
                                 # confirm shows and the file can be intercepted.
                                 rewrite_gdrive_to_direct_download(driver, ep_temp_dir)
-
-                                # Only new tabs are checked. The original tab is still
-                                # the episode page, whose host is never one of this
-                                # path's hosts, so guarding it would fail every path.
-                                if not tab_matches_path(driver.current_url, path_name):
-                                    landed = _host_of(driver.current_url) or "an unknown page"
-                                    signals.update_status.emit(
-                                        f"Status: ⚠️ [{path_name}] led to {landed}, not the file. Trying another mirror...",
-                                        "#f39c12")
-                                    try:
-                                        driver.close()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        driver.switch_to.window(driver.window_handles[0])
-                                    except Exception:
-                                        pass
-                                    current_tabs = len(driver.window_handles)
-                                    path_failed = True
-                                    break
 
                                 # Dynamic Captcha Solver Integration for tab switch
                                 try:
