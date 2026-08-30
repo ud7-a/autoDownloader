@@ -139,6 +139,11 @@ if ($copyOk) {
     }
     Start-Sleep -Milliseconds 500
     try {
+        # Move-Item into a directory that still exists puts the source INSIDE it,
+        # producing App\App_new -- a full second copy of the app that nothing ever
+        # cleans up. The wipe above can fail (a locked directory handle is enough, an
+        # open Explorer window will do it), so refuse to move unless it really went.
+        if (Test-Path -LiteralPath $destDir) { throw "destination still present; copying instead of moving" }
         Move-Item -LiteralPath $stageDir -Destination $destDir -Force -ErrorAction Stop
         Log "Swap succeeded."
     } catch {
@@ -160,6 +165,28 @@ Start-Sleep -Seconds 1
 # 4. Clean up the temporary extraction directory
 Log "Step 4: Cleaning up temp directory..."
 if (Test-Path -LiteralPath $tempExtractDir) { Remove-Item -LiteralPath $tempExtractDir -Recurse -Force }
+
+# 4b. Remove leftovers from this update or an older one: the staging folder, the
+# nested copy an earlier build could create inside the app folder, and any App_prev_*
+# backups. Left alone these quietly double the install size -- 579 MB of orphans was
+# seen on one machine against a 215 MB app.
+#
+# Only these exact shapes are touched. The same directory holds the live user data:
+# sites_config.json, download_history.db, SeleniumProfile and watchlist_covers.
+foreach ($leftover in @($stageDir, (Join-Path $destDir 'App_new'))) {
+    if (Test-Path -LiteralPath $leftover) {
+        try {
+            Remove-Item -LiteralPath $leftover -Recurse -Force -ErrorAction Stop
+            Log ("Removed leftover: " + $leftover)
+        } catch { Log ("Could not remove " + $leftover + ": " + $_.Exception.Message) }
+    }
+}
+Get-ChildItem -LiteralPath $rootDir -Directory -Filter 'App_prev_*' -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
+        Log ("Removed old backup: " + $_.Name)
+    } catch { Log ("Could not remove " + $_.Name + ": " + $_.Exception.Message) }
+}
 Start-Sleep -Seconds 1
 
 # 5. Re-generate a clean Desktop Shortcut

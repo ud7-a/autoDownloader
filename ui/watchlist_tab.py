@@ -24,6 +24,18 @@ def _today_key():
     return DAY_ORDER[(time.localtime().tm_wday + 2) % 7]
 
 
+def entries_airing_today(entries, today):
+    """The watchlist entries the automatic check should look at.
+
+    Anime with no release_day are included, not skipped. The day is filled in
+    asynchronously by the schedule scrape, and on a first run no entry has one at all,
+    so matching strictly on the day would quietly check nothing -- a failure that looks
+    exactly like "no new episodes".
+    """
+    return [w for w in (entries or [])
+            if not w.get("release_day") or w.get("release_day") == today]
+
+
 def _persist_cover(url, cover_path):
     """Copy a (temp-cached) cover into a durable Watchlist folder so it survives
     temp pruning. Returns the persistent path, or "" if there's nothing to copy."""
@@ -417,12 +429,13 @@ class WatchlistWidget(QWidget):
 
         self.btn_check_all = PushButton(FIF.SYNC, "Check all now")
         self.btn_check_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_check_all.setToolTip("Check every followed anime, not just the ones airing today")
         self.btn_check_all.clicked.connect(self.check_all)
         header.addWidget(self.btn_check_all)
         root.addLayout(header)
 
-        sub = QLabel("Follow anime from the Search tab; the app checks for new episodes "
-                     "on launch and whenever you press Check.")
+        sub = QLabel("Follow anime from the Search tab. On launch the app checks the ones "
+                     "airing today; use Check all now for the rest.")
         sub.setStyleSheet("color: #999999; background: transparent;")
         root.addWidget(sub)
 
@@ -518,6 +531,17 @@ class WatchlistWidget(QWidget):
     # ---- checking ----
     def check_all(self):
         self._start_check(get_watchlist())
+
+    def check_today(self):
+        """Check the anime airing today, plus any whose day isn't known yet.
+
+        This is the automatic check on launch. Sweeping the whole watchlist there was
+        slow and mostly re-read anime that cannot have a new episode today; "Check all
+        now" remains the way to force a full pass.
+
+        See entries_airing_today() for why anime with no known day are included.
+        """
+        self._start_check(entries_airing_today(get_watchlist(), _today_key()))
 
     def check_one(self, url):
         self._start_check([w for w in get_watchlist() if w.get("url") == url])

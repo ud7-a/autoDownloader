@@ -26,13 +26,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ui.downloader_tab import (compact_episode_spec, spec_to_ranges,        # noqa: E402
                                encode_check_url)
+from ui.watchlist_tab import entries_airing_today                            # noqa: E402
 from ui.search_tab import (extract_domain, _full_res, AnimeDetailsThread,   # noqa: E402
                            SUPPORTED_SITES, DEFAULT_SITE_FLOWS, resolve_site_flow)
 from utils.config import sites_data, config_lock            # noqa: E402
 from core.selenium_engine import (_format_eta, _aria_convert_unit,          # noqa: E402
                                   parse_smart_xpath, episode_url_variants,
                                   is_block_page, _host_of, tab_matches_path,
-                                  PATH_HOSTS)
+                                  PATH_HOSTS, rotate_error_log)
 from core.schedule import SCHEDULE_URLS, SCHEDULE_MATCH                     # noqa: E402
 from utils.browser_flags import DEFAULT_HOSTS                               # noqa: E402
 
@@ -679,6 +680,99 @@ class WitanimeTemplateTests(unittest.TestCase):
     def test_next_button_is_the_arabic_next_episode_label(self):
         self.assertEqual(DEFAULT_SITE_FLOWS["witanime.life"]["next_btn_xpath"],
                          "الحلقة التالية")
+
+
+class ErrorLogRotationTests(unittest.TestCase):
+    """Every failed download appends its full aria2c output, so on a flaky connection
+    the log grows steadily. Rotation keeps at most two files, newest failures kept."""
+
+    def log_path(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return os.path.join(d, "aria2c_error.log")
+
+    def write(self, path, size):
+        with open(path, "wb") as f:
+            f.write(b"x" * size)
+
+    def test_small_log_is_left_alone(self):
+        p = self.log_path()
+        self.write(p, 100)
+        self.assertFalse(rotate_error_log(p, max_bytes=1000))
+        self.assertTrue(os.path.exists(p))
+        self.assertFalse(os.path.exists(p + ".1"))
+
+    def test_oversized_log_becomes_the_previous_one(self):
+        p = self.log_path()
+        self.write(p, 2000)
+        self.assertTrue(rotate_error_log(p, max_bytes=1000))
+        self.assertFalse(os.path.exists(p))          # a fresh one is opened on next write
+        self.assertEqual(os.path.getsize(p + ".1"), 2000)
+
+    def test_only_two_files_ever_exist(self):
+        p = self.log_path()
+        for marker in (b"a", b"b", b"c"):
+            with open(p, "wb") as f:
+                f.write(marker * 2000)
+            rotate_error_log(p, max_bytes=1000)
+        self.assertFalse(os.path.exists(p))
+        self.assertFalse(os.path.exists(p + ".2"))
+        with open(p + ".1", "rb") as f:
+            self.assertTrue(f.read().startswith(b"c"), "kept the oldest, not the newest")
+
+    def test_missing_log_is_not_an_error(self):
+        self.assertFalse(rotate_error_log(self.log_path(), max_bytes=1000))
+
+    def test_exact_ceiling_rotates(self):
+        """The check is `size < max`, so landing exactly on the ceiling rotates."""
+        p = self.log_path()
+        self.write(p, 1000)
+        self.assertTrue(rotate_error_log(p, max_bytes=1000))
+
+
+class WatchlistTodayFilterTests(unittest.TestCase):
+    """The automatic check on launch covers today's anime only -- a full sweep is slow
+    and mostly re-reads anime that cannot have a new episode yet. "Check all now" is
+    the manual full pass."""
+
+    def entry(self, name, day=None):
+        e = {"url": f"https://x/{name}", "title": name}
+        if day is not None:
+            e["release_day"] = day
+        return e
+
+    def test_anime_airing_today_is_included(self):
+        picked = entries_airing_today([self.entry("a", "monday")], "monday")
+        self.assertEqual([e["title"] for e in picked], ["a"])
+
+    def test_anime_airing_another_day_is_skipped(self):
+        picked = entries_airing_today([self.entry("a", "friday")], "monday")
+        self.assertEqual(picked, [])
+
+    def test_unknown_day_is_included(self):
+        """A newly followed anime has no day until the schedule scrape lands, and on a
+        first run nothing has one -- excluding these would check nothing at all."""
+        entries = [self.entry("no-key"), self.entry("blank", ""), self.entry("none", None)]
+        self.assertEqual(len(entries_airing_today(entries, "monday")), 3)
+
+    def test_mixed_watchlist_picks_only_today_and_unknown(self):
+        entries = [self.entry("today", "sunday"), self.entry("other", "tuesday"),
+                   self.entry("unknown"), self.entry("also-today", "sunday")]
+        picked = [e["title"] for e in entries_airing_today(entries, "sunday")]
+        self.assertEqual(picked, ["today", "unknown", "also-today"])
+
+    def test_empty_and_none_watchlists_are_safe(self):
+        self.assertEqual(entries_airing_today([], "monday"), [])
+        self.assertEqual(entries_airing_today(None, "monday"), [])
+
+    def test_day_comparison_is_exact(self):
+        """Day keys come from the schedule's canonical set; no fuzzy matching."""
+        self.assertEqual(entries_airing_today([self.entry("a", "Monday")], "monday"), [])
+
+    def test_today_key_is_a_real_schedule_day(self):
+        from ui.watchlist_tab import _today_key
+        from core.schedule import DAY_ORDER
+        self.assertIn(_today_key(), DAY_ORDER)
 
 
 class ScipyDeferralTests(unittest.TestCase):

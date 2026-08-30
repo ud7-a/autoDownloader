@@ -203,7 +203,10 @@ class AppWindow(FluentWindow):
 
         # Auto-check the Watchlist shortly after launch (only if anything is followed).
         if get_watchlist():
-            QTimer.singleShot(8000, self.watchlist_interface.check_all)
+            # Only today's anime on launch. A full sweep is slow, hammers both sites
+            # and mostly re-reads anime that cannot have a new episode today; "Check
+            # all now" in the Watchlist tab is there for the full pass.
+            QTimer.singleShot(8000, self.watchlist_interface.check_today)
 
     def prompt_update(self, latest_version, download_url):
         print(f"[UI] prompt_update TRIGGERED for version {latest_version}")

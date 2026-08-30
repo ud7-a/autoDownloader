@@ -43,6 +43,32 @@ def _host_of(u):
     except Exception:
         return ""
 
+
+ERROR_LOG_MAX_BYTES = 1_000_000
+
+
+def rotate_error_log(path, max_bytes=ERROR_LOG_MAX_BYTES):
+    """Stop the aria2c error log growing without bound.
+
+    Every failed download appends its full aria2c output here, so on a flaky
+    connection the file grows steadily and nothing ever trims it. Once it passes the
+    ceiling the current file becomes `.1`, replacing any previous `.1`, so at most two
+    files exist and the newest failures are always the ones kept.
+
+    Best effort by design: a logging problem must never interrupt a download.
+    Returns True if a rotation happened.
+    """
+    try:
+        if os.path.getsize(path) < max_bytes:
+            return False
+    except OSError:
+        return False          # no file yet, or unreadable -- nothing to rotate
+    try:
+        os.replace(path, path + ".1")   # atomic, and overwrites an existing .1
+        return True
+    except Exception:
+        return False
+
 def get_download_cookies(driver, dl_url):
     """Collect the download host's cookies to hand to aria2c.
 
@@ -754,7 +780,9 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                     signals.update_active_download.emit(ep, "⚙ Certificate error — retrying without verification...")
                 # Genuine aria2c failure -- log the real output so the cause is visible.
                 try:
-                    with open(os.path.join(APP_DIR, "aria2c_error.log"), "a", encoding="utf-8") as _lf:
+                    _log_path = os.path.join(APP_DIR, "aria2c_error.log")
+                    rotate_error_log(_log_path)
+                    with open(_log_path, "a", encoding="utf-8") as _lf:
                         _lf.write(f"\n=== Ep {ep}  rc={process.returncode}  {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
                         _lf.write(f"URL: {url}\n")
                         _lf.write(f"Cookies sent: {'yes' if cookie_str else 'NONE'} (len={len(cookie_str)})\n")

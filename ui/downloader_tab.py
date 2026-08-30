@@ -289,6 +289,7 @@ class DownloaderWidget(QWidget):
 
         self._episodes_valid = True
         self._checking = False   # True while the async connection check is in flight
+        self._conn_infobar = None   # the on-screen connection-failure bar, if any
         # True whenever the inputs are disabled -- a task is running OR there is no
         # profile to run. Toggling auto/manual must not re-enable controls in either.
         self._inputs_locked = False
@@ -1030,7 +1031,15 @@ class DownloaderWidget(QWidget):
         self.btn_start.setText("Start Download")
         self.btn_start.setEnabled(True)
         if not ok:
-            InfoBar.warning(
+            # Pressing Start again while the previous failure is still on screen used
+            # to stack a second identical bar -- easy to do, since a failed check looks
+            # like nothing happened. Replace the old one rather than pile up copies.
+            try:
+                if self._conn_infobar is not None:
+                    self._conn_infobar.close()
+            except Exception:
+                pass      # already dismissed or destroyed by Qt
+            self._conn_infobar = InfoBar.warning(
                 title="Connection Failed",
                 content=f"Could not connect to the profile Base URL. Please check your internet connection or the URL itself.\nError: {err}",
                 orient=Qt.Orientation.Horizontal,
