@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
 CREATE TABLE IF NOT EXISTS anime (
     url             TEXT PRIMARY KEY,
     title           TEXT NOT NULL,
+    release_day     TEXT DEFAULT '',
     last_seen_max   INTEGER NOT NULL DEFAULT 0,
     last_checked_at INTEGER NOT NULL DEFAULT 0
 );
@@ -38,12 +39,25 @@ CREATE TABLE IF NOT EXISTS follows (
 );
 
 CREATE INDEX IF NOT EXISTS idx_anime_last_checked ON anime(last_checked_at);
+CREATE INDEX IF NOT EXISTS idx_anime_release_day ON anime(release_day);
 CREATE INDEX IF NOT EXISTS idx_follows_anime ON follows(anime_url);
 """
 
 
 def db_path() -> str:
     return os.environ.get("AED_NOTIFY_DB") or "notify.db"
+
+
+def _init_db(db: sqlite3.Connection) -> None:
+    db.execute("PRAGMA foreign_keys = ON")
+    # Check if anime table exists and needs migration before running full schema script
+    try:
+        cols = [r[1] for r in db.execute("PRAGMA table_info(anime)").fetchall()]
+        if cols and "release_day" not in cols:
+            db.execute("ALTER TABLE anime ADD COLUMN release_day TEXT DEFAULT ''")
+    except Exception:
+        pass
+    db.executescript(SCHEMA)
 
 
 @contextmanager
@@ -53,8 +67,7 @@ def get_db():
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
     db = sqlite3.connect(path)
-    db.execute("PRAGMA foreign_keys = ON")   # foreign keys are off by default in SQLite
-    db.executescript(SCHEMA)
+    _init_db(db)
     try:
         yield db
         db.commit()
@@ -72,8 +85,7 @@ def connect() -> sqlite3.Connection:
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
     db = sqlite3.connect(path)
-    db.execute("PRAGMA foreign_keys = ON")
-    db.executescript(SCHEMA)
+    _init_db(db)
     return db
 
 
@@ -148,11 +160,14 @@ def replace_follows(subscriber_id: str, items: list[dict]) -> int:
             if not url:
                 continue
             title = (item.get("title") or url)[:200]
+            release_day = (item.get("release_day") or "").strip().lower()
             # Upsert anime row
             db.execute(
-                "INSERT INTO anime (url, title, last_seen_max, last_checked_at) "
-                "VALUES (?,?,0,0) ON CONFLICT(url) DO UPDATE SET title=excluded.title",
-                (url, title))
+                "INSERT INTO anime (url, title, release_day, last_seen_max, last_checked_at) "
+                "VALUES (?,?,?,0,0) ON CONFLICT(url) DO UPDATE SET "
+                "title = CASE WHEN excluded.title != '' THEN excluded.title ELSE anime.title END, "
+                "release_day = CASE WHEN excluded.release_day != '' THEN excluded.release_day ELSE anime.release_day END",
+                (url, title, release_day))
 
             # Initial notified_max is preserved if previously followed, else seeded from anime's last_seen_max
             # to avoid spamming the user on initial follow
@@ -178,13 +193,23 @@ def followers_of(anime_url: str) -> list[str]:
             "SELECT subscriber_id FROM follows WHERE anime_url=?", (anime_url,))]
 
 
-def due_anime(limit: int = 200) -> list[dict]:
-    """Anime least recently checked first -- the checker's work queue."""
+def due_anime(today_day: str = None, limit: int = 200) -> list[dict]:
+    """Anime due for checking. If today_day is given (e.g. 'saturday'), filters to anime
+    airing today or anime with no day assigned yet (so newly added shows aren't missed).
+    Least recently checked first.
+    """
     with get_db() as db:
-        rows = db.execute(
-            "SELECT url, title, last_seen_max, last_checked_at FROM anime "
-            "ORDER BY last_checked_at ASC LIMIT ?", (limit,)).fetchall()
-    return [{"url": r[0], "title": r[1], "last_seen_max": r[2], "last_checked_at": r[3]}
+        if today_day:
+            rows = db.execute(
+                "SELECT url, title, release_day, last_seen_max, last_checked_at FROM anime "
+                "WHERE (release_day = '' OR release_day IS NULL OR LOWER(release_day) = ?) "
+                "ORDER BY last_checked_at ASC LIMIT ?", (today_day.lower(), limit)).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT url, title, release_day, last_seen_max, last_checked_at FROM anime "
+                "ORDER BY last_checked_at ASC LIMIT ?", (limit,)).fetchall()
+
+    return [{"url": r[0], "title": r[1], "release_day": r[2], "last_seen_max": r[3], "last_checked_at": r[4]}
             for r in rows]
 
 

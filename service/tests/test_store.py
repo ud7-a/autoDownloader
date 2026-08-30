@@ -103,6 +103,29 @@ class SubscriberStoreTests(unittest.TestCase):
         # Should notify if new episode 13 appears
         self.assertEqual(len(store.subscribers_to_notify(anime_url, 13)), 1)
 
+    def test_due_anime_filters_by_today_day(self):
+        sid, _ = store.create_subscriber(URL)
+        items = [
+            {"url": "https://example.com/sat", "title": "Sat Show", "release_day": "saturday"},
+            {"url": "https://example.com/sun", "title": "Sun Show", "release_day": "sunday"},
+            {"url": "https://example.com/unknown", "title": "Unknown Day Show", "release_day": ""}
+        ]
+        store.replace_follows(sid, items)
+
+        # On Saturday: should return Sat Show and Unknown Day Show, but NOT Sun Show
+        due_sat = store.due_anime(today_day="saturday")
+        due_urls_sat = {a["url"] for a in due_sat}
+        self.assertIn("https://example.com/sat", due_urls_sat)
+        self.assertIn("https://example.com/unknown", due_urls_sat)
+        self.assertNotIn("https://example.com/sun", due_urls_sat)
+
+        # On Sunday: should return Sun Show and Unknown Day Show, but NOT Sat Show
+        due_sun = store.due_anime(today_day="sunday")
+        due_urls_sun = {a["url"] for a in due_sun}
+        self.assertIn("https://example.com/sun", due_urls_sun)
+        self.assertIn("https://example.com/unknown", due_urls_sun)
+        self.assertNotIn("https://example.com/sat", due_urls_sun)
+
 
 if __name__ == "__main__":
     unittest.main()

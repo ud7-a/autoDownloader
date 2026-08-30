@@ -1,51 +1,111 @@
-# PyInstaller & Compilation Artifacts
+# ====================================================================
+# Auto Episodes Downloader - Comprehensive Git Ignore
+# ====================================================================
+
+# --- Environment Variables, Keys & Secrets ---
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+
+# --- PyInstaller & Build Artifacts ---
 build/
 dist/
 *.spec
+*.exe.old
+*.exe.tmp
+*.manifest
 
-# Local dev/release tooling -- kept on the maintainer's machine, not published.
-# publish.py is retired: it carried its own copy of the PyInstaller flags, drifted
-# out of sync, and shipped 4.3.0 with no app icon. Releases now go through
-# .github/workflows/release.yml. See RELEASING.md.
-exeCompile.py
-publish.py*
-
-# Package Deliverables (Uploaded directly to Releases)
+# --- Binary Packages & Deliverables ---
 *.zip
+*.tar.gz
+*.rar
+*.7z
 *.exe
+*.msi
+*.dll
 
-# Exception: bundled downloader binaries must ship with the app/installer
+# Exception: Bundled CLI tools required to ship in repository
 !tools/aria2c.exe
 !tools/unrar.exe
+!tools/ublock_lite.crx
 
-# Python Execution Caches
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Local Database, Configs, and Active Selenium Profiles
-download_history.db
-sites_config.json
+# --- Local Dev Scripts (Kept locally, not published) ---
+exeCompile.py
+publish.py*
 autoDownload.py
+
+# --- Databases & Data Files ---
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+download_history.db*
+notify.db*
+sites_config.json
+
+# --- Browser Profiles & Extension Caches ---
 SeleniumProfile/
-*.log
+undetected_chromedriver/
+chromedriver*
+geckodriver*
 
-# IDE / editor
-.vscode/
-.idea/
-*.swp
+# --- Downloaded Media & User Caches ---
+watchlist_covers/
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.flv
+*.ts
+*.part
+*.aria2
+*.crdownload
 
-# OS junk
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Virtual environments & tooling caches
+# --- Python Execution Caches & Virtual Environments ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
 venv/
 .venv/
 env/
+ENV/
 *.egg-info/
+.eggs/
+dist/
+build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+
+# --- Logs & Crash Dumps ---
+*.log
+logs/
+*.dmp
+crash_reports/
+
+# --- IDE & Editor Metadata ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+.cursor/
+
+# --- OS Metadata ---
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/

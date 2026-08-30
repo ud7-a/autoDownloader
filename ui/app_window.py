@@ -193,6 +193,10 @@ class AppWindow(FluentWindow):
         self.watchlist_interface.download_all_signal.connect(self.on_watch_download_all)
         self.watchlist_interface.new_episodes_found.connect(self.on_new_episodes_found)
 
+        # Discord webhook sync between Downloader tab and Watchlist Cloud Notifications
+        self.downloader_interface.webhook_changed.connect(self.watchlist_interface.on_webhook_updated)
+        self.watchlist_interface.webhook_changed.connect(self.downloader_interface.on_webhook_updated)
+
         # Batch downloads run back-to-back: the engine handles one task at a time.
         self._download_queue = []
         signals.task_finished.connect(self._start_next_queued)

@@ -54,6 +54,7 @@ class RegistrationRequest(BaseModel):
 class WatchItem(BaseModel):
     url: str
     title: str = ""
+    release_day: str = ""
 
 
 class WatchlistSyncRequest(BaseModel):

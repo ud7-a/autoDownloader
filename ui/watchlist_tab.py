@@ -293,12 +293,13 @@ class EpisodeSelectDialog(MessageBoxBase):
 
 
 class CloudSettingsDialog(MessageBoxBase):
-    """Modal dialog for configuring Discord Webhook and Cloud Service."""
+    """Modal dialog for configuring Discord Webhook for cloud notifications."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        from utils.config import DEFAULT_CLOUD_SERVICE_URL
         self.titleLabel = SubtitleLabel("Cloud Discord Notifications", self)
-        self.descLabel = BodyLabel("Enter your Discord Webhook to receive alerts when new episodes release (even when your PC is turned off).", self)
+        self.descLabel = BodyLabel(
+            "Enter your Discord Webhook URL to receive automatic release alerts\n"
+            "on Discord even when your PC is turned off.", self)
         self.descLabel.setStyleSheet("color: #888888; font-size: 12px;")
 
         self.wh_label = BodyLabel("Discord Webhook URL:", self)
@@ -306,19 +307,17 @@ class CloudSettingsDialog(MessageBoxBase):
         self.wh_input.setPlaceholderText("https://discord.com/api/webhooks/...")
         self.wh_input.setText(app_settings.get("discord_webhook", ""))
 
-        self.url_label = BodyLabel("Cloud Service URL (Official Cloud Server):", self)
-        self.url_input = LineEdit(self)
-        self.url_input.setPlaceholderText(DEFAULT_CLOUD_SERVICE_URL)
-        self.url_input.setText(app_settings.get("cloud_service_url") or DEFAULT_CLOUD_SERVICE_URL)
+        self.hintLabel = BodyLabel(
+            "💡 How to get one: Discord Channel Settings ➔ Integrations ➔ Webhooks ➔ Copy Webhook URL", self)
+        self.hintLabel.setStyleSheet("color: #666666; font-size: 11px;")
 
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(self.descLabel)
-        self.viewLayout.addSpacing(6)
+        self.viewLayout.addSpacing(8)
         self.viewLayout.addWidget(self.wh_label)
         self.viewLayout.addWidget(self.wh_input)
-        self.viewLayout.addSpacing(6)
-        self.viewLayout.addWidget(self.url_label)
-        self.viewLayout.addWidget(self.url_input)
+        self.viewLayout.addSpacing(4)
+        self.viewLayout.addWidget(self.hintLabel)
 
         self.widget.setMinimumWidth(480)
         self.yesButton.setText("Save & Connect")
@@ -431,6 +430,7 @@ class WatchlistWidget(QWidget):
     download_new_signal = pyqtSignal(str, str, str, int, str)
     download_all_signal = pyqtSignal(list)  # [(title, template, domain, max_ep, episodes_str), ...]
     new_episodes_found = pyqtSignal(int)   # total new episodes -> main window opens this tab
+    webhook_changed = pyqtSignal(str)     # notifies when Discord webhook is edited
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -785,23 +785,46 @@ class WatchlistWidget(QWidget):
             self.lbl_cloud_status.setStyleSheet("color: #888888; font-size: 11px; background: transparent;")
 
     def _open_cloud_config(self):
+        from utils.config import DEFAULT_CLOUD_SERVICE_URL
         dlg = CloudSettingsDialog(self.window())
         if not dlg.exec():
+            # If user cancelled and cloud is not actively registered, turn switch back off
+            if not app_settings.get("cloud_subscriber_id"):
+                self.switch_cloud.blockSignals(True)
+                self.switch_cloud.setChecked(False)
+                self.switch_cloud.blockSignals(False)
+            self._update_cloud_ui()
             return
-        new_url = dlg.url_input.text().strip()
+
         new_wh = dlg.wh_input.text().strip()
-        app_settings["cloud_service_url"] = new_url
+        if not new_wh:
+            # User submitted an empty webhook
+            if not app_settings.get("cloud_subscriber_id"):
+                self.switch_cloud.blockSignals(True)
+                self.switch_cloud.setChecked(False)
+                self.switch_cloud.blockSignals(False)
+            self._update_cloud_ui()
+            InfoBar.warning("Webhook Required", "A Discord Webhook URL is required to enable cloud notifications.",
+                            position=InfoBarPosition.TOP, duration=4000, parent=self.window())
+            return
+
+        s_url = app_settings.get("cloud_service_url") or DEFAULT_CLOUD_SERVICE_URL
+        app_settings["cloud_service_url"] = s_url
         app_settings["discord_webhook"] = new_wh
         save_config()
+        self.webhook_changed.emit(new_wh)
 
-        if self.switch_cloud.isChecked() or not app_settings.get("cloud_subscriber_id"):
-            self._connect_cloud(new_url, new_wh)
+        self._connect_cloud(s_url, new_wh)
+
+    def on_webhook_updated(self, webhook_url: str):
+        self._update_cloud_ui()
 
     def _on_cloud_toggle(self, checked):
+        from utils.config import DEFAULT_CLOUD_SERVICE_URL
         if checked:
-            s_url = app_settings.get("cloud_service_url", "")
+            s_url = app_settings.get("cloud_service_url") or DEFAULT_CLOUD_SERVICE_URL
             wh_url = app_settings.get("discord_webhook", "")
-            if not s_url or not wh_url:
+            if not wh_url:
                 self._open_cloud_config()
                 return
             self._connect_cloud(s_url, wh_url)

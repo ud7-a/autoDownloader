@@ -283,6 +283,7 @@ class ConnectionCheckThread(QThread):
 
 class DownloaderWidget(QWidget):
     goto_profiles_signal = pyqtSignal()   # asks the main window to open Profile Manager
+    webhook_changed = pyqtSignal(str)     # notifies when Discord webhook is edited
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -614,10 +615,19 @@ class DownloaderWidget(QWidget):
         app_settings["headless"] = self.chk_headless.isChecked()
 
         if hasattr(self, 'txt_webhook'):
-            app_settings["discord_webhook"] = self.txt_webhook.text().strip()
+            new_wh = self.txt_webhook.text().strip()
+            if app_settings.get("discord_webhook") != new_wh:
+                app_settings["discord_webhook"] = new_wh
+                self.webhook_changed.emit(new_wh)
 
         if hasattr(self, 'slider_vol'):
             app_settings["volume"] = self.slider_vol.value()
+
+    def on_webhook_updated(self, webhook_url: str):
+        if hasattr(self, 'txt_webhook') and self.txt_webhook.text().strip() != (webhook_url or "").strip():
+            self.txt_webhook.blockSignals(True)
+            self.txt_webhook.setText(webhook_url or "")
+            self.txt_webhook.blockSignals(False)
 
         site = self.combo_site.currentText()
         app_settings["concurrency"] = self.spin_concurrency.value()

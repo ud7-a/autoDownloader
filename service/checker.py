@@ -188,9 +188,18 @@ def process_anime(anime: dict, client: httpx.Client | None = None) -> int:
     return notifications_sent
 
 
-def run_checker_cycle(batch_limit: int = 50, client: httpx.Client | None = None) -> dict:
-    """Runs a single pass over all due anime. Returns statistics."""
-    due = store.due_anime(limit=batch_limit)
+def today_key() -> str:
+    """Current day of week in canonical format: saturday, sunday, monday, etc."""
+    days = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"]
+    # Python tm_wday: Monday=0, Tuesday=1, ... Saturday=5, Sunday=6
+    # (tm_wday + 2) % 7 -> Monday is index 2, Saturday is index 0.
+    return days[(time.gmtime().tm_wday + 2) % 7]
+
+
+def run_checker_cycle(batch_limit: int = 50, client: httpx.Client | None = None, today_day: str = None) -> dict:
+    """Runs a single pass over anime due for checking today. Returns statistics."""
+    current_day = today_day if today_day is not None else today_key()
+    due = store.due_anime(today_day=current_day, limit=batch_limit)
     total_notifications = 0
     errors = 0
 
@@ -203,6 +212,7 @@ def run_checker_cycle(batch_limit: int = 50, client: httpx.Client | None = None)
             errors += 1
 
     return {
+        "day": current_day,
         "checked": len(due),
         "notifications_sent": total_notifications,
         "errors": errors

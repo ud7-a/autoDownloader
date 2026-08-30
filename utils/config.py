@@ -217,7 +217,11 @@ def cloud_sync_watchlist() -> tuple[bool, str]:
     if not s_url or not sub_id or not token:
         return False, "Cloud sync is not registered or configured"
 
-    items = [{"url": w.get("url", ""), "title": w.get("title", "")} for w in watchlist if w.get("url")]
+    items = [{
+        "url": w.get("url", ""),
+        "title": w.get("title", ""),
+        "release_day": w.get("release_day", "")
+    } for w in watchlist if w.get("url")]
     sync_endpoint = f"{s_url}/v1/subscribers/{sub_id}/watchlist"
     payload = json.dumps({"items": items}).encode("utf-8")
     req = urllib.request.Request(
