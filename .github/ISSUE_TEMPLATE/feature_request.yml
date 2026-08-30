@@ -1,0 +1,27 @@
+name: 💡 Feature Request
+description: Suggest a new feature, site provider, or enhancement for AED
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to make Auto Episodes Downloader better? We'd love to hear it!
+  - type: textarea
+    id: feature
+    attributes:
+      label: Feature Description
+      description: A clear explanation of the proposed feature or improvement.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Problem or Use Case
+      description: Why is this feature needed, and how will it help users?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative Solutions Considered
+      description: Any alternative solutions or workarounds you've considered.

@@ -1,0 +1,51 @@
+name: 🐛 Bug Report
+description: Report a bug or unexpected behavior in Auto Episodes Downloader
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please provide as much detail as possible.
+  - type: input
+    id: version
+    attributes:
+      label: Application Version
+      description: What version of AED are you using? (e.g., 4.4.0)
+      placeholder: e.g. 4.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows 11
+        - Windows 10
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description of the Bug
+      description: A clear and concise description of what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Step-by-step instructions to reproduce the issue.
+      placeholder: |
+        1. Go to 'Search' tab
+        2. Search for '...'
+        3. Click 'Download'
+        4. See error
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs / Error Output
+      description: Paste any error messages or logs from the application.
+      render: shell

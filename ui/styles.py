@@ -231,4 +231,10 @@ QComboBox QAbstractItemView { background-color: #2c2c2c; border: 1px solid #4444
 QComboBox QAbstractItemView::item { background-color: transparent; padding: 8px 12px; border-radius: 4px; min-height: 24px; color: #ffffff; border-left: 3px solid transparent; }
 QComboBox QAbstractItemView::item:hover { background-color: #3a3a3a; }
 QComboBox QAbstractItemView::item:selected { background-color: #444444; border-left: 3px solid #4cc2ff; color: #ffffff; }
+
+/* 12. Pill Badges */
+QLabel.BadgeSuccess { background: rgba(81, 207, 102, 0.15); color: #51cf66; border: 1px solid rgba(81, 207, 102, 0.3); border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: bold; }
+QLabel.BadgeWarning { background: rgba(243, 156, 18, 0.15); color: #f39c12; border: 1px solid rgba(243, 156, 18, 0.3); border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: bold; }
+QLabel.BadgeInfo { background: rgba(76, 194, 255, 0.15); color: #4cc2ff; border: 1px solid rgba(76, 194, 255, 0.3); border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: bold; }
+QLabel.BadgeNeutral { background: rgba(255, 255, 255, 0.08); color: #aaaaaa; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: bold; }
 """
