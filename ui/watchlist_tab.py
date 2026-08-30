@@ -293,33 +293,34 @@ class EpisodeSelectDialog(MessageBoxBase):
 
 
 class CloudSettingsDialog(MessageBoxBase):
-    """Modal dialog for configuring Cloud Service URL and Discord Webhook."""
+    """Modal dialog for configuring Discord Webhook and Cloud Service."""
     def __init__(self, parent=None):
         super().__init__(parent)
+        from utils.config import DEFAULT_CLOUD_SERVICE_URL
         self.titleLabel = SubtitleLabel("Cloud Discord Notifications", self)
-        self.descLabel = BodyLabel("Receive Discord alerts for new episodes even when your PC is turned off.", self)
+        self.descLabel = BodyLabel("Enter your Discord Webhook to receive alerts when new episodes release (even when your PC is turned off).", self)
         self.descLabel.setStyleSheet("color: #888888; font-size: 12px;")
-
-        self.url_label = BodyLabel("Cloud Service URL:", self)
-        self.url_input = LineEdit(self)
-        self.url_input.setPlaceholderText("http://localhost:8000 or https://your-service.com")
-        self.url_input.setText(app_settings.get("cloud_service_url", "http://localhost:8000"))
 
         self.wh_label = BodyLabel("Discord Webhook URL:", self)
         self.wh_input = LineEdit(self)
         self.wh_input.setPlaceholderText("https://discord.com/api/webhooks/...")
         self.wh_input.setText(app_settings.get("discord_webhook", ""))
 
+        self.url_label = BodyLabel("Cloud Service URL (Official Cloud Server):", self)
+        self.url_input = LineEdit(self)
+        self.url_input.setPlaceholderText(DEFAULT_CLOUD_SERVICE_URL)
+        self.url_input.setText(app_settings.get("cloud_service_url") or DEFAULT_CLOUD_SERVICE_URL)
+
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(self.descLabel)
         self.viewLayout.addSpacing(6)
-        self.viewLayout.addWidget(self.url_label)
-        self.viewLayout.addWidget(self.url_input)
-        self.viewLayout.addSpacing(4)
         self.viewLayout.addWidget(self.wh_label)
         self.viewLayout.addWidget(self.wh_input)
+        self.viewLayout.addSpacing(6)
+        self.viewLayout.addWidget(self.url_label)
+        self.viewLayout.addWidget(self.url_input)
 
-        self.widget.setMinimumWidth(460)
+        self.widget.setMinimumWidth(480)
         self.yesButton.setText("Save & Connect")
         self.cancelButton.setText("Cancel")
 

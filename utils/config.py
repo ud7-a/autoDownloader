@@ -15,6 +15,7 @@ DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
 APP_VERSION = "4.3.3"
+DEFAULT_CLOUD_SERVICE_URL = "https://aed-notification-service.onrender.com"
 
 # --- GLOBAL LOCKS ---
 config_lock = threading.RLock()
@@ -46,7 +47,7 @@ app_settings = {
     "watchlist": [],
     # Cloud notification service (notifies via Discord when PC is off)
     "cloud_notify_enabled": False,
-    "cloud_service_url": "http://localhost:8000",
+    "cloud_service_url": DEFAULT_CLOUD_SERVICE_URL,
     "cloud_subscriber_id": "",
     "cloud_token": "",
 }

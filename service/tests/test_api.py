@@ -23,6 +23,16 @@ class HealthCheckTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), {"status": "ok"})
 
+    def test_root_reports_online(self):
+        r = self.client.get("/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "online")
+
+    def test_healthz_reports_ok(self):
+        r = self.client.get("/healthz")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"status": "ok"})
+
 
 class RegistrationApiTests(unittest.TestCase):
     def setUp(self):

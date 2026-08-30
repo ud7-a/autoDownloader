@@ -67,6 +67,22 @@ def require_subscriber(subscriber_id: str, authorization: str = Header(default="
     return subscriber_id
 
 
+@app.get("/")
+def root():
+    return {
+        "service": "Auto Episodes Downloader - Cloud Notification Service",
+        "status": "online",
+        "version": "1.0",
+        "endpoints": {
+            "health": "/v1/health",
+            "check": "/v1/check",
+            "docs": "/docs"
+        }
+    }
+
+
+@app.get("/health")
+@app.get("/healthz")
 @app.get("/v1/health")
 def health():
     return {"status": "ok"}
