@@ -36,7 +36,7 @@ dist/
 
 # --- Local Dev Scripts (Kept locally, not published) ---
 exeCompile.py
-publish.py*
+publish.py
 autoDownload.py
 
 # --- Databases & Data Files ---
