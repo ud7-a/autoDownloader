@@ -964,5 +964,51 @@ class SiteConfigTests(unittest.TestCase):
         self.assertEqual(list(paths), ["mediafire", "google drive", "Workupload", "rf"])
 
 
+class CloudSyncHelperTests(unittest.TestCase):
+    """Guards client-side cloud notification sync logic and settings."""
+
+    def setUp(self):
+        from utils import config
+        with config.config_lock:
+            self._saved_settings = dict(config.app_settings)
+
+    def tearDown(self):
+        from utils import config
+        with config.config_lock:
+            config.app_settings.clear()
+            config.app_settings.update(self._saved_settings)
+
+    def test_cloud_settings_defaults(self):
+        from utils import config
+        with config.config_lock:
+            self.assertIn("cloud_notify_enabled", config.app_settings)
+            self.assertIn("cloud_service_url", config.app_settings)
+            self.assertIn("cloud_subscriber_id", config.app_settings)
+            self.assertIn("cloud_token", config.app_settings)
+
+    def test_sync_unconfigured_fails_gracefully(self):
+        from utils import config
+        with config.config_lock:
+            config.app_settings["cloud_subscriber_id"] = ""
+            config.app_settings["cloud_token"] = ""
+        ok, msg = config.cloud_sync_watchlist()
+        self.assertFalse(ok)
+        self.assertIn("not registered", msg)
+
+    def test_cloud_unsubscribe_clears_credentials(self):
+        from utils import config
+        with config.config_lock:
+            config.app_settings["cloud_notify_enabled"] = True
+            config.app_settings["cloud_subscriber_id"] = "test-sub-123"
+            config.app_settings["cloud_token"] = "test-tok-456"
+
+        ok, msg = config.cloud_unsubscribe()
+        self.assertTrue(ok)
+        with config.config_lock:
+            self.assertFalse(config.app_settings["cloud_notify_enabled"])
+            self.assertEqual(config.app_settings["cloud_subscriber_id"], "")
+            self.assertEqual(config.app_settings["cloud_token"], "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

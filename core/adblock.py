@@ -35,9 +35,11 @@ AD_URL_PATTERNS = [
     "*google-analytics.com*", "*googletagmanager.com*", "*histats.com*",
     "*statcounter.com*", "*hotjar.com*", "*scorecardresearch.com*",
     # Interstitial landing pages a download link can be redirected to instead of the
-    # file. These are not ad servers, so an ad blocker's filter lists do not carry
-    # them, but they hijack the download tab and are what the user actually sees.
-    # None of them is a file host the downloader uses.
+    # file. Listed so their assets and beacons are refused, but be clear about the
+    # limit: Network.setBlockedURLs only refuses subresources -- a top-level
+    # navigation to a blocked host still loads (measured). So this does NOT stop such
+    # a page opening in its own tab; the engine's destination check is what handles
+    # that, by closing the tab and keeping the real download tab.
     "*fast.io*",
 ]
 

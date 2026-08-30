@@ -44,6 +44,27 @@ def _host_of(u):
         return ""
 
 
+def _debug_log(label, **fields):
+    """Diagnostic trace for a download that goes somewhere unexpected.
+
+    Only active when AED_DEBUG_LOG names a file, so it costs nothing normally. Exists
+    because an ad interstitial hijacking the download click has proved impossible to
+    reproduce on the developer's machine, and guessing at it from the outside has not
+    worked -- this records what the click actually did on the machine where it fails.
+    """
+    path = os.environ.get("AED_DEBUG_LOG")
+    if not path:
+        return
+    try:
+        line = f"{time.strftime('%H:%M:%S')}  {label}"
+        for key, value in fields.items():
+            line += f"\n    {key}: {value}"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
 ERROR_LOG_MAX_BYTES = 1_000_000
 
 
@@ -68,6 +89,18 @@ def rotate_error_log(path, max_bytes=ERROR_LOG_MAX_BYTES):
         return True
     except Exception:
         return False
+
+
+def _nav_info(driver):
+    """Referrer and redirect count for the active tab, for the diagnostic trace."""
+    try:
+        return driver.execute_script(
+            "const n = performance.getEntriesByType('navigation')[0] || {};"
+            "return {referrer: document.referrer || '(none)',"
+            " redirects: n.redirectCount, type: n.type || '(unknown)',"
+            " title: (document.title || '').slice(0, 80)};")
+    except Exception:
+        return {}
 
 def get_download_cookies(driver, dl_url):
     """Collect the download host's cookies to hand to aria2c.
@@ -411,10 +444,24 @@ def create_browser(download_dir, headless=True):
     # extension's filter lists do not cover because such pages are not ad servers.
     # Running the blocklist only when the extension failed left the users who had a
     # working extension with no protection against exactly that redirect.
+    #
+    # AED_ADBLOCK selects which of them run, for isolating a page whose own download
+    # link stops resolving when its scripts are refused:
+    #   (unset)/both  -- extension + blocklist (normal)
+    #   extension     -- extension only, no request blocking
+    #   blocklist     -- request blocking only, no extension
+    #   off           -- neither
     from core import extensions, adblock
-    loaded = extensions.load_into(driver)
-    adblock.apply(driver)
-    if loaded:
+    mode = (os.environ.get("AED_ADBLOCK") or "both").strip().lower()
+    loaded = False
+    if mode in ("both", "extension"):
+        loaded = extensions.load_into(driver)
+    if mode in ("both", "blocklist"):
+        adblock.apply(driver)
+    _debug_log("BROWSER READY", adblock_mode=mode, extension_loaded=loaded)
+    if mode != "both":
+        signals.update_status.emit(f"Status: ⚙️ Ad blocking mode: {mode}.", "#f39c12")
+    elif loaded:
         signals.update_status.emit("Status: 🛡️ Ad blocker active.", "#2ecc71")
     return driver
 
@@ -1114,6 +1161,21 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                             # told apart individually, not just counted.
                             before_handles = list(driver.window_handles)
 
+                            if os.environ.get("AED_DEBUG_LOG"):
+                                try:
+                                    info = driver.execute_script(
+                                        "const e = arguments[0], a = e.closest('a');"
+                                        "return {tag: e.tagName, text: (e.textContent||'').trim().slice(0,60),"
+                                        " anchorClass: a ? (a.className||'').toString() : '(no anchor)',"
+                                        " href: a ? (a.getAttribute('href')||'') : '',"
+                                        " onclick: a ? (a.getAttribute('onclick')||'') : '',"
+                                        " dataIndex: a ? (a.getAttribute('data-index')||'') : ''};", btn)
+                                except Exception:
+                                    info = {}
+                                _debug_log("CLICK", path=path_name, step=step_idx + 1,
+                                           episode=x, xpath=xpath[:160], element=info,
+                                           page=driver.current_url[:160])
+
                             try:
                                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
                                 time.sleep(0.5)
@@ -1149,6 +1211,20 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 # is mid-redirect and matches everything, so it is only
                                 # accepted when nothing resolved -- otherwise a blank ad
                                 # tab could be preferred over the real file.
+                                if os.environ.get("AED_DEBUG_LOG"):
+                                    # Logged before selection so every tab the click
+                                    # opened is recorded, not just the one kept.
+                                    for idx, handle in enumerate(new_handles):
+                                        try:
+                                            driver.switch_to.window(handle)
+                                            _debug_log(f"NEW TAB {idx + 1}/{len(new_handles)}",
+                                                       path=path_name, episode=x,
+                                                       url=driver.current_url[:200],
+                                                       matches=tab_matches_path(driver.current_url, path_name),
+                                                       nav=_nav_info(driver))
+                                        except Exception:
+                                            pass
+
                                 keeper = None
                                 for handle in new_handles:
                                     try:

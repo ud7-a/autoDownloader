@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  notify-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aed_notify_service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - AED_NOTIFY_KEY=${AED_NOTIFY_KEY:-generate_with_fernet_key}
+      - AED_NOTIFY_DB=/data/notify.db
+    volumes:
+      - aed_notify_data:/data
+
+volumes:
+  aed_notify_data:

@@ -44,6 +44,11 @@ app_settings = {
     # Followed anime for the new-episode watcher. Each entry:
     # {"title", "url", "domain", "seen_max", "latest_template", "latest_max", "checked"}
     "watchlist": [],
+    # Cloud notification service (notifies via Discord when PC is off)
+    "cloud_notify_enabled": False,
+    "cloud_service_url": "http://localhost:8000",
+    "cloud_subscriber_id": "",
+    "cloud_token": "",
 }
 
 def encrypt_webhook(url):
@@ -90,9 +95,11 @@ def load_config():
                     if k in saved_settings:
                         app_settings[k] = saved_settings[k]
                         
-                # Decrypt webhook back to cleartext in-memory
+                # Decrypt webhook and cloud token back to cleartext in-memory
                 if app_settings.get("discord_webhook"):
                     app_settings["discord_webhook"] = decrypt_webhook(app_settings["discord_webhook"])
+                if app_settings.get("cloud_token"):
+                    app_settings["cloud_token"] = decrypt_webhook(app_settings["cloud_token"])
                         
                 if "custom_sound_path" in saved_settings and saved_settings["custom_sound_path"]:
                     old_path = saved_settings["custom_sound_path"]
@@ -126,6 +133,7 @@ def add_watch(entry):
             return False
         wl.append(entry)
     save_config()
+    _trigger_bg_cloud_sync()
     return True
 
 def remove_watch(url):
@@ -133,6 +141,7 @@ def remove_watch(url):
         wl = app_settings.get("watchlist", [])
         app_settings["watchlist"] = [w for w in wl if w.get("url") != url]
     save_config()
+    _trigger_bg_cloud_sync()
 
 def update_watch(url, **fields):
     with config_lock:
@@ -143,14 +152,132 @@ def update_watch(url, **fields):
     save_config()
 
 
+# --- Cloud Notification Client ---
+def _trigger_bg_cloud_sync():
+    with config_lock:
+        if not app_settings.get("cloud_notify_enabled") or not app_settings.get("cloud_subscriber_id"):
+            return
+    threading.Thread(target=cloud_sync_watchlist, daemon=True).start()
+
+def cloud_register_and_sync(service_url: str = None, webhook_url: str = None) -> tuple[bool, str]:
+    """Registers subscriber on the cloud backend and syncs current watchlist."""
+    import urllib.request
+    import urllib.error
+
+    with config_lock:
+        s_url = (service_url or app_settings.get("cloud_service_url") or "").rstrip("/")
+        wh_url = webhook_url or app_settings.get("discord_webhook") or ""
+
+    if not s_url:
+        return False, "Cloud service URL is required"
+    if not wh_url:
+        return False, "Discord Webhook URL is required"
+
+    # 1. Register subscriber
+    reg_endpoint = f"{s_url}/v1/subscribers"
+    payload = json.dumps({"webhook": wh_url}).encode("utf-8")
+    req = urllib.request.Request(reg_endpoint, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            sub_id = data.get("id")
+            token = data.get("token")
+    except Exception as e:
+        return False, f"Failed to register on cloud service: {e}"
+
+    if not sub_id or not token:
+        return False, "Invalid response from cloud service"
+
+    with config_lock:
+        app_settings["cloud_service_url"] = s_url
+        app_settings["cloud_subscriber_id"] = sub_id
+        app_settings["cloud_token"] = token
+        app_settings["cloud_notify_enabled"] = True
+    save_config()
+
+    # 2. Sync watchlist immediately
+    ok, msg = cloud_sync_watchlist()
+    if not ok:
+        return True, f"Registered on cloud, but initial sync had an issue: {msg}"
+    return True, f"Successfully registered and synced {len(get_watchlist())} anime with cloud service!"
+
+def cloud_sync_watchlist() -> tuple[bool, str]:
+    """Pushes the current watchlist to the registered cloud service."""
+    import urllib.request
+    import urllib.error
+
+    with config_lock:
+        s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
+        sub_id = app_settings.get("cloud_subscriber_id")
+        token = app_settings.get("cloud_token")
+        watchlist = list(app_settings.get("watchlist", []))
+
+    if not s_url or not sub_id or not token:
+        return False, "Cloud sync is not registered or configured"
+
+    items = [{"url": w.get("url", ""), "title": w.get("title", "")} for w in watchlist if w.get("url")]
+    sync_endpoint = f"{s_url}/v1/subscribers/{sub_id}/watchlist"
+    payload = json.dumps({"items": items}).encode("utf-8")
+    req = urllib.request.Request(
+        sync_endpoint,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
+        },
+        method="PUT"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            count = data.get("following", len(items))
+            return True, f"Synced {count} anime to cloud service"
+    except Exception as e:
+        return False, f"Cloud sync failed: {e}"
+
+def cloud_unsubscribe() -> tuple[bool, str]:
+    """Deletes subscriber registration from the cloud backend."""
+    import urllib.request
+    import urllib.error
+
+    with config_lock:
+        s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
+        sub_id = app_settings.get("cloud_subscriber_id")
+        token = app_settings.get("cloud_token")
+
+    if s_url and sub_id and token:
+        del_endpoint = f"{s_url}/v1/subscribers/{sub_id}"
+        req = urllib.request.Request(
+            del_endpoint,
+            headers={"Authorization": f"Bearer {token}"},
+            method="DELETE"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                pass
+        except Exception:
+            pass  # Ignore network errors during deletion
+
+    with config_lock:
+        app_settings["cloud_notify_enabled"] = False
+        app_settings["cloud_subscriber_id"] = ""
+        app_settings["cloud_token"] = ""
+    save_config()
+    return True, "Cloud notifications disabled and removed from server"
+
+
 def save_config():
     try:
         os.makedirs(APP_DIR, exist_ok=True)
         with config_lock:
-            # Create a safe deep copy to obfuscate webhook on-disk only
+            # Create a safe deep copy to obfuscate webhook and tokens on-disk only
             settings_to_save = dict(app_settings)
             if settings_to_save.get("discord_webhook"):
                 settings_to_save["discord_webhook"] = encrypt_webhook(settings_to_save["discord_webhook"])
+            if settings_to_save.get("cloud_token"):
+                settings_to_save["cloud_token"] = encrypt_webhook(settings_to_save["cloud_token"])
 
             # Transient profiles (e.g. one-off Watchlist downloads) live in memory
             # only -- never persist them to disk.
