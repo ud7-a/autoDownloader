@@ -274,25 +274,24 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
 
         .control-group {{
             background: #0f1522;
-            padding: 16px;
+            padding: 20px;
             border-radius: 16px;
             border: 1px solid #1f2a3c;
             margin: 15px 0;
-            text-align: left;
+            text-align: center;
         }}
-        .control-group label {{ font-size: 12px; color: #8bb4e7; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; display: block; margin-bottom: 8px; }}
-        .ep-input {{
-            width: 100%;
+        .ep-box {{
             background: #172133;
             border: 1px solid #2d3e58;
-            border-radius: 10px;
-            padding: 12px 14px;
-            color: #ffffff;
-            font-size: 15px;
-            outline: none;
-            transition: border 0.2s;
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin-bottom: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }}
-        .ep-input:focus {{ border-color: #4CC2FF; }}
+        .ep-box-label {{ font-size: 13px; color: #8bb4e7; font-weight: 600; }}
+        .ep-box-val {{ font-size: 16px; color: #4CC2FF; font-weight: 700; }}
 
         .btn-action {{
             width: 100%;
@@ -300,12 +299,11 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
             color: #ffffff;
             border: none;
             border-radius: 14px;
-            padding: 14px 20px;
+            padding: 15px 20px;
             font-size: 15px;
             font-weight: 700;
             cursor: pointer;
             transition: all 0.2s;
-            margin-top: 10px;
             box-shadow: 0 4px 16px rgba(0, 120, 212, 0.35);
         }}
         .btn-action:hover {{ background: #1a88e0; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0, 120, 212, 0.5); }}
@@ -331,25 +329,27 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
         <div class="icon">📥</div>
         <h1>Download Manager</h1>
         <div class="anime-title">{title or 'Anime Episode'}</div>
-        <div class="ep-badge">Target: Episode {ep if ep else 'Release'}</div>
+        <div class="ep-badge">{title or 'Anime'}</div>
         
         <div id="status-badge" class="status-badge {status_badge_class}">{status_text}</div>
 
         <div class="control-group">
-            <label for="ep-input">Episode Number / Range</label>
-            <input id="ep-input" class="ep-input" type="text" value="{ep}" placeholder="e.g. {ep if ep else '1'}">
+            <div class="ep-box">
+                <span class="ep-box-label">Target Episode</span>
+                <span class="ep-box-val">Episode {ep if ep else 'Latest'}</span>
+            </div>
             
             <button id="btn-submit" class="btn-action" onclick="triggerDownload()">
-                🚀 Send Download to PC
+                🚀 Start Download on PC
             </button>
         </div>
 
         <div id="feedback" class="feedback-box feedback-success">
-            ✅ <b>Download Dispatched!</b> Your PC is receiving the task.
+            ✅ <b>Download Queued!</b> Your PC is receiving the command.
         </div>
 
         <div class="note">
-            Auto Episodes Downloader on your PC will automatically pull this download task and complete it.
+            Auto Episodes Downloader on your PC will automatically receive this task and download the episode.
         </div>
     </div>
 
@@ -357,7 +357,6 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
         async function triggerDownload() {{
             const btn = document.getElementById('btn-submit');
             const feedback = document.getElementById('feedback');
-            const epVal = document.getElementById('ep-input').value.trim() || '{ep}';
             
             btn.disabled = true;
             btn.innerText = '⏳ Sending to PC...';
@@ -371,7 +370,7 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
                         sid: '{sid}',
                         url: '{url}',
                         title: '{title}',
-                        ep: epVal,
+                        ep: '{ep}',
                         sig: '{sig}'
                     }})
                 }});
@@ -401,7 +400,7 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
                 feedback.style.display = 'block';
             }} finally {{
                 btn.disabled = false;
-                btn.innerText = '🚀 Send Download to PC';
+                btn.innerText = '🚀 Start Download on PC';
             }}
         }}
     </script>
