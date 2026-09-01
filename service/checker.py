@@ -7,6 +7,7 @@ only to subscribers whose notified_max is behind the latest episode.
 
 import base64
 from datetime import datetime, timezone
+import json
 import logging
 import re
 import time
@@ -29,8 +30,21 @@ _TRAILING_DIGIT_RE = re.compile(r"[-_/](\d+)/?$")
 
 
 def extract_episodes_from_html(html: str, base_url: str = "") -> list[int]:
-    """Extracts all episode numbers found in page HTML links or onclick handlers."""
+    """Extracts all episode numbers found in page HTML links, JSON blocks, or onclick handlers."""
     episodes = set()
+
+    # 0. Base64 encodedEpisodeData JSON array used by witanime
+    for match in re.finditer(r'var\s+encodedEpisodeData\s*=\s*[\'"]([A-Za-z0-9+/=]+)[\'"]', html):
+        try:
+            raw_b64 = match.group(1)
+            decoded_json = base64.b64decode(raw_b64).decode("utf-8", errors="ignore")
+            data = json.loads(decoded_json)
+            for item in data:
+                num_str = str(item.get("number", "")).strip()
+                if num_str.isdigit():
+                    episodes.add(int(num_str))
+        except Exception:
+            pass
 
     # 1. Base64 openEpisode('...') handlers used by witanime
     for match in re.finditer(r"openEpisode\(['\"]([A-Za-z0-9+/=]+)['\"]\)", html):
@@ -110,6 +124,69 @@ def fetch_with_playwright(anime_url: str, timeout_seconds: float = 30.0) -> tupl
         return 0, debug_info
 
 
+_PROXY_CACHE = []
+_PROXY_CACHE_TIME = 0.0
+
+
+def get_fresh_proxies() -> list[str]:
+    """Fetches a list of open elite HTTP proxies."""
+    global _PROXY_CACHE, _PROXY_CACHE_TIME
+    now = time.time()
+    if _PROXY_CACHE and (now - _PROXY_CACHE_TIME < 600):
+        return list(_PROXY_CACHE)
+
+    urls = [
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=all&ssl=all&anonymity=elite",
+        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+    ]
+    proxies = []
+    for u in urls:
+        try:
+            r = httpx.get(u, timeout=5.0)
+            if r.status_code == 200:
+                for line in r.text.splitlines():
+                    p = line.strip()
+                    if p and ":" in p and len(p.split(":")) == 2:
+                        proxies.append(p)
+                if proxies:
+                    break
+        except Exception:
+            pass
+
+    if proxies:
+        _PROXY_CACHE = proxies
+        _PROXY_CACHE_TIME = now
+    return _PROXY_CACHE
+
+
+def fetch_with_proxy_rotation(anime_url: str, max_attempts: int = 6) -> int:
+    """Tries fetching through rotating anonymous proxies to bypass Cloudflare datacenter IP blocks."""
+    proxies = get_fresh_proxies()
+    if not proxies:
+        return 0
+
+    headers = {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+    }
+    import random
+    selected = random.sample(proxies, min(len(proxies), max_attempts * 2))
+
+    for p in selected:
+        try:
+            proxy_url = f"http://{p}"
+            with httpx.Client(proxy=proxy_url, follow_redirects=True, timeout=7.0, verify=False) as client:
+                r = client.get(anime_url, headers=headers)
+                if r.status_code == 200 and "just a moment" not in r.text.lower():
+                    eps = extract_episodes_from_html(r.text, anime_url)
+                    if eps:
+                        return max(eps)
+        except Exception:
+            continue
+    return 0
+
+
 def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> int:
     """Fetches anime page and returns the highest episode number detected (0 if none found)."""
     headers = {
@@ -147,7 +224,12 @@ def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> 
         if close_client:
             client.close()
 
-    # 3. Fallback to Headless Playwright Chromium to solve Cloudflare Turnstile JS challenges
+    # 3. Try rotating proxy pool (bypasses Cloudflare datacenter IP block on Render)
+    max_ep = fetch_with_proxy_rotation(anime_url)
+    if max_ep > 0:
+        return max_ep
+
+    # 4. Fallback to Headless Playwright Chromium to solve Cloudflare Turnstile JS challenges
     max_ep, _ = fetch_with_playwright(anime_url)
     return max_ep
 
