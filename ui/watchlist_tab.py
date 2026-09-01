@@ -61,10 +61,20 @@ def _builtin_sound_path():
                         "assets", "finishingDownloadSound.wav")
 
 
+_last_notify_sound_time = 0.0
+
+
 def _play_notify_sound():
     """Play the app's finish sound to signal new episodes (best-effort, non-blocking)."""
+    global _last_notify_sound_time
     try:
-        import ctypes, threading
+        import ctypes, threading, time
+        now = time.time()
+        # Debounce: Do not play if a sound was played within the last 15 seconds
+        if now - _last_notify_sound_time < 15.0:
+            return
+        _last_notify_sound_time = now
+
         selected = app_settings.get("selected_sound", "")
         if selected == "__none__":
             return

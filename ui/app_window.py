@@ -271,7 +271,9 @@ class AppWindow(FluentWindow):
                 import ctypes
                 hwnd = int(self.winId())
                 ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE = 9
+                ctypes.windll.user32.BringWindowToTop(hwnd)
                 ctypes.windll.user32.SetForegroundWindow(hwnd)
+                ctypes.windll.user32.SwitchToThisWindow(hwnd, True)
             except Exception:
                 pass
 
