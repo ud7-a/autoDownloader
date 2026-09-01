@@ -18,31 +18,23 @@ import json
 import subprocess
 import urllib.request
 import urllib.error
+import ctypes
 
 APP_DIR = os.environ.get("AED_APP_DIR") or r"C:\Auto Episodes Downloader"
 CONFIG_FILE = os.path.join(APP_DIR, "sites_config.json")
-LOCK_FILE = os.path.join(APP_DIR, "main_app.lock")
+
+MAIN_APP_MUTEX_NAME = "Local\\AED_Main_App_Running_Mutex"
+WATCHER_MUTEX_NAME = "Local\\AED_Watcher_Running_Mutex"
 
 
 def is_main_app_running() -> bool:
-    """Checks if the main AED UI process is currently open."""
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE, "r", encoding="utf-8") as f:
-                pid = int(f.read().strip())
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            process = kernel32.OpenProcess(0x00100000, False, pid)
-            if process != 0:
-                kernel32.CloseHandle(process)
-                return True
-            else:
-                try:
-                    os.remove(LOCK_FILE)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    """Checks if the main AED UI process is currently open via Windows Mutex."""
+    if sys.platform != "win32":
+        return False
+    mutex = ctypes.windll.kernel32.OpenMutexW(0x00100000, False, MAIN_APP_MUTEX_NAME)
+    if mutex != 0:
+        ctypes.windll.kernel32.CloseHandle(mutex)
+        return True
     return False
 
 
@@ -117,25 +109,11 @@ def launch_main_app():
 
 def run_watcher(single_pass: bool = False):
     """Main watcher loop."""
-    watcher_lock = os.path.join(APP_DIR, "watcher.lock")
-    if not single_pass:
-        try:
-            if os.path.exists(watcher_lock):
-                with open(watcher_lock, "r", encoding="utf-8") as f:
-                    old_pid = int(f.read().strip())
-                import ctypes
-                p = ctypes.windll.kernel32.OpenProcess(0x00100000, False, old_pid)
-                if p != 0:
-                    ctypes.windll.kernel32.CloseHandle(p)
-                    return
-        except Exception:
-            pass
-
-        try:
-            with open(watcher_lock, "w", encoding="utf-8") as f:
-                f.write(str(os.getpid()))
-        except Exception:
-            pass
+    watcher_mutex = None
+    if sys.platform == "win32" and not single_pass:
+        watcher_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, WATCHER_MUTEX_NAME)
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            return
 
     while True:
         try:
@@ -162,7 +140,7 @@ def run_watcher(single_pass: bool = False):
                 launch_main_app()
                 if single_pass:
                     break
-                time.sleep(10)
+                time.sleep(15)
 
         except Exception:
             pass

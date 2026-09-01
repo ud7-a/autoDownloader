@@ -130,30 +130,26 @@ if __name__ == "__main__":
     app.setFont(font)
     _startup_mark("stylesheet + font applied")
 
-    # Autostart Option B: Check if there are remote download commands before showing window
-    autostart_mode = "--autostart" in sys.argv
-    autostart_commands = None
-    if autostart_mode:
-        from utils.config import cloud_fetch_commands
-        autostart_commands = cloud_fetch_commands()
-        if not autostart_commands:
-            # No remote downloads queued -> exit immediately without showing UI
-            sys.exit(0)
+    # Acquire Windows Named Mutex so the background watcher knows the full GUI app is active
+    import ctypes
+    _main_app_mutex = None
+    if sys.platform == "win32":
+        _main_app_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\AED_Main_App_Running_Mutex")
 
-    # Record main app lock so background watcher knows UI is active
-    from utils.config import APP_DIR, app_settings
-    lock_file = os.path.join(APP_DIR, "main_app.lock")
-    try:
-        os.makedirs(APP_DIR, exist_ok=True)
-        with open(lock_file, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
-    except Exception:
-        pass
+    # Fetch any pending remote download commands from cloud
+    from utils.config import cloud_fetch_commands, app_settings
+    initial_commands = []
+    if app_settings.get("cloud_notify_enabled"):
+        initial_commands = cloud_fetch_commands()
+
+    # If launched on Windows boot with --autostart and no commands exist -> exit immediately
+    if "--autostart" in sys.argv and not initial_commands:
+        sys.exit(0)
 
     # Now import and instantiate the main app window
     from ui.app_window import AppWindow
     _startup_mark("ui.app_window imported")
-    window = AppWindow(autostart_commands=autostart_commands)
+    window = AppWindow(autostart_commands=initial_commands)
     _startup_mark("AppWindow built")
     window.show()
     _startup_mark("window shown")
@@ -164,13 +160,11 @@ if __name__ == "__main__":
     
     exit_code = app.exec()
 
-    # Clean up lock file on exit and launch lightweight watcher if cloud notifications are enabled
-    try:
-        if os.path.exists(lock_file):
-            os.remove(lock_file)
-    except Exception:
-        pass
+    # Release mutex on exit
+    if _main_app_mutex:
+        ctypes.windll.kernel32.CloseHandle(_main_app_mutex)
 
+    # Launch lightweight background watcher (<25MB) if cloud notifications are enabled
     if app_settings.get("cloud_notify_enabled"):
         try:
             import subprocess

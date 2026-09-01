@@ -294,6 +294,8 @@ class AppWindow(FluentWindow):
         self._restore_from_tray()
         self.switchTo(self.downloader_interface)
 
+        # Deduplicate incoming commands to prevent multiple identical downloads
+        seen_keys = set()
         items_to_download = []
         for cmd in commands:
             cmd_id = cmd.get("id")
@@ -303,14 +305,17 @@ class AppWindow(FluentWindow):
             if not url:
                 continue
 
-            # Find matching watchlist entry for template & domain
-            entry = next((w for w in get_watchlist() if w.get("url") == url), None)
-            template = entry.get("latest_template") if entry else ""
-            domain = entry.get("domain") if entry else ("witanime" if "witanime" in url else "animerco")
-            if not template:
-                template = url
+            key = (url, ep_spec)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                # Find matching watchlist entry for template & domain
+                entry = next((w for w in get_watchlist() if w.get("url") == url), None)
+                template = entry.get("latest_template") if entry else ""
+                domain = entry.get("domain") if entry else ("witanime" if "witanime" in url else "animerco")
+                if not template:
+                    template = url
+                items_to_download.append((title or url, template, domain, 0, ep_spec))
 
-            items_to_download.append((title or url, template, domain, 0, ep_spec))
             if cmd_id:
                 cloud_ack_command(cmd_id)
 
