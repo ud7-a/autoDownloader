@@ -9,6 +9,7 @@ import base64
 from datetime import datetime, timezone
 import json
 import logging
+import os
 import re
 import time
 from urllib.parse import unquote
@@ -187,6 +188,25 @@ def fetch_with_proxy_rotation(anime_url: str, max_attempts: int = 6) -> int:
     return 0
 
 
+def fetch_with_scraperapi(anime_url: str, api_key: str) -> int:
+    """Fetches anime page via ScraperAPI residential proxy to bypass Cloudflare Turnstile."""
+    try:
+        endpoint = "http://api.scraperapi.com"
+        params = {
+            "api_key": api_key,
+            "url": anime_url,
+        }
+        with httpx.Client(timeout=25.0) as client:
+            r = client.get(endpoint, params=params)
+            if r.status_code == 200 and "just a moment" not in r.text.lower():
+                eps = extract_episodes_from_html(r.text, anime_url)
+                if eps:
+                    return max(eps)
+    except Exception as e:
+        logger.warning(f"ScraperAPI fetch failed for {anime_url}: {e}")
+    return 0
+
+
 def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> int:
     """Fetches anime page and returns the highest episode number detected (0 if none found)."""
     headers = {
@@ -194,6 +214,13 @@ def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> 
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
     }
+
+    # 0. Try ScraperAPI if SCRAPER_API_KEY is configured (100% residential Cloudflare bypass)
+    scraper_key = os.environ.get("SCRAPER_API_KEY", "").strip()
+    if scraper_key:
+        max_ep = fetch_with_scraperapi(anime_url, scraper_key)
+        if max_ep > 0:
+            return max_ep
 
     # 1. Try curl_cffi first (fastest)
     try:
