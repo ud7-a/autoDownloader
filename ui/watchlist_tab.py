@@ -647,8 +647,24 @@ class WatchlistWidget(QWidget):
             fields["seen_max"] = latest_max
         update_watch(url, **fields)
         card = self._cards.get(url)
+        entry = next((w for w in get_watchlist() if w.get("url") == url), {})
         if card:
-            card.apply_entry(next((w for w in get_watchlist() if w.get("url") == url), {}))
+            card.apply_entry(entry)
+
+        # Dispatch Discord release notification if webhook is configured
+        if new_count > 0 and not first_time:
+            webhook = app_settings.get("discord_webhook", "").strip()
+            if webhook:
+                anime_title = entry.get("title") or url
+                seen = entry.get("seen_max") or 0
+                import threading
+                from service.checker import create_discord_embed, send_discord_notification
+                def _bg_notify(title, a_url, s_max, l_max, wh):
+                    for ep in range(s_max + 1, l_max + 1):
+                        payload = create_discord_embed(title, a_url, ep)
+                        send_discord_notification(wh, payload)
+                        time.sleep(0.2)
+                threading.Thread(target=_bg_notify, args=(anime_title, url, seen, latest_max, webhook), daemon=True).start()
 
     def refresh_schedule(self):
         """Look up each followed anime's release day from the sites' schedule pages."""

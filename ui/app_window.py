@@ -205,12 +205,15 @@ class AppWindow(FluentWindow):
         # Wire up the update signal
         signals.update_available.connect(self.prompt_update)
 
-        # Auto-check the Watchlist shortly after launch (only if anything is followed).
+        # Auto-check the Watchlist shortly after launch and periodically while open
         if get_watchlist():
             # Only today's anime on launch. A full sweep is slow, hammers both sites
             # and mostly re-reads anime that cannot have a new episode today; "Check
             # all now" in the Watchlist tab is there for the full pass.
             QTimer.singleShot(8000, self.watchlist_interface.check_today)
+            self._watchlist_timer = QTimer(self)
+            self._watchlist_timer.timeout.connect(self.watchlist_interface.check_today)
+            self._watchlist_timer.start(30 * 60 * 1000)  # Check today's releases every 30 minutes
 
         # Silent background sync of watchlist & seen episodes with Cloud Service on launch
         if app_settings.get("cloud_notify_enabled"):
