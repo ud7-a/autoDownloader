@@ -1,14 +1,11 @@
 services:
   - type: web
     name: aed-notification-service
-    runtime: python
-    buildCommand: pip install -r service/requirements.txt && playwright install --with-deps chromium
-    startCommand: python -m uvicorn service.api:app --host 0.0.0.0 --port $PORT
+    env: docker
+    dockerfilePath: service/Dockerfile
     plan: free
     region: frankfurt
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.13.0
       - key: AED_NOTIFY_KEY
         generateValue: true
       - key: AED_NOTIFY_DB

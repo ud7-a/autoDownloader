@@ -10,16 +10,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY service/requirements.txt /app/service/requirements.txt
+RUN pip install --no-cache-dir -r /app/service/requirements.txt
 
 # Install Playwright Chromium and required OS browser dependencies
 RUN playwright install --with-deps chromium
 
-# Copy service codebase
-COPY . /app/service
+# Copy codebase
+COPY . /app
 
-# Default environment variables
+# Set PYTHONPATH so service.api and service.checker are found cleanly
+ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 ENV AED_NOTIFY_DB=/data/notify.db
 ENV PORT=8000
