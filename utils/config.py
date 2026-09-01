@@ -298,7 +298,7 @@ def is_windows_autostart_enabled() -> bool:
 
 
 def set_windows_autostart(enabled: bool) -> bool:
-    """Registers or unregisters the app in Windows HKCU Run key."""
+    """Registers or unregisters the lightweight watcher in Windows HKCU Run key."""
     if sys.platform != "win32":
         return False
     import winreg
@@ -307,10 +307,13 @@ def set_windows_autostart(enabled: bool) -> bool:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS) as key:
             if enabled:
                 if getattr(sys, "frozen", False):
-                    cmd = f'"{sys.executable}" --autostart'
+                    cmd = f'"{sys.executable}" --watcher'
                 else:
-                    main_py = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "main.py"))
-                    cmd = f'"{sys.executable}" "{main_py}" --autostart'
+                    watcher_pyw = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "aed_watcher.pyw"))
+                    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                    if not os.path.exists(pythonw):
+                        pythonw = sys.executable
+                    cmd = f'"{pythonw}" "{watcher_pyw}"'
                 winreg.SetValueEx(key, "AutoEpisodesDownloader", 0, winreg.REG_SZ, cmd)
             else:
                 try:

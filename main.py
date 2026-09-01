@@ -25,6 +25,11 @@ def _startup_mark(label):
 
 _startup_mark("python reached main.py")
 
+if "--watcher" in sys.argv:
+    from core.watcher import run_watcher
+    run_watcher()
+    sys.exit(0)
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import qInstallMessageHandler, QtMsgType
 from PyQt6.QtGui import QFont
@@ -135,6 +140,16 @@ if __name__ == "__main__":
             # No remote downloads queued -> exit immediately without showing UI
             sys.exit(0)
 
+    # Record main app lock so background watcher knows UI is active
+    from utils.config import APP_DIR, app_settings
+    lock_file = os.path.join(APP_DIR, "main_app.lock")
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(lock_file, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
     # Now import and instantiate the main app window
     from ui.app_window import AppWindow
     _startup_mark("ui.app_window imported")
@@ -147,4 +162,25 @@ if __name__ == "__main__":
     from core.updater import check_for_updates_silently
     threading.Thread(target=check_for_updates_silently, daemon=True).start()
     
-    sys.exit(app.exec())
+    exit_code = app.exec()
+
+    # Clean up lock file on exit and launch lightweight watcher if cloud notifications are enabled
+    try:
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+    except Exception:
+        pass
+
+    if app_settings.get("cloud_notify_enabled"):
+        try:
+            import subprocess
+            watcher_pyw = os.path.abspath(os.path.join(os.path.dirname(__file__), "aed_watcher.pyw"))
+            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            if not os.path.exists(pythonw):
+                pythonw = sys.executable
+            if os.path.exists(watcher_pyw):
+                subprocess.Popen([pythonw, watcher_pyw], cwd=os.path.dirname(__file__))
+        except Exception:
+            pass
+
+    sys.exit(exit_code)
