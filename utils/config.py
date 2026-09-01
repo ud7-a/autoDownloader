@@ -1,5 +1,6 @@
 import os
 import json
+import sys
 import threading
 
 # --- GLOBAL CONSTANTS ---
@@ -279,6 +280,121 @@ def cloud_unsubscribe() -> tuple[bool, str]:
         app_settings["cloud_token"] = ""
     save_config()
     return True, "Cloud notifications disabled and removed from server"
+
+
+def is_windows_autostart_enabled() -> bool:
+    """Checks if the app is registered in Windows HKCU Run key."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as key:
+            winreg.QueryValueEx(key, "AutoEpisodesDownloader")
+            return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def set_windows_autostart(enabled: bool) -> bool:
+    """Registers or unregisters the app in Windows HKCU Run key."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS) as key:
+            if enabled:
+                if getattr(sys, "frozen", False):
+                    cmd = f'"{sys.executable}" --autostart'
+                else:
+                    main_py = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "main.py"))
+                    cmd = f'"{sys.executable}" "{main_py}" --autostart'
+                winreg.SetValueEx(key, "AutoEpisodesDownloader", 0, winreg.REG_SZ, cmd)
+            else:
+                try:
+                    winreg.DeleteValue(key, "AutoEpisodesDownloader")
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as e:
+        print(f"Failed to set Windows autostart: {e}")
+        return False
+
+
+def cloud_send_heartbeat() -> bool:
+    """Sends a lightweight online heartbeat to the cloud backend."""
+    import urllib.request
+    with config_lock:
+        s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
+        sub_id = app_settings.get("cloud_subscriber_id")
+        token = app_settings.get("cloud_token")
+
+    if not (s_url and sub_id and token):
+        return False
+
+    endpoint = f"{s_url}/v1/subscribers/{sub_id}/heartbeat"
+    req = urllib.request.Request(
+        endpoint,
+        data=b"{}",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            return True
+    except Exception:
+        return False
+
+
+def cloud_fetch_commands() -> list[dict]:
+    """Fetches any pending remote download commands from the cloud queue."""
+    import urllib.request
+    with config_lock:
+        s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
+        sub_id = app_settings.get("cloud_subscriber_id")
+        token = app_settings.get("cloud_token")
+
+    if not (s_url and sub_id and token):
+        return []
+
+    endpoint = f"{s_url}/v1/subscribers/{sub_id}/commands"
+    req = urllib.request.Request(
+        endpoint,
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("commands", [])
+    except Exception:
+        return []
+
+
+def cloud_ack_command(command_id: int) -> bool:
+    """Acknowledges execution of a remote download command to the cloud."""
+    import urllib.request
+    with config_lock:
+        s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
+        sub_id = app_settings.get("cloud_subscriber_id")
+        token = app_settings.get("cloud_token")
+
+    if not (s_url and sub_id and token):
+        return False
+
+    endpoint = f"{s_url}/v1/subscribers/{sub_id}/commands/{command_id}/ack"
+    req = urllib.request.Request(
+        endpoint,
+        data=b"{}",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            return True
+    except Exception:
+        return False
 
 
 def save_config():

@@ -7,6 +7,7 @@ and never put in an exception message. mask_webhook() is what a user is shown in
 """
 
 import hashlib
+import hmac
 import os
 import secrets
 
@@ -47,3 +48,14 @@ def new_token() -> str:
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def sign_action(subscriber_id: str, action: str) -> str:
+    key = (os.environ.get("AED_NOTIFY_KEY") or "default-aed-action-key").encode("utf-8")
+    msg = f"{subscriber_id}:{action}".encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()[:16]
+
+
+def verify_action(subscriber_id: str, action: str, sig: str) -> bool:
+    expected = sign_action(subscriber_id, action)
+    return hmac.compare_digest(expected, sig)

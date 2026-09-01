@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS subscribers (
     id            TEXT PRIMARY KEY,
     token_hash    TEXT NOT NULL,
     webhook_enc   BLOB,
-    created_at    INTEGER NOT NULL
+    created_at    INTEGER NOT NULL,
+    last_heartbeat INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS anime (
@@ -38,9 +39,21 @@ CREATE TABLE IF NOT EXISTS follows (
     FOREIGN KEY (anime_url)     REFERENCES anime(url)      ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS commands (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscriber_id TEXT NOT NULL,
+    anime_url     TEXT NOT NULL,
+    anime_title   TEXT NOT NULL,
+    episodes      TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    FOREIGN KEY (subscriber_id) REFERENCES subscribers(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_anime_last_checked ON anime(last_checked_at);
 CREATE INDEX IF NOT EXISTS idx_anime_release_day ON anime(release_day);
 CREATE INDEX IF NOT EXISTS idx_follows_anime ON follows(anime_url);
+CREATE INDEX IF NOT EXISTS idx_commands_sub ON commands(subscriber_id, status);
 """
 
 
@@ -50,11 +63,14 @@ def db_path() -> str:
 
 def _init_db(db: sqlite3.Connection) -> None:
     db.execute("PRAGMA foreign_keys = ON")
-    # Check if anime table exists and needs migration before running full schema script
+    # Check if tables exist and need column migrations
     try:
-        cols = [r[1] for r in db.execute("PRAGMA table_info(anime)").fetchall()]
-        if cols and "release_day" not in cols:
+        anime_cols = [r[1] for r in db.execute("PRAGMA table_info(anime)").fetchall()]
+        if anime_cols and "release_day" not in anime_cols:
             db.execute("ALTER TABLE anime ADD COLUMN release_day TEXT DEFAULT ''")
+        sub_cols = [r[1] for r in db.execute("PRAGMA table_info(subscribers)").fetchall()]
+        if sub_cols and "last_heartbeat" not in sub_cols:
+            db.execute("ALTER TABLE subscribers ADD COLUMN last_heartbeat INTEGER DEFAULT 0")
     except Exception:
         pass
     db.executescript(SCHEMA)
@@ -264,3 +280,59 @@ def prune_orphan_anime() -> int:
         cur = db.execute(
             "DELETE FROM anime WHERE url NOT IN (SELECT DISTINCT anime_url FROM follows)")
         return cur.rowcount
+
+
+def record_heartbeat(subscriber_id: str) -> None:
+    now = int(time.time())
+    with get_db() as db:
+        db.execute("UPDATE subscribers SET last_heartbeat = ? WHERE id = ?", (now, subscriber_id))
+
+
+def is_subscriber_online(subscriber_id: str, timeout_seconds: int = 60) -> bool:
+    with get_db() as db:
+        row = db.execute("SELECT last_heartbeat FROM subscribers WHERE id = ?", (subscriber_id,)).fetchone()
+        if not row or not row[0]:
+            return False
+        return (int(time.time()) - row[0]) < timeout_seconds
+
+
+def queue_command(subscriber_id: str, anime_url: str, anime_title: str, episodes: str) -> int:
+    now = int(time.time())
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO commands (subscriber_id, anime_url, anime_title, episodes, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
+            (subscriber_id, anime_url, anime_title, episodes, now)
+        )
+        return cur.lastrowid
+
+
+def get_pending_commands(subscriber_id: str) -> list[dict]:
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id, anime_url, anime_title, episodes, created_at FROM commands "
+            "WHERE subscriber_id = ? AND status = 'pending' ORDER BY id ASC",
+            (subscriber_id,)
+        ).fetchall()
+        return [
+            {"id": r[0], "anime_url": r[1], "anime_title": r[2], "episodes": r[3], "created_at": r[4]}
+            for r in rows
+        ]
+
+
+def ack_command(subscriber_id: str, command_id: int) -> bool:
+    with get_db() as db:
+        cur = db.execute(
+            "UPDATE commands SET status = 'completed' WHERE id = ? AND subscriber_id = ?",
+            (command_id, subscriber_id)
+        )
+        return cur.rowcount > 0
+
+
+def get_subscriber_by_token(token: str) -> str | None:
+    th = crypto.hash_token(token)
+    with get_db() as db:
+        for sid, stored_hash in db.execute("SELECT id, token_hash FROM subscribers"):
+            if hmac.compare_digest(th, stored_hash):
+                return sid
+    return None

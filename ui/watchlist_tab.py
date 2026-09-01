@@ -847,7 +847,9 @@ class WatchlistWidget(QWidget):
         else:
             import threading
             def _bg_unsub():
+                from utils.config import set_windows_autostart
                 cloud_unsubscribe()
+                set_windows_autostart(False)
             threading.Thread(target=_bg_unsub, daemon=True).start()
             self._update_cloud_ui()
             InfoBar.info("Cloud Sync Disabled", "Removed registration from cloud service.",
@@ -870,7 +872,9 @@ class WatchlistWidget(QWidget):
 
     def _on_reg_success(self, msg):
         self._update_cloud_ui()
-        InfoBar.success("Cloud Notifications Active", msg,
+        from utils.config import set_windows_autostart
+        set_windows_autostart(True)
+        InfoBar.success("Cloud Notifications & Remote Queue Active", msg,
                         position=InfoBarPosition.TOP, duration=4000, parent=self.window())
 
     def _on_reg_failed(self, msg):

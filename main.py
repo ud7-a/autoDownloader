@@ -125,10 +125,20 @@ if __name__ == "__main__":
     app.setFont(font)
     _startup_mark("stylesheet + font applied")
 
+    # Autostart Option B: Check if there are remote download commands before showing window
+    autostart_mode = "--autostart" in sys.argv
+    autostart_commands = None
+    if autostart_mode:
+        from utils.config import cloud_fetch_commands
+        autostart_commands = cloud_fetch_commands()
+        if not autostart_commands:
+            # No remote downloads queued -> exit immediately without showing UI
+            sys.exit(0)
+
     # Now import and instantiate the main app window
     from ui.app_window import AppWindow
     _startup_mark("ui.app_window imported")
-    window = AppWindow()
+    window = AppWindow(autostart_commands=autostart_commands)
     _startup_mark("AppWindow built")
     window.show()
     _startup_mark("window shown")

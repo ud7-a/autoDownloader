@@ -261,9 +261,42 @@ def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> 
     return max_ep
 
 
-def create_discord_embed(anime_title: str, anime_url: str, episode_num: int) -> dict:
+def create_discord_embed(
+    anime_title: str,
+    anime_url: str,
+    episode_num: int,
+    subscriber_id: str = "",
+    is_online: bool = False
+) -> dict:
     """Builds a rich Discord Embed payload for the episode release notification."""
     now_iso = datetime.now(timezone.utc).isoformat()
+    fields = [
+        {
+            "name": "Anime",
+            "value": f"[{anime_title}]({anime_url})",
+            "inline": True
+        },
+        {
+            "name": "Episode",
+            "value": f"`Episode {episode_num}`",
+            "inline": True
+        }
+    ]
+
+    if subscriber_id:
+        from service import crypto
+        from urllib.parse import quote
+        action_key = f"{anime_url}:{episode_num}"
+        sig = crypto.sign_action(subscriber_id, action_key)
+        cloud_base = os.environ.get("AED_CLOUD_URL") or "https://aed-notification-service.onrender.com"
+        queue_url = f"{cloud_base}/v1/queue?sid={subscriber_id}&url={quote(anime_url)}&title={quote(anime_title)}&ep={episode_num}&sig={sig}"
+        button_label = "📥 Start Downloading on PC (Online 🟢)" if is_online else "📥 Download when PC Turns On (Offline 💤)"
+        fields.append({
+            "name": "Remote Action",
+            "value": f"[{button_label}]({queue_url})",
+            "inline": False
+        })
+
     return {
         "embeds": [
             {
@@ -271,18 +304,7 @@ def create_discord_embed(anime_title: str, anime_url: str, episode_num: int) -> 
                 "description": f"**{anime_title}**\n**Episode {episode_num}** is now available to watch and download.",
                 "url": anime_url,
                 "color": 0x4CC2FF,  # Fluent Cyan Blue
-                "fields": [
-                    {
-                        "name": "Anime",
-                        "value": f"[{anime_title}]({anime_url})",
-                        "inline": True
-                    },
-                    {
-                        "name": "Episode",
-                        "value": f"`Episode {episode_num}`",
-                        "inline": True
-                    }
-                ],
+                "fields": fields,
                 "footer": {
                     "text": "Auto Episodes Downloader • Cloud Service"
                 },
@@ -352,8 +374,9 @@ def process_anime(anime: dict, client: httpx.Client | None = None) -> int:
         for ep_num in range(last_seen_max + 1, current_max + 1):
             to_notify = store.subscribers_to_notify(anime_url, ep_num)
             if to_notify:
-                embed_payload = create_discord_embed(anime_title, anime_url, ep_num)
                 for sid, webhook_url, _prev_notif in to_notify:
+                    is_online = store.is_subscriber_online(sid)
+                    embed_payload = create_discord_embed(anime_title, anime_url, ep_num, subscriber_id=sid, is_online=is_online)
                     ok = send_discord_notification(webhook_url, embed_payload, client=client)
                     if ok:
                         store.advance_notified_max(sid, anime_url, ep_num)
@@ -365,8 +388,9 @@ def process_anime(anime: dict, client: httpx.Client | None = None) -> int:
         # Check if any subscriber is behind last_seen_max (e.g. joined recently with seen_max < current_max)
         to_notify_behind = store.subscribers_to_notify(anime_url, current_max)
         if to_notify_behind:
-            embed_payload = create_discord_embed(anime_title, anime_url, current_max)
             for sid, webhook_url, _prev_notif in to_notify_behind:
+                is_online = store.is_subscriber_online(sid)
+                embed_payload = create_discord_embed(anime_title, anime_url, current_max, subscriber_id=sid, is_online=is_online)
                 ok = send_discord_notification(webhook_url, embed_payload, client=client)
                 if ok:
                     store.advance_notified_max(sid, anime_url, current_max)

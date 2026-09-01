@@ -140,3 +140,86 @@ def unsubscribe(
     store.delete_subscriber(subscriber_id)
     store.prune_orphan_anime()
     return Response(status_code=204)
+
+
+@app.post("/v1/subscribers/{subscriber_id}/heartbeat")
+def heartbeat(
+    subscriber_id: str,
+    _auth: str = Depends(require_subscriber)
+):
+    """Updates the subscriber's online heartbeat timestamp."""
+    store.record_heartbeat(subscriber_id)
+    return {"status": "ok", "online": True}
+
+
+@app.get("/v1/subscribers/{subscriber_id}/commands")
+def get_commands(
+    subscriber_id: str,
+    _auth: str = Depends(require_subscriber)
+):
+    """Retrieves pending remote commands queued for this subscriber's PC."""
+    store.record_heartbeat(subscriber_id)
+    cmds = store.get_pending_commands(subscriber_id)
+    return {"commands": cmds}
+
+
+@app.post("/v1/subscribers/{subscriber_id}/commands/{command_id}/ack")
+def ack_command(
+    subscriber_id: str,
+    command_id: int,
+    _auth: str = Depends(require_subscriber)
+):
+    """Acknowledges execution of a remote download command."""
+    ok = store.ack_command(subscriber_id, command_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Command not found or already acknowledged")
+    return {"status": "acknowledged"}
+
+
+@app.get("/v1/queue", response_class=Response)
+def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig: str = ""):
+    """Public web action triggered when user taps the Download button on Discord from their phone."""
+    action_key = f"{url}:{ep}"
+    if not crypto.verify_action(sid, action_key, sig):
+        return Response(
+            content="<html><body style='font-family:sans-serif;text-align:center;padding:50px;background:#1e1e1e;color:#fff;'><h2>❌ Unauthorized</h2><p>Invalid or expired download link.</p></body></html>",
+            media_type="text/html",
+            status_code=401
+        )
+
+    is_online = store.is_subscriber_online(sid)
+    store.queue_command(sid, url, title or url, ep or "latest")
+
+    status_badge = (
+        "<div style='background:#107c41;color:#fff;padding:8px 18px;border-radius:20px;display:inline-block;font-weight:bold;margin:15px 0;font-size:14px;'>🟢 PC is Online — Downloading Now!</div>"
+        if is_online else
+        "<div style='background:#0078d4;color:#fff;padding:8px 18px;border-radius:20px;display:inline-block;font-weight:bold;margin:15px 0;font-size:14px;'>💤 PC is Offline — Queued to start when PC turns on!</div>"
+    )
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Download Queued • Auto Episodes Downloader</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f3f3f3; margin: 0; padding: 40px 20px; text-align: center; }}
+        .card {{ background: #151d2a; max-width: 440px; margin: 30px auto; padding: 32px 24px; border-radius: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.6); border: 1px solid #233045; }}
+        h1 {{ font-size: 20px; color: #4CC2FF; margin-top: 12px; margin-bottom: 8px; }}
+        .anime {{ font-size: 18px; font-weight: bold; margin: 15px 0 4px; color: #ffffff; }}
+        .ep {{ font-size: 15px; color: #7db0eb; margin-bottom: 12px; }}
+        .note {{ font-size: 13px; color: #8899a6; line-height: 1.5; margin-top: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div style="font-size: 48px;">📥</div>
+        <h1>Download Queued!</h1>
+        <div class="anime">{title or 'Anime Episode'}</div>
+        <div class="ep">Episode {ep if ep else 'Release'}</div>
+        {status_badge}
+        <div class="note">Auto Episodes Downloader on your PC will automatically receive this task and download the episode.</div>
+    </div>
+</body>
+</html>"""
+    return Response(content=html, media_type="text/html")

@@ -113,7 +113,7 @@ def _play_first_video(folder, parent=None, episodes=None):
 
 
 class AppWindow(FluentWindow):
-    def __init__(self):
+    def __init__(self, autostart_commands: list | None = None):
         super().__init__()
 
         self.setWindowTitle(f"Auto Episodes Downloader | Version {APP_VERSION}")
@@ -219,6 +219,64 @@ class AppWindow(FluentWindow):
         if app_settings.get("cloud_notify_enabled"):
             from utils.config import _trigger_bg_cloud_sync
             QTimer.singleShot(2000, _trigger_bg_cloud_sync)
+            self._cloud_poll_timer = QTimer(self)
+            self._cloud_poll_timer.timeout.connect(self._poll_cloud_commands)
+            self._cloud_poll_timer.start(20 * 1000)  # Heartbeat & command poll every 20s
+
+        if autostart_commands:
+            QTimer.singleShot(600, lambda: self._execute_remote_commands(autostart_commands))
+
+    def _poll_cloud_commands(self):
+        """Background poller that sends heartbeat and checks for incoming remote download commands."""
+        import threading
+        def _bg():
+            from utils.config import cloud_send_heartbeat, cloud_fetch_commands
+            cloud_send_heartbeat()
+            cmds = cloud_fetch_commands()
+            if cmds:
+                QTimer.singleShot(0, lambda: self._execute_remote_commands(cmds))
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _execute_remote_commands(self, commands: list[dict]):
+        if not commands:
+            return
+        from utils.config import cloud_ack_command, get_watchlist
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        self.show()
+        self.activateWindow()
+        self.raise_()
+        self.switchTo(self.downloader_interface)
+
+        items_to_download = []
+        for cmd in commands:
+            cmd_id = cmd.get("id")
+            url = cmd.get("anime_url", "")
+            title = cmd.get("anime_title", "")
+            ep_spec = str(cmd.get("episodes", "1"))
+            if not url:
+                continue
+
+            # Find matching watchlist entry for template & domain
+            entry = next((w for w in get_watchlist() if w.get("url") == url), None)
+            template = entry.get("latest_template") if entry else ""
+            domain = entry.get("domain") if entry else ("witanime" if "witanime" in url else "animerco")
+            if not template:
+                template = url
+
+            items_to_download.append((title or url, template, domain, 0, ep_spec))
+            if cmd_id:
+                cloud_ack_command(cmd_id)
+
+        if items_to_download:
+            InfoBar.success(
+                "Remote Download Started",
+                f"Auto-downloading {len(items_to_download)} anime release(s) triggered from Discord!",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4000
+            )
+            self.on_watch_download_all(items_to_download)
 
     def prompt_update(self, latest_version, download_url):
         print(f"[UI] prompt_update TRIGGERED for version {latest_version}")
