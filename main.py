@@ -130,11 +130,24 @@ if __name__ == "__main__":
     app.setFont(font)
     _startup_mark("stylesheet + font applied")
 
-    # Acquire Windows Named Mutex so the background watcher knows the full GUI app is active
+    # Acquire Windows Named Mutex so only ONE GUI instance ever runs
     import ctypes
     _main_app_mutex = None
     if sys.platform == "win32":
+        ERROR_ALREADY_EXISTS = 183
         _main_app_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\AED_Main_App_Running_Mutex")
+        if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            # Another instance is already running -> bring it to front and exit
+            try:
+                hwnd = ctypes.windll.user32.FindWindowW(None, "Auto Episodes Downloader")
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    ctypes.windll.user32.BringWindowToTop(hwnd)
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    ctypes.windll.user32.SwitchToThisWindow(hwnd, True)
+            except Exception:
+                pass
+            sys.exit(0)
 
     # Fetch any pending remote download commands from cloud
     from utils.config import cloud_fetch_commands, app_settings
