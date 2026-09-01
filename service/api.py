@@ -9,6 +9,7 @@ import os
 import threading
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
+import httpx
 from pydantic import BaseModel, field_validator
 
 from service import checker, crypto, store
@@ -95,6 +96,29 @@ def trigger_check():
     """Manual trigger to immediately run a check cycle across all due anime."""
     stats = checker.run_checker_cycle()
     return {"status": "completed", "stats": stats}
+
+
+@app.get("/v1/test_scrape")
+def test_scrape(url: str):
+    """Debug endpoint to inspect scraper results directly from Render."""
+    headers = {
+        "User-Agent": checker.DEFAULT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+    }
+    with httpx.Client(follow_redirects=True, timeout=20.0, verify=False) as client:
+        try:
+            r = client.get(url, headers=headers)
+            eps = checker.extract_episodes_from_html(r.text, url)
+            return {
+                "status_code": r.status_code,
+                "html_len": len(r.text),
+                "episodes_found": eps,
+                "max_episode": max(eps) if eps else 0,
+                "preview": r.text[:300]
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
 
 @app.post("/v1/subscribers", status_code=201)

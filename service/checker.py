@@ -35,7 +35,8 @@ def extract_episodes_from_html(html: str, base_url: str = "") -> list[int]:
     # 1. Base64 openEpisode('...') handlers used by witanime
     for match in re.finditer(r"openEpisode\(['\"]([A-Za-z0-9+/=]+)['\"]\)", html):
         try:
-            decoded = base64.b64decode(match.group(1)).decode("utf-8", errors="ignore")
+            raw_decoded = base64.b64decode(match.group(1)).decode("utf-8", errors="ignore")
+            decoded = unquote(raw_decoded)
             num_match = _TRAILING_DIGIT_RE.search(decoded) or _EP_NUMBER_RE.search(decoded)
             if num_match:
                 episodes.add(int(num_match.group(1)))
