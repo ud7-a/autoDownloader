@@ -13,6 +13,33 @@ This service enables **offline Discord notifications** for followed anime in you
 
 ---
 
+## AED_NOTIFY_KEY — read before deploying
+
+Every stored Discord webhook is encrypted with this Fernet key, and it is **not
+recoverable from anywhere else**. If it is lost or changed, every stored webhook
+becomes permanently undecryptable: notifications stop and each user has to re-enter
+their webhook in the app.
+
+Set it by hand and keep a copy somewhere separate from the host. `render.yaml`
+deliberately uses `sync: false` rather than `generateValue: true` so the key is
+something you hold rather than something the platform holds for you.
+
+The service refuses to start without it, on purpose — a generated-on-boot key would
+appear to work until the next restart and then silently orphan every stored webhook.
+
+## The database must be on persistent storage
+
+`AED_NOTIFY_DB` must point at a real disk. On an ephemeral path such as `/tmp`, every
+restart drops all subscribers, their follows and their notified-episode watermarks.
+The deployment config mounts a disk at `/data` for this reason.
+
+If the database is lost anyway, clients recover on their own: the desktop app
+re-registers when the service returns `401`, and subscriber ids are derived from the
+webhook, so the same identity comes back. The **server** must never paper over the
+loss by trusting an id it is handed — it used to, and that accepted any caller.
+
+---
+
 ## Quick Start (Docker / VPS)
 
 ### 1. Generate an Encryption Key

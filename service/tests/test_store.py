@@ -11,6 +11,43 @@ from service import store
 URL = "https://discord.com/api/webhooks/123456789/abcdefghijklmnop1234"
 
 
+class AuthenticationBypassTests(unittest.TestCase):
+    """authenticate() used to create a subscriber for any 32-character id paired with
+    any 32-character token, and return True. On a host with ephemeral storage the
+    subscribers table is empty much of the time, so that was the ordinary path."""
+
+    def setUp(self):
+        store.reset_for_tests()
+
+    def test_an_invented_id_and_token_are_rejected(self):
+        self.assertFalse(store.authenticate("a" * 32, "b" * 40))
+
+    def test_an_invented_pair_does_not_create_a_subscriber(self):
+        store.authenticate("c" * 32, "d" * 40)
+        with store.get_db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0], 0)
+
+    def test_short_and_long_ids_are_both_rejected(self):
+        self.assertFalse(store.authenticate("nobody", "anything"))
+        self.assertFalse(store.authenticate("e" * 64, "f" * 64))
+
+    def test_a_blank_token_hash_cannot_be_claimed(self):
+        """A row with no token_hash used to accept the first token offered and adopt
+        it. Such rows exist from earlier auto-provisioning."""
+        sid, _ = store.create_subscriber(URL)
+        with store.get_db() as db:
+            db.execute("UPDATE subscribers SET token_hash='' WHERE id=?", (sid,))
+        self.assertFalse(store.authenticate(sid, "g" * 40))
+        with store.get_db() as db:
+            self.assertEqual(
+                db.execute("SELECT token_hash FROM subscribers WHERE id=?", (sid,)).fetchone()[0], "")
+
+    def test_a_real_subscriber_still_authenticates(self):
+        sid, token = store.create_subscriber(URL)
+        self.assertTrue(store.authenticate(sid, token))
+        self.assertFalse(store.authenticate(sid, "not-the-token"))
+
+
 class SubscriberStoreTests(unittest.TestCase):
     def setUp(self):
         store.reset_for_tests()

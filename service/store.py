@@ -131,26 +131,27 @@ def create_subscriber(webhook_url: str) -> tuple[str, str]:
 
 
 def authenticate(subscriber_id: str, token: str) -> bool:
+    """True only when this subscriber exists and the token matches its stored hash.
+
+    There is deliberately no recovery path here. This used to create a subscriber for
+    any id and token of roughly the right length, so that clients could survive the
+    database being wiped on an ephemeral host -- which meant anyone could authenticate
+    as anyone, and the auto-created row had no webhook, so it could never be notified
+    anyway. A second branch adopted whatever token was offered for a row whose hash was
+    blank, making such rows claimable by the first caller to name one.
+
+    Recovery belongs to the client: it re-registers with its webhook (see
+    cloud_recover_identity in utils/config.py), which proves possession of something
+    the server can actually check.
+    """
     if not (subscriber_id and token):
         return False
     with get_db() as db:
         row = db.execute("SELECT token_hash FROM subscribers WHERE id=?",
                          (subscriber_id,)).fetchone()
-        if not row:
-            # Auto-provision subscriber on ephemeral container restart if valid format
-            if len(subscriber_id) == 32 and len(token) >= 32:
-                now = int(time.time())
-                db.execute(
-                    "INSERT INTO subscribers (id, token_hash, webhook_enc, created_at, last_heartbeat) VALUES (?,?,?,?,?)",
-                    (subscriber_id, crypto.hash_token(token), "", now, now)
-                )
-                return True
-            return False
-        if not row[0]:
-            db.execute("UPDATE subscribers SET token_hash = ? WHERE id = ?",
-                       (crypto.hash_token(token), subscriber_id))
-            return True
-        return hmac.compare_digest(row[0], crypto.hash_token(token))
+    if not row or not row[0]:
+        return False
+    return hmac.compare_digest(row[0], crypto.hash_token(token))
 
 
 def get_webhook(subscriber_id: str) -> str | None:

@@ -9,6 +9,45 @@ os.environ.setdefault("AED_NOTIFY_KEY", "bXl0ZXN0a2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTA
 from service import crypto
 
 
+class SigningKeyTests(unittest.TestCase):
+    """sign_action fell back to a constant that is published in this repository, so a
+    deployment without the key had forgeable action signatures."""
+
+    def test_signing_without_a_key_raises(self):
+        saved = os.environ.pop("AED_NOTIFY_KEY", None)
+        try:
+            with self.assertRaises(crypto.MissingKeyError):
+                crypto.sign_action("sub", "act")
+        finally:
+            if saved is not None:
+                os.environ["AED_NOTIFY_KEY"] = saved
+
+    def test_verifying_without_a_key_is_false_not_a_crash(self):
+        """Verification runs on a request path; a missing key must reject, not 500."""
+        saved = os.environ.pop("AED_NOTIFY_KEY", None)
+        try:
+            self.assertFalse(crypto.verify_action("sub", "act", "0" * 16))
+        finally:
+            if saved is not None:
+                os.environ["AED_NOTIFY_KEY"] = saved
+
+    def test_a_signature_verifies_and_a_tampered_one_does_not(self):
+        sig = crypto.sign_action("sub", "download:5")
+        self.assertTrue(crypto.verify_action("sub", "download:5", sig))
+        self.assertFalse(crypto.verify_action("sub", "download:6", sig))
+        self.assertFalse(crypto.verify_action("other", "download:5", sig))
+
+    def test_the_published_default_key_does_not_produce_valid_signatures(self):
+        """Guards against the fallback being reintroduced."""
+        import hashlib
+        import hmac as _hmac
+        forged = _hmac.new(b"default-aed-action-key", b"sub:act", hashlib.sha256).hexdigest()[:16]
+        self.assertFalse(crypto.verify_action("sub", "act", forged))
+
+    def test_an_empty_signature_is_rejected(self):
+        self.assertFalse(crypto.verify_action("sub", "act", ""))
+
+
 class WebhookCryptoTests(unittest.TestCase):
     URL = "https://discord.com/api/webhooks/123456789/abcdefghijklmnop1234"
 

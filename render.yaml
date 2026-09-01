@@ -3,10 +3,21 @@ services:
     name: aed-notification-service
     env: docker
     dockerfilePath: service/Dockerfile
-    plan: free
+    # A plan with a persistent disk is required. Free instances have no disk and sleep
+    # when idle, so /tmp was wiped on every restart -- that data loss is what the
+    # removed auto-provisioning in store.authenticate existed to paper over, and it
+    # accepted any id and token of roughly the right shape to do it. Sleeping
+    # instances also mean the periodic checker does not reliably run.
+    plan: starter
     region: frankfurt
+    disk:
+      name: aed-notify-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
+      # Set by hand, once. Not generated: see the warning in service/README.md --
+      # losing this key makes every stored webhook permanently undecryptable.
       - key: AED_NOTIFY_KEY
-        generateValue: true
+        sync: false
       - key: AED_NOTIFY_DB
-        value: /tmp/notify.db
+        value: /data/notify.db

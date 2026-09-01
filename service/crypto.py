@@ -51,11 +51,21 @@ def hash_token(token: str) -> str:
 
 
 def sign_action(subscriber_id: str, action: str) -> str:
-    key = (os.environ.get("AED_NOTIFY_KEY") or "default-aed-action-key").encode("utf-8")
+    key = os.environ.get("AED_NOTIFY_KEY")
+    if not key:
+        # There used to be a literal default here. This repository is public, so that
+        # made every action signature forgeable on any deployment missing the
+        # variable -- while _fernet() above correctly refused to run without it.
+        raise MissingKeyError("AED_NOTIFY_KEY is not set")
     msg = f"{subscriber_id}:{action}".encode("utf-8")
-    return hmac.new(key, msg, hashlib.sha256).hexdigest()[:16]
+    return hmac.new(key.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
 
 
 def verify_action(subscriber_id: str, action: str, sig: str) -> bool:
-    expected = sign_action(subscriber_id, action)
-    return hmac.compare_digest(expected, sig)
+    # Verification sits on a request path, so a missing key rejects the request
+    # rather than raising up through the handler as a 500.
+    try:
+        expected = sign_action(subscriber_id, action)
+    except MissingKeyError:
+        return False
+    return hmac.compare_digest(expected, sig or "")
