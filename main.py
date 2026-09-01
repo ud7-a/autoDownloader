@@ -139,12 +139,20 @@ if __name__ == "__main__":
         if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
             # Another instance is already running -> bring it to front and exit
             try:
-                hwnd = ctypes.windll.user32.FindWindowW(None, "Auto Episodes Downloader")
-                if hwnd:
-                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                    ctypes.windll.user32.BringWindowToTop(hwnd)
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    ctypes.windll.user32.SwitchToThisWindow(hwnd, True)
+                @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+                def _enum_win_cb(hwnd, _):
+                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buf = ctypes.create_unicode_buffer(length + 1)
+                        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                        if buf.value.startswith("Auto Episodes Downloader"):
+                            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                            ctypes.windll.user32.BringWindowToTop(hwnd)
+                            ctypes.windll.user32.SetForegroundWindow(hwnd)
+                            ctypes.windll.user32.SwitchToThisWindow(hwnd, True)
+                            return False
+                    return True
+                ctypes.windll.user32.EnumWindows(_enum_win_cb, 0)
             except Exception:
                 pass
             sys.exit(0)
