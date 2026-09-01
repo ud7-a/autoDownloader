@@ -60,3 +60,21 @@ class RemoteCommandTests(unittest.TestCase):
         url = "https://witanime.life/anime/rezero/"
         r = self.client.get(f"/v1/queue?sid={self.sid}&url={url}&title=ReZero&ep=15&sig=fake_sig")
         self.assertEqual(r.status_code, 401)
+
+    def test_delete_subscriber_cascades_commands(self):
+        # Queue a command
+        store.queue_command(self.sid, "https://witanime.life/anime/rezero/", "ReZero", "15")
+        self.assertEqual(len(store.get_pending_commands(self.sid)), 1)
+
+        # Delete subscriber
+        r = self.client.delete(f"/v1/subscribers/{self.sid}", headers=self.auth_headers)
+        self.assertEqual(r.status_code, 204)
+
+        # Verify command was cascaded
+        self.assertEqual(len(store.get_pending_commands(self.sid)), 0)
+
+    def test_is_subscriber_online_timeout(self):
+        store.record_heartbeat(self.sid)
+        self.assertTrue(store.is_subscriber_online(self.sid, timeout_seconds=10))
+        # With timeout of -1s, it should report offline
+        self.assertFalse(store.is_subscriber_online(self.sid, timeout_seconds=-1))
