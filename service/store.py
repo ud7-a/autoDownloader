@@ -126,19 +126,26 @@ def create_subscriber(webhook_url: str) -> tuple[str, str]:
 
 
 def authenticate(subscriber_id: str, token: str) -> bool:
+    if not (subscriber_id and token):
+        return False
     with get_db() as db:
         row = db.execute("SELECT token_hash FROM subscribers WHERE id=?",
                          (subscriber_id,)).fetchone()
-    if not row or not row[0]:
-        # If stub was auto-healed after container restart, attach token
-        if row and not row[0] and token:
-            with get_db() as db:
-                db.execute("UPDATE subscribers SET token_hash = ? WHERE id = ?",
-                           (crypto.hash_token(token), subscriber_id))
+        if not row:
+            # Auto-provision subscriber on ephemeral container restart if valid format
+            if len(subscriber_id) == 32 and len(token) >= 32:
+                now = int(time.time())
+                db.execute(
+                    "INSERT INTO subscribers (id, token_hash, webhook_enc, created_at, last_heartbeat) VALUES (?,?,?,?,?)",
+                    (subscriber_id, crypto.hash_token(token), "", now, now)
+                )
+                return True
+            return False
+        if not row[0]:
+            db.execute("UPDATE subscribers SET token_hash = ? WHERE id = ?",
+                       (crypto.hash_token(token), subscriber_id))
             return True
-        return False
-    # Constant-time comparison prevents timing attacks that leak the hash byte-by-byte
-    return hmac.compare_digest(row[0], crypto.hash_token(token))
+        return hmac.compare_digest(row[0], crypto.hash_token(token))
 
 
 def get_webhook(subscriber_id: str) -> str | None:

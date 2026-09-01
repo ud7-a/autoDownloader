@@ -22,6 +22,17 @@ import psutil
 
 APP_DIR = os.environ.get("AED_APP_DIR") or r"C:\Auto Episodes Downloader"
 CONFIG_FILE = os.path.join(APP_DIR, "sites_config.json")
+LOG_FILE = os.path.join(APP_DIR, "watcher.log")
+
+
+def log(msg: str):
+    """Appends status to watcher.log for instant debugging."""
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
 
 def is_main_app_running() -> bool:
@@ -31,10 +42,31 @@ def is_main_app_running() -> bool:
         try:
             if p.info['pid'] == curr_pid:
                 continue
+            name = (p.info.get('name') or '').lower()
+            if 'python' not in name and 'py' not in name and 'autodownloader' not in name:
+                continue
             cmdline = ' '.join(p.info.get('cmdline') or [])
             if 'main.py' in cmdline and '--watcher' not in cmdline:
                 return True
-            if getattr(sys, 'frozen', False) and 'AutoDownloader' in p.info.get('name', '') and '--watcher' not in cmdline:
+            if getattr(sys, 'frozen', False) and 'AutoDownloader' in name and '--watcher' not in cmdline:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def is_other_watcher_running() -> bool:
+    """Checks if another python instance of the watcher is running."""
+    curr_pid = os.getpid()
+    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if p.info['pid'] == curr_pid:
+                continue
+            name = (p.info.get('name') or '').lower()
+            if 'python' not in name and 'py' not in name:
+                continue
+            cmdline = ' '.join(p.info.get('cmdline') or [])
+            if 'aed_watcher.pyw' in cmdline:
                 return True
         except Exception:
             pass
@@ -72,7 +104,8 @@ def send_heartbeat(s_url: str, sub_id: str, token: str) -> bool:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status == 200
-    except Exception:
+    except Exception as e:
+        log(f"Heartbeat failed: {e}")
         return False
 
 
@@ -90,14 +123,15 @@ def fetch_commands(s_url: str, sub_id: str, token: str) -> list[dict]:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("commands", [])
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"Fetch commands failed: {e}")
     return []
 
 
 def launch_main_app():
     """Launches the main AED UI to process commands and display Downloader."""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log(f"Launching main app from {base_dir}...")
     if getattr(sys, "frozen", False):
         exe = sys.executable
         subprocess.Popen([exe], cwd=os.path.dirname(exe))
@@ -105,29 +139,25 @@ def launch_main_app():
         main_py = os.path.join(base_dir, "main.py")
         python_exe = sys.executable
         if "pythonw.exe" in python_exe.lower():
-            # Use regular python or keep pythonw
-            pass
+            python_reg = os.path.join(os.path.dirname(python_exe), "python.exe")
+            if os.path.exists(python_reg):
+                python_exe = python_reg
         subprocess.Popen([python_exe, main_py], cwd=base_dir)
+    log("Main app subprocess spawned!")
 
 
 def run_watcher(single_pass: bool = False):
     """Main watcher loop."""
-    curr_pid = os.getpid()
-    if not single_pass:
-        for p in psutil.process_iter(['pid', 'cmdline']):
-            try:
-                if p.info['pid'] == curr_pid:
-                    continue
-                cmdline = ' '.join(p.info.get('cmdline') or [])
-                if 'aed_watcher' in cmdline or ('main.py' in cmdline and '--watcher' in cmdline):
-                    return  # Another watcher is already running
-            except Exception:
-                pass
+    log(f"Watcher started (PID: {os.getpid()}, single_pass={single_pass})")
+    if not single_pass and is_other_watcher_running():
+        log("Another watcher is already active -> exiting cleanly.")
+        return
 
     while True:
         try:
             s_url, sub_id, token, enabled = load_cloud_credentials()
             if not (enabled and s_url and sub_id and token):
+                log("Cloud notify not fully configured or disabled.")
                 if single_pass:
                     break
                 time.sleep(15)
@@ -146,13 +176,14 @@ def run_watcher(single_pass: bool = False):
             # Check for remote download commands
             commands = fetch_commands(s_url, sub_id, token)
             if commands:
+                log(f"Received {len(commands)} remote download command(s)! Triggering UI...")
                 launch_main_app()
                 if single_pass:
                     break
                 time.sleep(15)
 
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Unexpected loop exception: {e}")
 
         if single_pass:
             break
