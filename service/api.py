@@ -113,6 +113,7 @@ def test_scrape(url: str):
 @app.post("/v1/subscribers", status_code=201)
 def register(body: RegistrationRequest):
     sid, token = store.create_subscriber(body.webhook)
+    store.record_heartbeat(sid)
     # The plaintext token is shown only once in this response; only its hash is stored
     return {
         "id": sid,
@@ -127,6 +128,7 @@ def sync_watchlist(
     body: WatchlistSyncRequest,
     _auth: str = Depends(require_subscriber)
 ):
+    store.record_heartbeat(subscriber_id)
     items_dicts = [item.model_dump() for item in body.items]
     following_count = store.replace_follows(subscriber_id, items_dicts)
     return {"following": following_count}
@@ -176,50 +178,233 @@ def ack_command(
     return {"status": "acknowledged"}
 
 
+class QueueSubmitRequest(BaseModel):
+    sid: str
+    url: str
+    title: str = ""
+    ep: str = ""
+    sig: str = ""
+
+
+@app.post("/v1/queue/submit")
+def submit_remote_download(body: QueueSubmitRequest):
+    """Interactive AJAX endpoint to queue or re-trigger a remote download."""
+    action_key = f"{body.url}:{body.ep}"
+    # Verify signature against original ep or bare url
+    if not (crypto.verify_action(body.sid, action_key, body.sig) or crypto.verify_action(body.sid, f"{body.url}:", body.sig)):
+        raise HTTPException(status_code=401, detail="Invalid action signature")
+
+    cmd_id = store.queue_command(body.sid, body.url, body.title or body.url, body.ep or "latest")
+    is_online = store.is_subscriber_online(body.sid)
+    return {
+        "status": "success",
+        "command_id": cmd_id,
+        "online": is_online,
+        "message": "PC is Online — Downloading Now!" if is_online else "PC is Offline — Queued for next boot!"
+    }
+
+
 @app.get("/v1/queue", response_class=Response)
 def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig: str = ""):
-    """Public web action triggered when user taps the Download button on Discord from their phone."""
+    """Interactive web application triggered from Discord to manage and send downloads to PC."""
     action_key = f"{url}:{ep}"
-    if not crypto.verify_action(sid, action_key, sig):
+    if not (crypto.verify_action(sid, action_key, sig) or crypto.verify_action(sid, f"{url}:", sig)):
         return Response(
             content="<html><body style='font-family:sans-serif;text-align:center;padding:50px;background:#1e1e1e;color:#fff;'><h2>❌ Unauthorized</h2><p>Invalid or expired download link.</p></body></html>",
             media_type="text/html",
             status_code=401
         )
 
-    is_online = store.is_subscriber_online(sid)
+    # Initial auto-queue on first visit
     store.queue_command(sid, url, title or url, ep or "latest")
+    is_online = store.is_subscriber_online(sid)
 
-    status_badge = (
-        "<div style='background:#107c41;color:#fff;padding:8px 18px;border-radius:20px;display:inline-block;font-weight:bold;margin:15px 0;font-size:14px;'>🟢 PC is Online — Downloading Now!</div>"
-        if is_online else
-        "<div style='background:#0078d4;color:#fff;padding:8px 18px;border-radius:20px;display:inline-block;font-weight:bold;margin:15px 0;font-size:14px;'>💤 PC is Offline — Queued to start when PC turns on!</div>"
-    )
+    status_badge_class = "badge-online" if is_online else "badge-offline"
+    status_text = "🟢 PC is Online — Downloading Now!" if is_online else "💤 PC is Offline — Queued for PC Boot"
 
     html = f"""<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Download Queued • Auto Episodes Downloader</title>
+    <title>{title or 'Anime'} • Auto Episodes Downloader</title>
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f3f3f3; margin: 0; padding: 40px 20px; text-align: center; }}
-        .card {{ background: #151d2a; max-width: 440px; margin: 30px auto; padding: 32px 24px; border-radius: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.6); border: 1px solid #233045; }}
-        h1 {{ font-size: 20px; color: #4CC2FF; margin-top: 12px; margin-bottom: 8px; }}
-        .anime {{ font-size: 18px; font-weight: bold; margin: 15px 0 4px; color: #ffffff; }}
-        .ep {{ font-size: 15px; color: #7db0eb; margin-bottom: 12px; }}
-        .note {{ font-size: 13px; color: #8899a6; line-height: 1.5; margin-top: 20px; }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0b0f19;
+            color: #f3f3f3;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }}
+        .card {{
+            background: #151d2a;
+            width: 100%;
+            max-width: 440px;
+            padding: 32px 24px;
+            border-radius: 24px;
+            box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+            border: 1px solid #233045;
+            text-align: center;
+            animation: fadeIn 0.4s ease-out;
+        }}
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: translateY(12px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
+        }}
+        .icon {{ font-size: 50px; margin-bottom: 8px; }}
+        h1 {{ font-size: 20px; color: #4CC2FF; margin-bottom: 6px; font-weight: 700; }}
+        .anime-title {{ font-size: 17px; font-weight: 600; color: #ffffff; margin: 12px 0 4px; line-height: 1.4; }}
+        .ep-badge {{ font-size: 14px; color: #7db0eb; margin-bottom: 16px; }}
+        
+        .status-badge {{
+            display: inline-block;
+            padding: 8px 18px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 13px;
+            margin: 10px 0 20px;
+            transition: all 0.3s;
+        }}
+        .badge-online {{ background: rgba(16, 124, 65, 0.25); color: #3cd47b; border: 1px solid #107c41; }}
+        .badge-offline {{ background: rgba(0, 120, 212, 0.25); color: #69b8ff; border: 1px solid #0078d4; }}
+
+        .control-group {{
+            background: #0f1522;
+            padding: 16px;
+            border-radius: 16px;
+            border: 1px solid #1f2a3c;
+            margin: 15px 0;
+            text-align: left;
+        }}
+        .control-group label {{ font-size: 12px; color: #8bb4e7; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; display: block; margin-bottom: 8px; }}
+        .ep-input {{
+            width: 100%;
+            background: #172133;
+            border: 1px solid #2d3e58;
+            border-radius: 10px;
+            padding: 12px 14px;
+            color: #ffffff;
+            font-size: 15px;
+            outline: none;
+            transition: border 0.2s;
+        }}
+        .ep-input:focus {{ border-color: #4CC2FF; }}
+
+        .btn-action {{
+            width: 100%;
+            background: #0078d4;
+            color: #ffffff;
+            border: none;
+            border-radius: 14px;
+            padding: 14px 20px;
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 10px;
+            box-shadow: 0 4px 16px rgba(0, 120, 212, 0.35);
+        }}
+        .btn-action:hover {{ background: #1a88e0; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0, 120, 212, 0.5); }}
+        .btn-action:active {{ transform: translateY(1px); }}
+        .btn-action:disabled {{ background: #334255; cursor: not-allowed; box-shadow: none; }}
+
+        .feedback-box {{
+            margin-top: 16px;
+            padding: 12px;
+            border-radius: 12px;
+            font-size: 13px;
+            display: none;
+            line-height: 1.4;
+        }}
+        .feedback-success {{ background: rgba(16, 124, 65, 0.2); color: #4ade80; border: 1px solid #107c41; }}
+        .feedback-error {{ background: rgba(220, 38, 38, 0.2); color: #f87171; border: 1px solid #dc2626; }}
+
+        .note {{ font-size: 12px; color: #738499; margin-top: 22px; line-height: 1.5; }}
     </style>
 </head>
 <body>
     <div class="card">
-        <div style="font-size: 48px;">📥</div>
-        <h1>Download Queued!</h1>
-        <div class="anime">{title or 'Anime Episode'}</div>
-        <div class="ep">Episode {ep if ep else 'Release'}</div>
-        {status_badge}
-        <div class="note">Auto Episodes Downloader on your PC will automatically receive this task and download the episode.</div>
+        <div class="icon">📥</div>
+        <h1>Download Manager</h1>
+        <div class="anime-title">{title or 'Anime Episode'}</div>
+        <div class="ep-badge">Target: Episode {ep if ep else 'Release'}</div>
+        
+        <div id="status-badge" class="status-badge {status_badge_class}">{status_text}</div>
+
+        <div class="control-group">
+            <label for="ep-input">Episode Number / Range</label>
+            <input id="ep-input" class="ep-input" type="text" value="{ep}" placeholder="e.g. {ep if ep else '1'}">
+            
+            <button id="btn-submit" class="btn-action" onclick="triggerDownload()">
+                🚀 Send Download to PC
+            </button>
+        </div>
+
+        <div id="feedback" class="feedback-box feedback-success">
+            ✅ <b>Download Dispatched!</b> Your PC is receiving the task.
+        </div>
+
+        <div class="note">
+            Auto Episodes Downloader on your PC will automatically pull this download task and complete it.
+        </div>
     </div>
+
+    <script>
+        async function triggerDownload() {{
+            const btn = document.getElementById('btn-submit');
+            const feedback = document.getElementById('feedback');
+            const epVal = document.getElementById('ep-input').value.trim() || '{ep}';
+            
+            btn.disabled = true;
+            btn.innerText = '⏳ Sending to PC...';
+            feedback.style.display = 'none';
+
+            try {{
+                const res = await fetch('/v1/queue/submit', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{
+                        sid: '{sid}',
+                        url: '{url}',
+                        title: '{title}',
+                        ep: epVal,
+                        sig: '{sig}'
+                    }})
+                }});
+
+                const data = await res.json();
+                if (res.ok) {{
+                    feedback.className = 'feedback-box feedback-success';
+                    feedback.innerHTML = '✅ <b>Success!</b> ' + (data.message || 'Download queued for PC.');
+                    feedback.style.display = 'block';
+
+                    const badge = document.getElementById('status-badge');
+                    if (data.online) {{
+                        badge.className = 'status-badge badge-online';
+                        badge.innerText = '🟢 PC is Online — Downloading Now!';
+                    }} else {{
+                        badge.className = 'status-badge badge-offline';
+                        badge.innerText = '💤 PC is Offline — Queued for PC Boot';
+                    }}
+                }} else {{
+                    feedback.className = 'feedback-box feedback-error';
+                    feedback.innerHTML = '❌ ' + (data.detail || 'Could not queue download.');
+                    feedback.style.display = 'block';
+                }}
+            }} catch (err) {{
+                feedback.className = 'feedback-box feedback-error';
+                feedback.innerHTML = '❌ Network error connecting to cloud server.';
+                feedback.style.display = 'block';
+            }} finally {{
+                btn.disabled = false;
+                btn.innerText = '🚀 Send Download to PC';
+            }}
+        }}
+    </script>
 </body>
 </html>"""
     return Response(content=html, media_type="text/html")

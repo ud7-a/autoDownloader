@@ -288,7 +288,7 @@ def record_heartbeat(subscriber_id: str) -> None:
         db.execute("UPDATE subscribers SET last_heartbeat = ? WHERE id = ?", (now, subscriber_id))
 
 
-def is_subscriber_online(subscriber_id: str, timeout_seconds: int = 60) -> bool:
+def is_subscriber_online(subscriber_id: str, timeout_seconds: int = 180) -> bool:
     with get_db() as db:
         row = db.execute("SELECT last_heartbeat FROM subscribers WHERE id = ?", (subscriber_id,)).fetchone()
         if not row or not row[0]:
