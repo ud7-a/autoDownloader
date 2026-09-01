@@ -55,6 +55,7 @@ class WatchItem(BaseModel):
     url: str
     title: str = ""
     release_day: str = ""
+    seen_max: int = 0
 
 
 class WatchlistSyncRequest(BaseModel):

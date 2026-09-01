@@ -212,6 +212,11 @@ class AppWindow(FluentWindow):
             # all now" in the Watchlist tab is there for the full pass.
             QTimer.singleShot(8000, self.watchlist_interface.check_today)
 
+        # Silent background sync of watchlist & seen episodes with Cloud Service on launch
+        if app_settings.get("cloud_notify_enabled"):
+            from utils.config import _trigger_bg_cloud_sync
+            QTimer.singleShot(2000, _trigger_bg_cloud_sync)
+
     def prompt_update(self, latest_version, download_url):
         print(f"[UI] prompt_update TRIGGERED for version {latest_version}")
         # Prevent spamming the prompt

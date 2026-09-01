@@ -220,7 +220,8 @@ def cloud_sync_watchlist() -> tuple[bool, str]:
     items = [{
         "url": w.get("url", ""),
         "title": w.get("title", ""),
-        "release_day": w.get("release_day", "")
+        "release_day": w.get("release_day", ""),
+        "seen_max": int(w.get("seen_max") or 0)
     } for w in watchlist if w.get("url")]
     sync_endpoint = f"{s_url}/v1/subscribers/{sub_id}/watchlist"
     payload = json.dumps({"items": items}).encode("utf-8")
@@ -239,6 +240,13 @@ def cloud_sync_watchlist() -> tuple[bool, str]:
             data = json.loads(resp.read().decode("utf-8"))
             count = data.get("following", len(items))
             return True, f"Synced {count} anime to cloud service"
+    except urllib.error.HTTPError as he:
+        if he.code in (401, 404):
+            # Server restarted or database was refreshed: auto-re-register seamlessly
+            wh = app_settings.get("discord_webhook", "")
+            if wh:
+                return cloud_register_and_sync(s_url, wh)
+        return False, f"Cloud sync failed: HTTP {he.code}"
     except Exception as e:
         return False, f"Cloud sync failed: {e}"
 

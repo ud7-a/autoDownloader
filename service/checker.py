@@ -162,9 +162,13 @@ def process_anime(anime: dict, client: httpx.Client | None = None) -> int:
     notifications_sent = 0
 
     if last_seen_max == 0:
-        # First discovery of this anime by the cloud service:
-        # Seed last_seen_max without sending notifications so back catalogue isn't spammed
+        # First discovery of this anime on the server:
+        # Seed last_seen_max and advance any unseeded (0-notified) followers to current_max
+        # to establish the baseline without spamming back-catalogues
         store.update_anime_progress(anime_url, current_max)
+        with store.get_db() as db:
+            db.execute("UPDATE follows SET notified_max = ? WHERE anime_url = ? AND notified_max = 0",
+                       (current_max, anime_url))
         return 0
 
     if current_max > last_seen_max:
@@ -182,7 +186,16 @@ def process_anime(anime: dict, client: httpx.Client | None = None) -> int:
 
         store.update_anime_progress(anime_url, current_max)
     else:
-        # No new episodes
+        # Check if any subscriber is behind last_seen_max (e.g. joined recently with seen_max < current_max)
+        to_notify_behind = store.subscribers_to_notify(anime_url, current_max)
+        if to_notify_behind:
+            embed_payload = create_discord_embed(anime_title, anime_url, current_max)
+            for sid, webhook_url, _prev_notif in to_notify_behind:
+                ok = send_discord_notification(webhook_url, embed_payload, client=client)
+                if ok:
+                    store.advance_notified_max(sid, anime_url, current_max)
+                    notifications_sent += 1
+                time.sleep(0.1)
         store.update_anime_progress(anime_url, last_seen_max)
 
     return notifications_sent
@@ -196,10 +209,25 @@ def today_key() -> str:
     return days[(time.gmtime().tm_wday + 2) % 7]
 
 
+def active_day_keys() -> list[str]:
+    """Returns [today, yesterday] in canonical format to account for timezone offsets."""
+    days = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"]
+    idx = (time.gmtime().tm_wday + 2) % 7
+    today = days[idx]
+    yesterday = days[(idx - 1) % 7]
+    return [today, yesterday]
+
+
 def run_checker_cycle(batch_limit: int = 50, client: httpx.Client | None = None, today_day: str = None) -> dict:
     """Runs a single pass over anime due for checking today. Returns statistics."""
-    current_day = today_day if today_day is not None else today_key()
-    due = store.due_anime(today_day=current_day, limit=batch_limit)
+    if today_day is not None:
+        days_to_check = [today_day]
+        current_day = today_day
+    else:
+        days_to_check = active_day_keys()
+        current_day = days_to_check[0]
+
+    due = store.due_anime(today_days=days_to_check, limit=batch_limit)
     total_notifications = 0
     errors = 0
 

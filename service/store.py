@@ -161,21 +161,22 @@ def replace_follows(subscriber_id: str, items: list[dict]) -> int:
                 continue
             title = (item.get("title") or url)[:200]
             release_day = (item.get("release_day") or "").strip().lower()
-            # Upsert anime row
+            seen_max = max(0, int(item.get("seen_max") or 0))
+
+            # Upsert anime row, initializing last_seen_max with client's seen_max
             db.execute(
                 "INSERT INTO anime (url, title, release_day, last_seen_max, last_checked_at) "
-                "VALUES (?,?,?,0,0) ON CONFLICT(url) DO UPDATE SET "
+                "VALUES (?, ?, ?, ?, 0) ON CONFLICT(url) DO UPDATE SET "
                 "title = CASE WHEN excluded.title != '' THEN excluded.title ELSE anime.title END, "
-                "release_day = CASE WHEN excluded.release_day != '' THEN excluded.release_day ELSE anime.release_day END",
-                (url, title, release_day))
+                "release_day = CASE WHEN excluded.release_day != '' THEN excluded.release_day ELSE anime.release_day END, "
+                "last_seen_max = MAX(anime.last_seen_max, excluded.last_seen_max)",
+                (url, title, release_day, seen_max))
 
-            # Initial notified_max is preserved if previously followed, else seeded from anime's last_seen_max
-            # to avoid spamming the user on initial follow
-            if url in existing_follows:
-                prev_max = existing_follows[url]
+            # Initial notified_max is preserved if previously followed, else seeded from client's seen_max
+            if url in existing_follows and existing_follows[url] > 0:
+                prev_max = max(existing_follows[url], seen_max)
             else:
-                anime_row = db.execute("SELECT last_seen_max FROM anime WHERE url=?", (url,)).fetchone()
-                prev_max = anime_row[0] if anime_row else 0
+                prev_max = seen_max
 
             db.execute(
                 "INSERT OR REPLACE INTO follows (subscriber_id, anime_url, notified_max) "
@@ -193,17 +194,25 @@ def followers_of(anime_url: str) -> list[str]:
             "SELECT subscriber_id FROM follows WHERE anime_url=?", (anime_url,))]
 
 
-def due_anime(today_day: str = None, limit: int = 200) -> list[dict]:
-    """Anime due for checking. If today_day is given (e.g. 'saturday'), filters to anime
-    airing today or anime with no day assigned yet (so newly added shows aren't missed).
+def due_anime(today_days: list[str] | str | None = None, limit: int = 200, today_day: str | None = None) -> list[dict]:
+    """Anime due for checking. If today_days or today_day is given (e.g. ['tuesday', 'monday']),
+    filters to anime airing on those days or anime with no day assigned yet.
     Least recently checked first.
     """
+    days_arg = today_days if today_days is not None else today_day
     with get_db() as db:
-        if today_day:
-            rows = db.execute(
-                "SELECT url, title, release_day, last_seen_max, last_checked_at FROM anime "
-                "WHERE (release_day = '' OR release_day IS NULL OR LOWER(release_day) = ?) "
-                "ORDER BY last_checked_at ASC LIMIT ?", (today_day.lower(), limit)).fetchall()
+        if days_arg:
+            if isinstance(days_arg, str):
+                days_list = [days_arg.lower()]
+            else:
+                days_list = [d.lower() for d in days_arg if d]
+            placeholders = ",".join("?" for _ in days_list)
+            query = (
+                f"SELECT url, title, release_day, last_seen_max, last_checked_at FROM anime "
+                f"WHERE (release_day = '' OR release_day IS NULL OR LOWER(release_day) IN ({placeholders})) "
+                f"ORDER BY last_checked_at ASC LIMIT ?"
+            )
+            rows = db.execute(query, (*days_list, limit)).fetchall()
         else:
             rows = db.execute(
                 "SELECT url, title, release_day, last_seen_max, last_checked_at FROM anime "
