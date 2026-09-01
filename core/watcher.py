@@ -75,6 +75,17 @@ def is_other_watcher_running() -> bool:
     return False
 
 
+def _decrypt_token(obfuscated: str) -> str:
+    if not obfuscated:
+        return ""
+    import base64
+    try:
+        reversed_back = obfuscated[::-1]
+        return base64.b64decode(reversed_back.encode("utf-8")).decode("utf-8")
+    except Exception:
+        return obfuscated
+
+
 def load_cloud_credentials() -> tuple[str, str, str, bool]:
     """Reads cloud config from sites_config.json."""
     if not os.path.exists(CONFIG_FILE):
@@ -86,7 +97,8 @@ def load_cloud_credentials() -> tuple[str, str, str, bool]:
         enabled = bool(settings.get("cloud_notify_enabled", False))
         s_url = (settings.get("cloud_service_url") or "https://aed-notification-service.onrender.com").rstrip("/")
         sub_id = settings.get("cloud_subscriber_id", "")
-        token = settings.get("cloud_token", "")
+        raw_token = settings.get("cloud_token", "")
+        token = _decrypt_token(raw_token)
         return s_url, sub_id, token, enabled
     except Exception:
         return "", "", "", False
@@ -155,6 +167,7 @@ def run_watcher(single_pass: bool = False):
         log("Another watcher is already active -> exiting cleanly.")
         return
 
+    loop_count = 0
     while True:
         try:
             s_url, sub_id, token, enabled = load_cloud_credentials()
@@ -173,7 +186,10 @@ def run_watcher(single_pass: bool = False):
                 continue
 
             # Send heartbeat so PC is ONLINE 🟢
-            send_heartbeat(s_url, sub_id, token)
+            if send_heartbeat(s_url, sub_id, token):
+                if loop_count % 4 == 0:
+                    log(f"Heartbeat sent successfully (Loop #{loop_count}). PC is ONLINE 🟢")
+            loop_count += 1
 
             # Check for remote download commands
             commands = fetch_commands(s_url, sub_id, token)
