@@ -24,7 +24,11 @@ class RemoteCommandTests(unittest.TestCase):
         self.auth_headers = {"Authorization": f"Bearer {self.token}"}
 
     def test_heartbeat_and_online_status(self):
-        self.assertFalse(store.is_subscriber_online(self.sid))
+        # Freshly registered subscriber is online
+        self.assertTrue(store.is_subscriber_online(self.sid))
+        # With zero timeout it behaves as offline
+        self.assertFalse(store.is_subscriber_online(self.sid, timeout_seconds=0))
+        # Send heartbeat
         r = self.client.post(f"/v1/subscribers/{self.sid}/heartbeat", headers=self.auth_headers)
         self.assertEqual(r.status_code, 200)
         self.assertTrue(store.is_subscriber_online(self.sid))

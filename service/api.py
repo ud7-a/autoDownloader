@@ -195,6 +195,9 @@ def submit_remote_download(body: QueueSubmitRequest):
         raise HTTPException(status_code=401, detail="Invalid action signature")
 
     cmd_id = store.queue_command(body.sid, body.url, body.title or body.url, body.ep or "latest")
+    if cmd_id is None:
+        raise HTTPException(status_code=404, detail="Subscriber session expired. Please use the newest notification.")
+
     is_online = store.is_subscriber_online(body.sid)
     return {
         "status": "success",
@@ -210,13 +213,26 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
     action_key = f"{url}:{ep}"
     if not (crypto.verify_action(sid, action_key, sig) or crypto.verify_action(sid, f"{url}:", sig)):
         return Response(
-            content="<html><body style='font-family:sans-serif;text-align:center;padding:50px;background:#1e1e1e;color:#fff;'><h2>❌ Unauthorized</h2><p>Invalid or expired download link.</p></body></html>",
+            content="""<!DOCTYPE html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<style>body{font-family:sans-serif;text-align:center;padding:50px 20px;background:#0b0f19;color:#fff;}.box{background:#151d2a;max-width:400px;margin:auto;padding:30px;border-radius:16px;border:1px solid #233045;}</style></head>
+<body><div class='box'><div style='font-size:40px'>🔒</div><h2 style='color:#f87171;margin:12px 0;'>Link Expired</h2><p style='color:#8899a6;line-height:1.5;'>This download link has expired or is invalid. Please trigger the action from the newest notification card in Discord.</p></div></body></html>""",
             media_type="text/html",
             status_code=401
         )
 
     # Initial auto-queue on first visit
-    store.queue_command(sid, url, title or url, ep or "latest")
+    cmd_id = store.queue_command(sid, url, title or url, ep or "latest")
+    if cmd_id is None:
+        return Response(
+            content="""<!DOCTYPE html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<style>body{font-family:sans-serif;text-align:center;padding:50px 20px;background:#0b0f19;color:#fff;}.box{background:#151d2a;max-width:400px;margin:auto;padding:30px;border-radius:16px;border:1px solid #233045;}</style></head>
+<body><div class='box'><div style='font-size:40px'>⚠️</div><h2 style='color:#fbbf24;margin:12px 0;'>Session Expired</h2><p style='color:#8899a6;line-height:1.5;'>This link belongs to a previous session. Please open the latest notification from Discord.</p></div></body></html>""",
+            media_type="text/html",
+            status_code=404
+        )
+
     is_online = store.is_subscriber_online(sid)
 
     status_badge_class = "badge-online" if is_online else "badge-offline"

@@ -296,9 +296,13 @@ def is_subscriber_online(subscriber_id: str, timeout_seconds: int = 180) -> bool
         return (int(time.time()) - row[0]) < timeout_seconds
 
 
-def queue_command(subscriber_id: str, anime_url: str, anime_title: str, episodes: str) -> int:
+def queue_command(subscriber_id: str, anime_url: str, anime_title: str, episodes: str) -> int | None:
     now = int(time.time())
     with get_db() as db:
+        # Verify subscriber exists
+        row = db.execute("SELECT id FROM subscribers WHERE id = ?", (subscriber_id,)).fetchone()
+        if not row:
+            return None
         cur = db.execute(
             "INSERT INTO commands (subscriber_id, anime_url, anime_title, episodes, status, created_at) "
             "VALUES (?, ?, ?, ?, 'pending', ?)",
