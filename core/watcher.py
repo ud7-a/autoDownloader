@@ -65,8 +65,10 @@ def is_other_watcher_running() -> bool:
             name = (p.info.get('name') or '').lower()
             if 'python' not in name and 'py' not in name:
                 continue
-            cmdline = ' '.join(p.info.get('cmdline') or [])
-            if 'aed_watcher.pyw' in cmdline:
+            args = [str(a).lower() for a in (p.info.get('cmdline') or [])]
+            if "-c" in args:
+                continue  # Ignore inline python commands
+            if any(a.endswith("aed_watcher.pyw") or a.endswith("aed_watcher") for a in args):
                 return True
         except Exception:
             pass
