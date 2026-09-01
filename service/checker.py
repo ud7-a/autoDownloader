@@ -58,10 +58,11 @@ def extract_episodes_from_html(html: str, base_url: str = "") -> list[int]:
     return sorted(episodes)
 
 
-def fetch_with_playwright(anime_url: str, timeout_seconds: float = 25.0) -> int:
+def fetch_with_playwright(anime_url: str, timeout_seconds: float = 30.0) -> tuple[int, dict]:
     """Uses headless Playwright Chromium to execute JavaScript, solve Cloudflare Turnstile challenges,
     and extract episode counts.
     """
+    debug_info = {}
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -76,7 +77,7 @@ def fetch_with_playwright(anime_url: str, timeout_seconds: float = 25.0) -> int:
             )
             context = browser.new_context(
                 user_agent=DEFAULT_USER_AGENT,
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": 1366, "height": 768},
                 locale="en-US,ar",
             )
             try:
@@ -87,16 +88,26 @@ def fetch_with_playwright(anime_url: str, timeout_seconds: float = 25.0) -> int:
                 page = context.new_page()
 
             page.goto(anime_url, timeout=int(timeout_seconds * 1000), wait_until="domcontentloaded")
-            # Wait a few seconds for Cloudflare challenge redirect or openEpisode anchors to render
-            page.wait_for_timeout(3500)
+            
+            # Wait up to 8 seconds for Cloudflare challenge redirect or episode container to appear
+            for _ in range(8):
+                page.wait_for_timeout(1000)
+                if "just a moment" not in page.title().lower():
+                    break
+
             html = page.content()
+            debug_info["title"] = page.title()
+            debug_info["html_len"] = len(html)
+            debug_info["preview"] = html[:200]
             browser.close()
 
             eps = extract_episodes_from_html(html, anime_url)
-            return max(eps) if eps else 0
+            debug_info["episodes"] = eps
+            return (max(eps) if eps else 0), debug_info
     except Exception as e:
         logger.warning(f"Playwright fetch failed for {anime_url}: {e}")
-        return 0
+        debug_info["error"] = str(e)
+        return 0, debug_info
 
 
 def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> int:
@@ -137,7 +148,8 @@ def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> 
             client.close()
 
     # 3. Fallback to Headless Playwright Chromium to solve Cloudflare Turnstile JS challenges
-    return fetch_with_playwright(anime_url)
+    max_ep, _ = fetch_with_playwright(anime_url)
+    return max_ep
 
 
 def create_discord_embed(anime_title: str, anime_url: str, episode_num: int) -> dict:

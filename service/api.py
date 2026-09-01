@@ -100,10 +100,11 @@ def trigger_check():
 @app.get("/v1/test_scrape")
 def test_scrape(url: str):
     """Debug endpoint to inspect scraper results directly from Render."""
-    max_ep = checker.fetch_latest_episode(url)
+    max_ep, debug_info = checker.fetch_with_playwright(url)
     return {
         "url": url,
         "max_episode": max_ep,
+        "debug": debug_info,
         "status": "success" if max_ep > 0 else "no_episodes_or_blocked"
     }
 
