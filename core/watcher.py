@@ -18,23 +18,26 @@ import json
 import subprocess
 import urllib.request
 import urllib.error
-import ctypes
+import psutil
 
 APP_DIR = os.environ.get("AED_APP_DIR") or r"C:\Auto Episodes Downloader"
 CONFIG_FILE = os.path.join(APP_DIR, "sites_config.json")
 
-MAIN_APP_MUTEX_NAME = "Local\\AED_Main_App_Running_Mutex"
-WATCHER_MUTEX_NAME = "Local\\AED_Watcher_Running_Mutex"
-
 
 def is_main_app_running() -> bool:
-    """Checks if the main AED UI process is currently open via Windows Mutex."""
-    if sys.platform != "win32":
-        return False
-    mutex = ctypes.windll.kernel32.OpenMutexW(0x00100000, False, MAIN_APP_MUTEX_NAME)
-    if mutex != 0:
-        ctypes.windll.kernel32.CloseHandle(mutex)
-        return True
+    """Checks if the main AED UI process is currently running."""
+    curr_pid = os.getpid()
+    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if p.info['pid'] == curr_pid:
+                continue
+            cmdline = ' '.join(p.info.get('cmdline') or [])
+            if 'main.py' in cmdline and '--watcher' not in cmdline:
+                return True
+            if getattr(sys, 'frozen', False) and 'AutoDownloader' in p.info.get('name', '') and '--watcher' not in cmdline:
+                return True
+        except Exception:
+            pass
     return False
 
 
@@ -109,11 +112,17 @@ def launch_main_app():
 
 def run_watcher(single_pass: bool = False):
     """Main watcher loop."""
-    watcher_mutex = None
-    if sys.platform == "win32" and not single_pass:
-        watcher_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, WATCHER_MUTEX_NAME)
-        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-            return
+    curr_pid = os.getpid()
+    if not single_pass:
+        for p in psutil.process_iter(['pid', 'cmdline']):
+            try:
+                if p.info['pid'] == curr_pid:
+                    continue
+                cmdline = ' '.join(p.info.get('cmdline') or [])
+                if 'aed_watcher' in cmdline or ('main.py' in cmdline and '--watcher' in cmdline):
+                    return  # Another watcher is already running
+            except Exception:
+                pass
 
     while True:
         try:
