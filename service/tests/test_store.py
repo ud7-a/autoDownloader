@@ -74,7 +74,7 @@ class SubscriberStoreTests(unittest.TestCase):
 
     def test_shared_anime_rows_between_subscribers(self):
         s1, _ = store.create_subscriber(URL)
-        s2, _ = store.create_subscriber(URL)
+        s2, _ = store.create_subscriber("https://discord.com/api/webhooks/999/different_subscriber")
         items = [{"url": "https://witanime.life/anime/bleach/", "title": "Bleach"}]
         store.replace_follows(s1, items)
         store.replace_follows(s2, items)

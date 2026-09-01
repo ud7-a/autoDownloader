@@ -5,11 +5,11 @@ splitting them would mean two subtly different sets of the same logic.
 """
 
 from contextlib import contextmanager
+import hashlib
 import hmac
 import os
 import sqlite3
 import time
-import uuid
 
 from service import crypto
 
@@ -116,12 +116,17 @@ def reset_for_tests() -> None:
 
 
 def create_subscriber(webhook_url: str) -> tuple[str, str]:
-    sid = uuid.uuid4().hex
+    # Deterministic subscriber ID derived from webhook URL
+    sid = hashlib.sha256(webhook_url.strip().encode("utf-8")).hexdigest()[:32]
     token = crypto.new_token()
+    now = int(time.time())
     with get_db() as db:
         db.execute(
-            "INSERT INTO subscribers (id, token_hash, webhook_enc, created_at) VALUES (?,?,?,?)",
-            (sid, crypto.hash_token(token), crypto.encrypt_webhook(webhook_url), int(time.time())))
+            "INSERT INTO subscribers (id, token_hash, webhook_enc, created_at, last_heartbeat) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, webhook_enc = excluded.webhook_enc, last_heartbeat = excluded.last_heartbeat",
+            (sid, crypto.hash_token(token), crypto.encrypt_webhook(webhook_url), now, now)
+        )
     return sid, token
 
 
