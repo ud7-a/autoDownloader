@@ -1,5 +1,6 @@
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PyQt6.QtGui import QIcon, QAction
 from qfluentwidgets import (FluentWindow, FluentIcon as FIF, MessageBoxBase,
                             SubtitleLabel, BodyLabel, PushButton)
 
@@ -205,6 +206,10 @@ class AppWindow(FluentWindow):
         # Wire up the update signal
         signals.update_available.connect(self.prompt_update)
 
+        # Initialize System Tray integration
+        self._force_quit = False
+        self._init_system_tray()
+
         # Auto-check the Watchlist shortly after launch and periodically while open
         if get_watchlist():
             # Only today's anime on launch. A full sweep is slow, hammers both sites
@@ -226,6 +231,49 @@ class AppWindow(FluentWindow):
         if autostart_commands:
             QTimer.singleShot(600, lambda: self._execute_remote_commands(autostart_commands))
 
+    def _init_system_tray(self):
+        import os
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "app_icon.png")
+        if not os.path.exists(icon_path):
+            icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "app_icon.ico")
+
+        self.tray_icon = QSystemTrayIcon(self)
+        if os.path.exists(icon_path):
+            self.tray_icon.setIcon(QIcon(icon_path))
+
+        tray_menu = QMenu()
+        open_action = QAction("Open Auto Episodes Downloader", self)
+        open_action.triggered.connect(self._restore_from_tray)
+        tray_menu.addAction(open_action)
+
+        check_action = QAction("Check Watchlist Now", self)
+        check_action.triggered.connect(self.watchlist_interface.check_today)
+        tray_menu.addAction(check_action)
+
+        tray_menu.addSeparator()
+
+        quit_action = QAction("Exit", self)
+        quit_action.triggered.connect(self._quit_application)
+        tray_menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _restore_from_tray(self):
+        self.show()
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+        self.activateWindow()
+        self.raise_()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._restore_from_tray()
+
+    def _quit_application(self):
+        self._force_quit = True
+        self.close()
+
     def _poll_cloud_commands(self):
         """Background poller that sends heartbeat and checks for incoming remote download commands."""
         import threading
@@ -243,9 +291,7 @@ class AppWindow(FluentWindow):
         from utils.config import cloud_ack_command, get_watchlist
         from qfluentwidgets import InfoBar, InfoBarPosition
 
-        self.show()
-        self.activateWindow()
-        self.raise_()
+        self._restore_from_tray()
         self.switchTo(self.downloader_interface)
 
         items_to_download = []
@@ -472,6 +518,20 @@ class AppWindow(FluentWindow):
         _play_first_video(folder, self, episodes)
 
     def closeEvent(self, event):
+        # If Cloud Notifications are enabled and user closed via [X], minimize to tray instead of quitting!
+        if app_settings.get("cloud_notify_enabled") and not getattr(self, "_force_quit", False):
+            event.ignore()
+            self.hide()
+            if not getattr(self, "_tray_notified", False):
+                self._tray_notified = True
+                self.tray_icon.showMessage(
+                    "Auto Episodes Downloader",
+                    "Minimized to system tray. Listening for remote Discord downloads.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2500
+                )
+            return
+
         app_settings["window_maximized"] = self.isMaximized()
         
         # Only save normal geometry if it's not minimized
