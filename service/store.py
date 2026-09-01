@@ -129,7 +129,13 @@ def authenticate(subscriber_id: str, token: str) -> bool:
     with get_db() as db:
         row = db.execute("SELECT token_hash FROM subscribers WHERE id=?",
                          (subscriber_id,)).fetchone()
-    if not row:
+    if not row or not row[0]:
+        # If stub was auto-healed after container restart, attach token
+        if row and not row[0] and token:
+            with get_db() as db:
+                db.execute("UPDATE subscribers SET token_hash = ? WHERE id = ?",
+                           (crypto.hash_token(token), subscriber_id))
+            return True
         return False
     # Constant-time comparison prevents timing attacks that leak the hash byte-by-byte
     return hmac.compare_digest(row[0], crypto.hash_token(token))
@@ -285,6 +291,11 @@ def prune_orphan_anime() -> int:
 def record_heartbeat(subscriber_id: str) -> None:
     now = int(time.time())
     with get_db() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO subscribers (id, token_hash, webhook_enc, created_at, last_heartbeat) "
+            "VALUES (?, '', '', ?, ?)",
+            (subscriber_id, now, now)
+        )
         db.execute("UPDATE subscribers SET last_heartbeat = ? WHERE id = ?", (now, subscriber_id))
 
 
@@ -296,13 +307,15 @@ def is_subscriber_online(subscriber_id: str, timeout_seconds: int = 180) -> bool
         return (int(time.time()) - row[0]) < timeout_seconds
 
 
-def queue_command(subscriber_id: str, anime_url: str, anime_title: str, episodes: str) -> int | None:
+def queue_command(subscriber_id: str, anime_url: str, anime_title: str, episodes: str) -> int:
     now = int(time.time())
     with get_db() as db:
-        # Verify subscriber exists
-        row = db.execute("SELECT id FROM subscribers WHERE id = ?", (subscriber_id,)).fetchone()
-        if not row:
-            return None
+        # Ensure subscriber row exists (self-healing stub if container restarted)
+        db.execute(
+            "INSERT OR IGNORE INTO subscribers (id, token_hash, webhook_enc, created_at, last_heartbeat) "
+            "VALUES (?, '', '', ?, ?)",
+            (subscriber_id, now, now)
+        )
         cur = db.execute(
             "INSERT INTO commands (subscriber_id, anime_url, anime_title, episodes, status, created_at) "
             "VALUES (?, ?, ?, ?, 'pending', ?)",

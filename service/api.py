@@ -221,18 +221,8 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
             status_code=401
         )
 
-    # Initial auto-queue on first visit
-    cmd_id = store.queue_command(sid, url, title or url, ep or "latest")
-    if cmd_id is None:
-        return Response(
-            content="""<!DOCTYPE html>
-<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
-<style>body{font-family:sans-serif;text-align:center;padding:50px 20px;background:#0b0f19;color:#fff;}.box{background:#151d2a;max-width:400px;margin:auto;padding:30px;border-radius:16px;border:1px solid #233045;}</style></head>
-<body><div class='box'><div style='font-size:40px'>⚠️</div><h2 style='color:#fbbf24;margin:12px 0;'>Session Expired</h2><p style='color:#8899a6;line-height:1.5;'>This link belongs to a previous session. Please open the latest notification from Discord.</p></div></body></html>""",
-            media_type="text/html",
-            status_code=404
-        )
-
+    # Auto-queue download command for PC
+    store.queue_command(sid, url, title or url, ep or "latest")
     is_online = store.is_subscriber_online(sid)
 
     status_badge_class = "badge-online" if is_online else "badge-offline"
