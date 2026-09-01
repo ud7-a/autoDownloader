@@ -410,12 +410,13 @@ def today_key() -> str:
 
 
 def active_day_keys() -> list[str]:
-    """Returns [today, yesterday] in canonical format to account for timezone offsets."""
+    """Returns [today, yesterday, tomorrow] in canonical format to account for timezone offsets across the globe."""
     days = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"]
     idx = (time.gmtime().tm_wday + 2) % 7
     today = days[idx]
     yesterday = days[(idx - 1) % 7]
-    return [today, yesterday]
+    tomorrow = days[(idx + 1) % 7]
+    return [today, yesterday, tomorrow]
 
 
 def run_checker_cycle(batch_limit: int = 50, client: httpx.Client | None = None, today_day: str = None) -> dict:
