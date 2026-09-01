@@ -215,8 +215,12 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
         return Response(
             content="""<!DOCTYPE html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
-<style>body{font-family:sans-serif;text-align:center;padding:50px 20px;background:#0b0f19;color:#fff;}.box{background:#151d2a;max-width:400px;margin:auto;padding:30px;border-radius:16px;border:1px solid #233045;}</style></head>
-<body><div class='box'><div style='font-size:40px'>🔒</div><h2 style='color:#f87171;margin:12px 0;'>Link Expired</h2><p style='color:#8899a6;line-height:1.5;'>This download link has expired or is invalid. Please trigger the action from the newest notification card in Discord.</p></div></body></html>""",
+<title>Link Expired • Auto Episodes Downloader</title>
+<style>
+body{font-family:"Segoe UI Variable","Segoe UI",sans-serif;text-align:center;padding:50px 20px;background:#1e1e1e;color:#ffffff;}
+.box{background:rgba(255,255,255,0.04);max-width:400px;margin:auto;padding:30px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);}
+</style></head>
+<body><div class='box'><div style='font-size:40px'>🔒</div><h2 style='color:#ff4d4d;margin:12px 0;font-weight:600;'>Link Expired</h2><p style='color:#aaaaaa;line-height:1.5;font-size:14px;'>This download link has expired or is invalid. Please trigger the action from the newest notification card in Discord.</p></div></body></html>""",
             media_type="text/html",
             status_code=401
         )
@@ -235,11 +239,15 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{title or 'Anime'} • Auto Episodes Downloader</title>
     <style>
+        /* Matches the desktop app: neutral dark greys (no blue tint), Segoe UI
+           Variable, 6px controls / 8px cards, and the same WinUI 3 accent the
+           Watchlist buttons use -- #4CC2FF with black text, not white. */
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #0b0f19;
-            color: #f3f3f3;
+            font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+            background: #1e1e1e;
+            color: #ffffff;
+            font-size: 14px;
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -247,13 +255,13 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
             padding: 20px;
         }}
         .card {{
-            background: #151d2a;
+            background: #202020;
             width: 100%;
             max-width: 440px;
             padding: 32px 24px;
-            border-radius: 24px;
-            box-shadow: 0 16px 48px rgba(0,0,0,0.6);
-            border: 1px solid #233045;
+            border-radius: 8px;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.08);
             text-align: center;
             animation: fadeIn 0.4s ease-out;
         }}
@@ -261,73 +269,77 @@ def queue_remote_download(sid: str, url: str, title: str = "", ep: str = "", sig
             from {{ opacity: 0; transform: translateY(12px); }}
             to {{ opacity: 1; transform: translateY(0); }}
         }}
+        @media (prefers-reduced-motion: reduce) {{
+            .card {{ animation: none; }}
+            .btn-action {{ transition: none; }}
+        }}
         .icon {{ font-size: 50px; margin-bottom: 8px; }}
-        h1 {{ font-size: 20px; color: #4CC2FF; margin-bottom: 6px; font-weight: 700; }}
+        h1 {{ font-size: 20px; color: #ffffff; margin-bottom: 6px; font-weight: 600; }}
         .anime-title {{ font-size: 17px; font-weight: 600; color: #ffffff; margin: 12px 0 4px; line-height: 1.4; }}
-        .ep-badge {{ font-size: 14px; color: #7db0eb; margin-bottom: 16px; }}
-        
+        .ep-badge {{ font-size: 13px; color: #aaaaaa; margin-bottom: 16px; }}
+
         .status-badge {{
             display: inline-block;
             padding: 8px 18px;
-            border-radius: 20px;
+            border-radius: 6px;
             font-weight: 600;
             font-size: 13px;
             margin: 10px 0 20px;
             transition: all 0.3s;
         }}
-        .badge-online {{ background: rgba(16, 124, 65, 0.25); color: #3cd47b; border: 1px solid #107c41; }}
-        .badge-offline {{ background: rgba(0, 120, 212, 0.25); color: #69b8ff; border: 1px solid #0078d4; }}
+        .badge-online {{ background: rgba(76, 194, 255, 0.15); color: #4CC2FF; border: 1px solid rgba(76, 194, 255, 0.4); }}
+        .badge-offline {{ background: rgba(255, 255, 255, 0.05); color: #aaaaaa; border: 1px solid rgba(255, 255, 255, 0.12); }}
 
         .control-group {{
-            background: #0f1522;
+            background: rgba(255, 255, 255, 0.04);
             padding: 20px;
-            border-radius: 16px;
-            border: 1px solid #1f2a3c;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
             margin: 15px 0;
             text-align: center;
         }}
         .ep-box {{
-            background: #172133;
-            border: 1px solid #2d3e58;
-            border-radius: 12px;
+            background: #2b2b2b;
+            border: 1px solid #444444;
+            border-radius: 5px;
             padding: 12px 16px;
             margin-bottom: 14px;
             display: flex;
             justify-content: space-between;
             align-items: center;
         }}
-        .ep-box-label {{ font-size: 13px; color: #8bb4e7; font-weight: 600; }}
+        .ep-box-label {{ font-size: 13px; color: #aaaaaa; font-weight: 600; }}
         .ep-box-val {{ font-size: 16px; color: #4CC2FF; font-weight: 700; }}
 
         .btn-action {{
             width: 100%;
-            background: #0078d4;
-            color: #ffffff;
-            border: none;
-            border-radius: 14px;
+            background: #4CC2FF;
+            color: #000000;
+            border: 1px solid #4CC2FF;
+            border-radius: 6px;
             padding: 15px 20px;
+            font-family: inherit;
             font-size: 15px;
             font-weight: 700;
             cursor: pointer;
             transition: all 0.2s;
-            box-shadow: 0 4px 16px rgba(0, 120, 212, 0.35);
         }}
-        .btn-action:hover {{ background: #1a88e0; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0, 120, 212, 0.5); }}
-        .btn-action:active {{ transform: translateY(1px); }}
-        .btn-action:disabled {{ background: #334255; cursor: not-allowed; box-shadow: none; }}
+        .btn-action:hover {{ background: #48B2E9; border-color: #48B2E9; }}
+        .btn-action:active {{ background: #43A2D2; border-color: #43A2D2; }}
+        .btn-action:disabled {{ background: #2D2D2D; border-color: #2D2D2D; color: #888888; cursor: not-allowed; }}
 
         .feedback-box {{
             margin-top: 16px;
             padding: 12px;
-            border-radius: 12px;
+            border-radius: 6px;
             font-size: 13px;
             display: none;
             line-height: 1.4;
         }}
-        .feedback-success {{ background: rgba(16, 124, 65, 0.2); color: #4ade80; border: 1px solid #107c41; }}
-        .feedback-error {{ background: rgba(220, 38, 38, 0.2); color: #f87171; border: 1px solid #dc2626; }}
+        .feedback-success {{ background: rgba(76, 194, 255, 0.12); color: #4CC2FF; border: 1px solid rgba(76, 194, 255, 0.35); }}
+        .feedback-error {{ background: rgba(255, 77, 77, 0.12); color: #ff4d4d; border: 1px solid rgba(255, 77, 77, 0.35); }}
 
-        .note {{ font-size: 12px; color: #738499; margin-top: 22px; line-height: 1.5; }}
+        .note {{ font-size: 12px; color: #aaaaaa; margin-top: 22px; line-height: 1.5; }}
     </style>
 </head>
 <body>

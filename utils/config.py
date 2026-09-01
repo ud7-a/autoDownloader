@@ -198,14 +198,66 @@ def cloud_register_and_sync(service_url: str = None, webhook_url: str = None) ->
         app_settings["cloud_notify_enabled"] = True
     save_config()
 
-    # 2. Sync watchlist immediately
-    ok, msg = cloud_sync_watchlist()
+    # 2. Sync watchlist immediately. Recovery is disabled for this call: we have just
+    #    registered, so a 401 here is not something re-registering again would fix.
+    ok, msg = cloud_sync_watchlist(_allow_recovery=False)
     if not ok:
         return True, f"Registered on cloud, but initial sync had an issue: {msg}"
     return True, f"Successfully registered and synced {len(get_watchlist())} anime with cloud service!"
 
-def cloud_sync_watchlist() -> tuple[bool, str]:
-    """Pushes the current watchlist to the registered cloud service."""
+
+def cloud_recover_identity() -> bool:
+    """Re-register after the service has forgotten us, returning whether it worked.
+
+    The service can lose its database. Recovery is a plain re-registration: subscriber
+    ids are derived from the webhook, so registering again with the same webhook
+    returns the same identity and a fresh token. Possession of the webhook is the
+    proof -- the server must never simply believe an id it is handed.
+    """
+    with config_lock:
+        s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
+        wh_url = app_settings.get("discord_webhook") or ""
+    if not s_url or not wh_url:
+        return False
+    ok, _msg = cloud_register_and_sync(s_url, wh_url)
+    return bool(ok)
+
+
+def cloud_request_with_recovery(do_request):
+    """Run a service call; on 401, re-register once and try again.
+
+    `do_request` takes (subscriber_id, token) and raises urllib.error.HTTPError on a
+    non-2xx response. A 401 means the service no longer knows us -- almost always
+    because it lost its database -- so we prove who we are and retry exactly once.
+    There is no second retry: if re-registration succeeded and the call is still
+    rejected, the problem is not identity, and looping would hide it.
+    """
+    import urllib.error
+
+    with config_lock:
+        sid = app_settings.get("cloud_subscriber_id") or ""
+        token = app_settings.get("cloud_token") or ""
+    try:
+        return do_request(sid, token)
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+    if not cloud_recover_identity():
+        raise RuntimeError("cloud service rejected our credentials and re-registration failed")
+    with config_lock:
+        sid = app_settings.get("cloud_subscriber_id") or ""
+        token = app_settings.get("cloud_token") or ""
+    return do_request(sid, token)
+
+
+def cloud_sync_watchlist(_allow_recovery: bool = True) -> tuple[bool, str]:
+    """Pushes the current watchlist to the registered cloud service.
+
+    `_allow_recovery` exists to break a cycle: a 401 here triggers re-registration,
+    and registration finishes by syncing the watchlist. Without the guard a service
+    that keeps answering 401 would drive sync -> register -> sync -> register with no
+    limit. cloud_register_and_sync passes False for exactly that reason.
+    """
     import urllib.request
     import urllib.error
 
@@ -242,11 +294,13 @@ def cloud_sync_watchlist() -> tuple[bool, str]:
             count = data.get("following", len(items))
             return True, f"Synced {count} anime to cloud service"
     except urllib.error.HTTPError as he:
-        if he.code in (401, 404):
-            # Server restarted or database was refreshed: auto-re-register seamlessly
-            wh = app_settings.get("discord_webhook", "")
-            if wh:
-                return cloud_register_and_sync(s_url, wh)
+        if he.code in (401, 404) and _allow_recovery:
+            # The service no longer knows us -- almost always because it lost its
+            # database. Prove who we are by re-registering with the webhook; that
+            # call syncs the watchlist itself, so there is nothing to retry here.
+            if cloud_recover_identity():
+                return True, "Re-registered with the cloud service and synced"
+            return False, "Cloud rejected our credentials and re-registration failed"
         return False, f"Cloud sync failed: HTTP {he.code}"
     except Exception as e:
         return False, f"Cloud sync failed: {e}"
@@ -331,22 +385,23 @@ def cloud_send_heartbeat() -> bool:
     import urllib.request
     with config_lock:
         s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
-        sub_id = app_settings.get("cloud_subscriber_id")
-        token = app_settings.get("cloud_token")
-
-    if not (s_url and sub_id and token):
+    if not s_url:
         return False
 
-    endpoint = f"{s_url}/v1/subscribers/{sub_id}/heartbeat"
-    req = urllib.request.Request(
-        endpoint,
-        data=b"{}",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-        method="POST"
-    )
-    try:
+    def _send(sub_id, token):
+        if not (sub_id and token):
+            raise RuntimeError("not registered with the cloud service")
+        req = urllib.request.Request(
+            f"{s_url}/v1/subscribers/{sub_id}/heartbeat",
+            data=b"{}",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="POST"
+        )
         with urllib.request.urlopen(req, timeout=5):
             return True
+
+    try:
+        return cloud_request_with_recovery(_send)
     except Exception:
         return False
 
@@ -356,21 +411,22 @@ def cloud_fetch_commands() -> list[dict]:
     import urllib.request
     with config_lock:
         s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
-        sub_id = app_settings.get("cloud_subscriber_id")
-        token = app_settings.get("cloud_token")
-
-    if not (s_url and sub_id and token):
+    if not s_url:
         return []
 
-    endpoint = f"{s_url}/v1/subscribers/{sub_id}/commands"
-    req = urllib.request.Request(
-        endpoint,
-        headers={"Authorization": f"Bearer {token}"}
-    )
-    try:
+    def _fetch(sub_id, token):
+        if not (sub_id and token):
+            raise RuntimeError("not registered with the cloud service")
+        req = urllib.request.Request(
+            f"{s_url}/v1/subscribers/{sub_id}/commands",
+            headers={"Authorization": f"Bearer {token}"}
+        )
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data.get("commands", [])
+
+    try:
+        return cloud_request_with_recovery(_fetch)
     except Exception:
         return []
 
@@ -380,22 +436,23 @@ def cloud_ack_command(command_id: int) -> bool:
     import urllib.request
     with config_lock:
         s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
-        sub_id = app_settings.get("cloud_subscriber_id")
-        token = app_settings.get("cloud_token")
-
-    if not (s_url and sub_id and token):
+    if not s_url:
         return False
 
-    endpoint = f"{s_url}/v1/subscribers/{sub_id}/commands/{command_id}/ack"
-    req = urllib.request.Request(
-        endpoint,
-        data=b"{}",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-        method="POST"
-    )
-    try:
+    def _ack(sub_id, token):
+        if not (sub_id and token):
+            raise RuntimeError("not registered with the cloud service")
+        req = urllib.request.Request(
+            f"{s_url}/v1/subscribers/{sub_id}/commands/{command_id}/ack",
+            data=b"{}",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="POST"
+        )
         with urllib.request.urlopen(req, timeout=5):
             return True
+
+    try:
+        return cloud_request_with_recovery(_ack)
     except Exception:
         return False
 

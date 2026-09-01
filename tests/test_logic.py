@@ -775,6 +775,167 @@ class WatchlistTodayFilterTests(unittest.TestCase):
         self.assertIn(_today_key(), DAY_ORDER)
 
 
+class CloudRecoveryTests(unittest.TestCase):
+    """The service can lose its database. Recovery is a re-registration proving
+    possession of the webhook -- never the server trusting whatever id it is handed."""
+
+    def setUp(self):
+        from utils import config
+        self.config = config
+        with config.config_lock:
+            self.saved = dict(config.app_settings)
+
+    def tearDown(self):
+        with self.config.config_lock:
+            self.config.app_settings.clear()
+            self.config.app_settings.update(self.saved)
+
+    def test_recovery_needs_a_stored_webhook(self):
+        with self.config.config_lock:
+            self.config.app_settings["discord_webhook"] = ""
+            self.config.app_settings["cloud_service_url"] = "https://example.invalid"
+        self.assertFalse(self.config.cloud_recover_identity())
+
+    def test_recovery_needs_a_service_url(self):
+        with self.config.config_lock:
+            self.config.app_settings["discord_webhook"] = "https://discord.com/api/webhooks/1/aaaa"
+            self.config.app_settings["cloud_service_url"] = ""
+        self.assertFalse(self.config.cloud_recover_identity())
+
+    def test_recovery_re_registers_and_keeps_the_new_credentials(self):
+        calls = []
+
+        def fake_register(service_url=None, webhook_url=None):
+            calls.append((service_url, webhook_url))
+            with self.config.config_lock:
+                self.config.app_settings["cloud_subscriber_id"] = "new-id"
+                self.config.app_settings["cloud_token"] = "new-token"
+            return True, "registered"
+
+        original = self.config.cloud_register_and_sync
+        self.config.cloud_register_and_sync = fake_register
+        try:
+            with self.config.config_lock:
+                self.config.app_settings["discord_webhook"] = "https://discord.com/api/webhooks/1/aaaa"
+                self.config.app_settings["cloud_service_url"] = "https://example.invalid"
+                self.config.app_settings["cloud_subscriber_id"] = "stale-id"
+            self.assertTrue(self.config.cloud_recover_identity())
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(self.config.app_settings["cloud_subscriber_id"], "new-id")
+        finally:
+            self.config.cloud_register_and_sync = original
+
+    def test_a_failed_re_registration_reports_false(self):
+        original = self.config.cloud_register_and_sync
+        self.config.cloud_register_and_sync = lambda service_url=None, webhook_url=None: (False, "down")
+        try:
+            with self.config.config_lock:
+                self.config.app_settings["discord_webhook"] = "https://discord.com/api/webhooks/1/aaaa"
+                self.config.app_settings["cloud_service_url"] = "https://example.invalid"
+            self.assertFalse(self.config.cloud_recover_identity())
+        finally:
+            self.config.cloud_register_and_sync = original
+
+
+class CloudRetryTests(unittest.TestCase):
+    """One retry, only on 401, only after proving who we are."""
+
+    def setUp(self):
+        from utils import config
+        self.config = config
+        with config.config_lock:
+            self.saved = dict(config.app_settings)
+            config.app_settings["cloud_subscriber_id"] = "old-id"
+            config.app_settings["cloud_token"] = "old-token"
+        self.original_recover = config.cloud_recover_identity
+
+    def tearDown(self):
+        self.config.cloud_recover_identity = self.original_recover
+        with self.config.config_lock:
+            self.config.app_settings.clear()
+            self.config.app_settings.update(self.saved)
+
+    def http_error(self, code):
+        import urllib.error
+        return urllib.error.HTTPError("https://example.invalid", code, "err", None, None)
+
+    def test_a_successful_call_does_not_recover(self):
+        recovered = []
+        self.config.cloud_recover_identity = lambda: recovered.append(1) or True
+        seen = []
+        result = self.config.cloud_request_with_recovery(
+            lambda sid, token: seen.append((sid, token)) or "done")
+        self.assertEqual(result, "done")
+        self.assertEqual(recovered, [])
+        self.assertEqual(seen, [("old-id", "old-token")])
+
+    def test_a_401_recovers_once_and_retries_with_new_credentials(self):
+        def recover():
+            with self.config.config_lock:
+                self.config.app_settings["cloud_subscriber_id"] = "new-id"
+                self.config.app_settings["cloud_token"] = "new-token"
+            return True
+        self.config.cloud_recover_identity = recover
+
+        calls = []
+
+        def do_request(sid, token):
+            calls.append((sid, token))
+            if len(calls) == 1:
+                raise self.http_error(401)
+            return "ok"
+
+        self.assertEqual(self.config.cloud_request_with_recovery(do_request), "ok")
+        self.assertEqual(calls, [("old-id", "old-token"), ("new-id", "new-token")])
+
+    def test_a_non_401_error_propagates_without_recovering(self):
+        import urllib.error
+        recovered = []
+        self.config.cloud_recover_identity = lambda: recovered.append(1) or True
+
+        def do_request(sid, token):
+            raise self.http_error(500)
+
+        with self.assertRaises(urllib.error.HTTPError):
+            self.config.cloud_request_with_recovery(do_request)
+        self.assertEqual(recovered, [], "a 500 is not an identity problem")
+
+    def test_a_failed_recovery_raises_rather_than_retrying_blindly(self):
+        self.config.cloud_recover_identity = lambda: False
+        calls = []
+
+        def do_request(sid, token):
+            calls.append(1)
+            raise self.http_error(401)
+
+        with self.assertRaises(RuntimeError):
+            self.config.cloud_request_with_recovery(do_request)
+        self.assertEqual(len(calls), 1, "must not retry when re-registration failed")
+
+    def test_it_retries_only_once(self):
+        self.config.cloud_recover_identity = lambda: True
+        calls = []
+
+        def do_request(sid, token):
+            calls.append(1)
+            raise self.http_error(401)
+
+        with self.assertRaises(Exception):
+            self.config.cloud_request_with_recovery(do_request)
+        self.assertEqual(len(calls), 2, "one original attempt plus exactly one retry")
+
+    def test_sync_cannot_recurse_through_registration(self):
+        """A 401 during sync re-registers, and registration syncs again. Without the
+        guard a service stuck on 401 would drive that loop forever."""
+        import inspect
+        sig = inspect.signature(self.config.cloud_sync_watchlist)
+        self.assertIn("_allow_recovery", sig.parameters)
+        self.assertTrue(sig.parameters["_allow_recovery"].default)
+        source = inspect.getsource(self.config.cloud_register_and_sync)
+        self.assertIn("_allow_recovery=False", source,
+                      "registration must disable recovery on its own sync call")
+
+
 class ScipyDeferralTests(unittest.TestCase):
     """scipy is excluded from the frozen build (48 MB that never executes), so in the
     packaged app the lazy import cannot be satisfied. Blur is decoration; losing it
