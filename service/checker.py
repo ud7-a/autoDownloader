@@ -65,7 +65,20 @@ def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> 
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
     }
-    
+
+    # Try curl_cffi first to bypass Cloudflare TLS fingerprint blocks on datacenter IPs
+    try:
+        from curl_cffi import requests as cffi_requests
+        r = cffi_requests.get(anime_url, headers=headers, impersonate="chrome124", timeout=20.0)
+        if r.status_code == 200:
+            eps = extract_episodes_from_html(r.text, anime_url)
+            return max(eps) if eps else 0
+        elif r.status_code != 403:
+            logger.warning(f"curl_cffi fetch {anime_url} returned HTTP {r.status_code}")
+    except Exception as e:
+        logger.debug(f"curl_cffi fetch attempt failed: {e}")
+
+    # Fallback to standard httpx
     close_client = False
     if client is None:
         client = httpx.Client(follow_redirects=True, timeout=20.0, verify=False)

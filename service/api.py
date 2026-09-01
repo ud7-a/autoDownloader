@@ -106,19 +106,34 @@ def test_scrape(url: str):
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
     }
-    with httpx.Client(follow_redirects=True, timeout=20.0, verify=False) as client:
-        try:
-            r = client.get(url, headers=headers)
-            eps = checker.extract_episodes_from_html(r.text, url)
-            return {
-                "status_code": r.status_code,
-                "html_len": len(r.text),
-                "episodes_found": eps,
-                "max_episode": max(eps) if eps else 0,
-                "preview": r.text[:300]
-            }
-        except Exception as e:
-            return {"error": str(e)}
+    try:
+        from curl_cffi import requests as cffi_requests
+        r = cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=20.0)
+        eps = checker.extract_episodes_from_html(r.text, url)
+        return {
+            "fetcher": "curl_cffi",
+            "status_code": r.status_code,
+            "html_len": len(r.text),
+            "episodes_found": eps,
+            "max_episode": max(eps) if eps else 0,
+            "preview": r.text[:300]
+        }
+    except Exception as e:
+        with httpx.Client(follow_redirects=True, timeout=20.0, verify=False) as client:
+            try:
+                r = client.get(url, headers=headers)
+                eps = checker.extract_episodes_from_html(r.text, url)
+                return {
+                    "fetcher": "httpx_fallback",
+                    "cffi_error": str(e),
+                    "status_code": r.status_code,
+                    "html_len": len(r.text),
+                    "episodes_found": eps,
+                    "max_episode": max(eps) if eps else 0,
+                    "preview": r.text[:300]
+                }
+            except Exception as e2:
+                return {"error": str(e2)}
 
 
 @app.post("/v1/subscribers", status_code=201)
