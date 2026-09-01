@@ -58,6 +58,47 @@ def extract_episodes_from_html(html: str, base_url: str = "") -> list[int]:
     return sorted(episodes)
 
 
+def fetch_with_playwright(anime_url: str, timeout_seconds: float = 25.0) -> int:
+    """Uses headless Playwright Chromium to execute JavaScript, solve Cloudflare Turnstile challenges,
+    and extract episode counts.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ]
+            )
+            context = browser.new_context(
+                user_agent=DEFAULT_USER_AGENT,
+                viewport={"width": 1280, "height": 800},
+                locale="en-US,ar",
+            )
+            try:
+                from playwright_stealth import stealth_sync
+                page = context.new_page()
+                stealth_sync(page)
+            except Exception:
+                page = context.new_page()
+
+            page.goto(anime_url, timeout=int(timeout_seconds * 1000), wait_until="domcontentloaded")
+            # Wait a few seconds for Cloudflare challenge redirect or openEpisode anchors to render
+            page.wait_for_timeout(3500)
+            html = page.content()
+            browser.close()
+
+            eps = extract_episodes_from_html(html, anime_url)
+            return max(eps) if eps else 0
+    except Exception as e:
+        logger.warning(f"Playwright fetch failed for {anime_url}: {e}")
+        return 0
+
+
 def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> int:
     """Fetches anime page and returns the highest episode number detected (0 if none found)."""
     headers = {
@@ -66,37 +107,37 @@ def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> 
         "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
     }
 
-    # Try curl_cffi first to bypass Cloudflare TLS fingerprint blocks on datacenter IPs
+    # 1. Try curl_cffi first (fastest)
     try:
         from curl_cffi import requests as cffi_requests
-        r = cffi_requests.get(anime_url, headers=headers, impersonate="chrome124", timeout=20.0)
+        r = cffi_requests.get(anime_url, headers=headers, impersonate="chrome124", timeout=15.0)
         if r.status_code == 200:
             eps = extract_episodes_from_html(r.text, anime_url)
-            return max(eps) if eps else 0
-        elif r.status_code != 403:
-            logger.warning(f"curl_cffi fetch {anime_url} returned HTTP {r.status_code}")
+            if eps:
+                return max(eps)
     except Exception as e:
         logger.debug(f"curl_cffi fetch attempt failed: {e}")
 
-    # Fallback to standard httpx
+    # 2. Try standard httpx
     close_client = False
     if client is None:
-        client = httpx.Client(follow_redirects=True, timeout=20.0, verify=False)
+        client = httpx.Client(follow_redirects=True, timeout=15.0, verify=False)
         close_client = True
 
     try:
         r = client.get(anime_url, headers=headers)
-        if r.status_code != 200:
-            logger.warning(f"Failed to fetch {anime_url} - HTTP {r.status_code}")
-            return 0
-        eps = extract_episodes_from_html(r.text, anime_url)
-        return max(eps) if eps else 0
+        if r.status_code == 200:
+            eps = extract_episodes_from_html(r.text, anime_url)
+            if eps:
+                return max(eps)
     except Exception as e:
-        logger.error(f"Error checking {anime_url}: {e}")
-        return 0
+        logger.debug(f"httpx fetch failed: {e}")
     finally:
         if close_client:
             client.close()
+
+    # 3. Fallback to Headless Playwright Chromium to solve Cloudflare Turnstile JS challenges
+    return fetch_with_playwright(anime_url)
 
 
 def create_discord_embed(anime_title: str, anime_url: str, episode_num: int) -> dict:

@@ -9,7 +9,6 @@ import os
 import threading
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
-import httpx
 from pydantic import BaseModel, field_validator
 
 from service import checker, crypto, store
@@ -101,39 +100,12 @@ def trigger_check():
 @app.get("/v1/test_scrape")
 def test_scrape(url: str):
     """Debug endpoint to inspect scraper results directly from Render."""
-    headers = {
-        "User-Agent": checker.DEFAULT_USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+    max_ep = checker.fetch_latest_episode(url)
+    return {
+        "url": url,
+        "max_episode": max_ep,
+        "status": "success" if max_ep > 0 else "no_episodes_or_blocked"
     }
-    try:
-        from curl_cffi import requests as cffi_requests
-        r = cffi_requests.get(url, headers=headers, impersonate="chrome124", timeout=20.0)
-        eps = checker.extract_episodes_from_html(r.text, url)
-        return {
-            "fetcher": "curl_cffi",
-            "status_code": r.status_code,
-            "html_len": len(r.text),
-            "episodes_found": eps,
-            "max_episode": max(eps) if eps else 0,
-            "preview": r.text[:300]
-        }
-    except Exception as e:
-        with httpx.Client(follow_redirects=True, timeout=20.0, verify=False) as client:
-            try:
-                r = client.get(url, headers=headers)
-                eps = checker.extract_episodes_from_html(r.text, url)
-                return {
-                    "fetcher": "httpx_fallback",
-                    "cffi_error": str(e),
-                    "status_code": r.status_code,
-                    "html_len": len(r.text),
-                    "episodes_found": eps,
-                    "max_episode": max(eps) if eps else 0,
-                    "preview": r.text[:300]
-                }
-            except Exception as e2:
-                return {"error": str(e2)}
 
 
 @app.post("/v1/subscribers", status_code=201)

@@ -1,9 +1,9 @@
-# Multi-stage Dockerfile for Auto Episodes Downloader Cloud Notification Service
+# Cloud Notification Microservice with Headless Playwright Chromium for Cloudflare Bypass
 FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system utilities and SSL certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Python dependencies
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright Chromium and required OS browser dependencies
+RUN playwright install --with-deps chromium
 
 # Copy service codebase
 COPY . /app/service
