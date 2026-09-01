@@ -151,7 +151,17 @@ if __name__ == "__main__":
     _startup_mark("ui.app_window imported")
     window = AppWindow(autostart_commands=initial_commands)
     _startup_mark("AppWindow built")
-    window.show()
+    window.showNormal()
+    window.raise_()
+    window.activateWindow()
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            hwnd = int(window.winId())
+            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
     _startup_mark("window shown")
 
     # Check for updates in the background ONLY after the window is fully initialized and listening!

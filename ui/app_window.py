@@ -261,10 +261,19 @@ class AppWindow(FluentWindow):
         self.tray_icon.show()
 
     def _restore_from_tray(self):
-        self.show()
+        self.showNormal()
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
         self.activateWindow()
         self.raise_()
+        import sys
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                hwnd = int(self.winId())
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE = 9
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
 
     def _on_tray_activated(self, reason):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
@@ -291,14 +300,31 @@ class AppWindow(FluentWindow):
         from utils.config import cloud_ack_command, get_watchlist
         from qfluentwidgets import InfoBar, InfoBarPosition
 
+        if not hasattr(self, "_processed_cmd_ids"):
+            self._processed_cmd_ids = set()
+
+        # Immediately ACK commands to Render so future polls never see them
+        new_commands = []
+        for cmd in commands:
+            cmd_id = cmd.get("id")
+            if cmd_id:
+                cloud_ack_command(cmd_id)
+            if cmd_id and cmd_id in self._processed_cmd_ids:
+                continue
+            if cmd_id:
+                self._processed_cmd_ids.add(cmd_id)
+            new_commands.append(cmd)
+
+        if not new_commands:
+            return
+
         self._restore_from_tray()
         self.switchTo(self.downloader_interface)
 
         # Deduplicate incoming commands to prevent multiple identical downloads
         seen_keys = set()
         items_to_download = []
-        for cmd in commands:
-            cmd_id = cmd.get("id")
+        for cmd in new_commands:
             url = cmd.get("anime_url", "")
             title = cmd.get("anime_title", "")
             ep_spec = str(cmd.get("episodes", "1"))
@@ -315,9 +341,6 @@ class AppWindow(FluentWindow):
                 if not template:
                     template = url
                 items_to_download.append((title or url, template, domain, 0, ep_spec))
-
-            if cmd_id:
-                cloud_ack_command(cmd_id)
 
         if items_to_download:
             InfoBar.success(
