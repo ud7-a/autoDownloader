@@ -702,7 +702,9 @@ class WatchlistWidget(QWidget):
         self.btn_check_all.setEnabled(True)
         self.refresh_schedule()   # days can change between seasons, so re-read them
         if total_new > 0:
-            _play_notify_sound()
+            # Only play local new-episode chime if cloud notification is off and no download is active
+            if not app_settings.get("cloud_notify_enabled") and not getattr(self.window(), "progress_added", False):
+                _play_notify_sound()
             # Bring the user straight here so the new episodes are actually seen.
             self.new_episodes_found.emit(total_new)
             InfoBar.success(

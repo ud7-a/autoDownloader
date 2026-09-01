@@ -148,7 +148,10 @@ def launch_main_app():
     log(f"Launching main app from {base_dir}...")
     if getattr(sys, "frozen", False):
         exe = sys.executable
-        subprocess.Popen([exe], cwd=os.path.dirname(exe))
+        try:
+            os.startfile(exe)
+        except Exception:
+            subprocess.Popen([exe], cwd=os.path.dirname(exe))
     else:
         main_py = os.path.join(base_dir, "main.py")
         python_exe = sys.executable
@@ -156,7 +159,11 @@ def launch_main_app():
             python_reg = os.path.join(os.path.dirname(python_exe), "python.exe")
             if os.path.exists(python_reg):
                 python_exe = python_reg
-        subprocess.Popen([python_exe, main_py], cwd=base_dir)
+        try:
+            # os.startfile invokes ShellExecute directly on the interactive Windows desktop
+            os.startfile(main_py)
+        except Exception:
+            subprocess.Popen([python_exe, main_py], cwd=base_dir)
     log("Main app subprocess spawned!")
 
 
