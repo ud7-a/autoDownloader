@@ -132,27 +132,59 @@ if __name__ == "__main__":
 
     # Acquire Windows Named Mutex so only ONE GUI instance ever runs
     import ctypes
+    from ctypes import wintypes
     _main_app_mutex = None
     if sys.platform == "win32":
         ERROR_ALREADY_EXISTS = 183
-        _main_app_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\AED_Main_App_Running_Mutex")
-        if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        # Every signature below is declared explicitly. The callback used to be
+        # WINFUNCTYPE(c_bool, ...) while EnumWindowsProc returns BOOL -- a 4-byte int,
+        # not a 1-byte bool. Returning the wrong width corrupted the stack, so opening
+        # the app while it was already running killed the second instance with
+        # STATUS_STACK_BUFFER_OVERRUN (0xC0000409) instead of focusing the first.
+        # Handles are pointer-sized too: without a restype, ctypes truncates them to
+        # 32 bits on a 64-bit build.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+
+        _main_app_mutex = kernel32.CreateMutexW(None, False, "Local\\AED_Main_App_Running_Mutex")
+        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
             # Another instance is already running -> bring it to front and exit
             try:
-                @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-                def _enum_win_cb(hwnd, _):
-                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                ENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+                user32.EnumWindows.argtypes = [ENUMPROC, wintypes.LPARAM]
+                user32.EnumWindows.restype = wintypes.BOOL
+                user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+                user32.GetWindowTextLengthW.restype = ctypes.c_int
+                user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+                user32.GetWindowTextW.restype = ctypes.c_int
+                for _fn in ("ShowWindow", "BringWindowToTop", "SetForegroundWindow", "SwitchToThisWindow"):
+                    getattr(user32, _fn).restype = wintypes.BOOL
+                user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+                user32.BringWindowToTop.argtypes = [wintypes.HWND]
+                user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+                user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+
+                def _enum_win_cb(hwnd, _lparam):
+                    length = user32.GetWindowTextLengthW(hwnd)
                     if length > 0:
                         buf = ctypes.create_unicode_buffer(length + 1)
-                        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                        user32.GetWindowTextW(hwnd, buf, length + 1)
+                        # The title carries the version ("... | Version 4.4.0"), so match
+                        # on the prefix rather than the whole string.
                         if buf.value.startswith("Auto Episodes Downloader"):
-                            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                            ctypes.windll.user32.BringWindowToTop(hwnd)
-                            ctypes.windll.user32.SetForegroundWindow(hwnd)
-                            ctypes.windll.user32.SwitchToThisWindow(hwnd, True)
-                            return False
+                            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                            user32.BringWindowToTop(hwnd)
+                            user32.SetForegroundWindow(hwnd)
+                            user32.SwitchToThisWindow(hwnd, True)
+                            return False   # found it; stop enumerating
                     return True
-                ctypes.windll.user32.EnumWindows(_enum_win_cb, 0)
+
+                # Held in a local so the trampoline cannot be collected mid-enumeration.
+                _cb = ENUMPROC(_enum_win_cb)
+                user32.EnumWindows(_cb, 0)
             except Exception:
                 pass
             sys.exit(0)
