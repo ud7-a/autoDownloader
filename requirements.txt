@@ -7,3 +7,4 @@ py7zr==1.1.0                # extracting .7z episode archives
 rarfile==4.2                # extracting .rar episode archives
 pillow==12.1.0              # multi-resolution .ico generation
 scipy==1.17.1               # imported by qfluentwidgets (deferred at startup)
+psutil==7.2.2               # core/watcher.py: detects a running app/watcher instance

@@ -43,6 +43,12 @@ APP_FLAGS = [
     # Imported inside core.extensions.load_into (browser-level CDP call that installs
     # the ad blocker), so name it explicitly rather than rely on static analysis.
     "--hidden-import", "websocket",
+    # core/watcher.py needs psutil to spot a running app or watcher. The shipped build
+    # only contained it because the machine that built it happened to have psutil
+    # installed -- CI installs exactly what requirements.txt declares, so a CI-built
+    # release would have shipped a watcher that dies on import, silently disabling
+    # remote downloads for every user.
+    "--hidden-import", "psutil",
     "--exclude-module", "PyQt5",
     # Trim packages installed in the dev environment but never imported by the app.
     # Every extra file costs launch time (disk I/O + antivirus scanning).
