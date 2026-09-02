@@ -1,9 +1,10 @@
 import os
-import tempfile
 import unittest
 
-os.environ.setdefault("AED_NOTIFY_DB",
-                      os.path.join(tempfile.gettempdir(), "aed-notify-tests", "notify.db"))
+# Isolation is by schema: reset_for_tests() refuses to touch "public". Set here as
+# well as in __init__.py because `unittest discover -s service/tests` imports these as
+# top-level modules, so the package __init__ never runs.
+os.environ.setdefault("AED_NOTIFY_SCHEMA", "aed_test")
 os.environ.setdefault("AED_NOTIFY_KEY", "bXl0ZXN0a2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM=")
 
 from fastapi.testclient import TestClient

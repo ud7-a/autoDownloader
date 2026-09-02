@@ -1,11 +1,12 @@
 import base64
 import os
-import tempfile
 import unittest
 from unittest.mock import patch
 
-os.environ.setdefault("AED_NOTIFY_DB",
-                      os.path.join(tempfile.gettempdir(), "aed-notify-tests", "notify.db"))
+# Isolation is by schema: reset_for_tests() refuses to touch "public". Set here as
+# well as in __init__.py because `unittest discover -s service/tests` imports these as
+# top-level modules, so the package __init__ never runs.
+os.environ.setdefault("AED_NOTIFY_SCHEMA", "aed_test")
 os.environ.setdefault("AED_NOTIFY_KEY", "bXl0ZXN0a2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM=")
 
 from service import checker, store
@@ -105,7 +106,7 @@ class CheckerProcessingTests(unittest.TestCase):
 
         # Verify notified_max was advanced to 25
         with store.get_db() as db:
-            notif_max = db.execute("SELECT notified_max FROM follows WHERE subscriber_id=?", (sid,)).fetchone()[0]
+            notif_max = db.execute("SELECT notified_max FROM follows WHERE subscriber_id=%s", (sid,)).fetchone()[0]
             self.assertEqual(notif_max, 25)
 
     @patch("service.checker.send_discord_notification")

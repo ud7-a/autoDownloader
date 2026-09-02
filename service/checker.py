@@ -365,7 +365,7 @@ def process_anime(anime: dict, client: httpx.Client | None = None) -> int:
         # to establish the baseline without spamming back-catalogues
         store.update_anime_progress(anime_url, current_max)
         with store.get_db() as db:
-            db.execute("UPDATE follows SET notified_max = ? WHERE anime_url = ? AND notified_max = 0",
+            db.execute("UPDATE follows SET notified_max = %s WHERE anime_url = %s AND notified_max = 0",
                        (current_max, anime_url))
         return 0
 

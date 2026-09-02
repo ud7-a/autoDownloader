@@ -3,21 +3,27 @@ services:
     name: aed-notification-service
     env: docker
     dockerfilePath: service/Dockerfile
-    # A plan with a persistent disk is required. Free instances have no disk and sleep
-    # when idle, so /tmp was wiped on every restart -- that data loss is what the
-    # removed auto-provisioning in store.authenticate existed to paper over, and it
-    # accepted any id and token of roughly the right shape to do it. Sleeping
-    # instances also mean the periodic checker does not reliably run.
-    plan: starter
+    # Free instances have no persistent disk, so the database lives in a hosted
+    # Postgres instead of on the container. That is what removed the need for the
+    # auto-provisioning in store.authenticate, which accepted any id and token of
+    # roughly the right shape because /tmp was wiped on every restart.
+    #
+    # A free instance also sleeps when idle and runs no scheduler, so the check cycle
+    # is driven by .github/workflows/cloud-checker.yml every 10 minutes. That interval
+    # is under Render's ~15 minute idle timeout, which keeps the service awake and
+    # stops the Discord download button cold-starting for 30-60s.
+    plan: free
     region: frankfurt
-    disk:
-      name: aed-notify-data
-      mountPath: /data
-      sizeGB: 1
     envVars:
-      # Set by hand, once. Not generated: see the warning in service/README.md --
-      # losing this key makes every stored webhook permanently undecryptable.
+      # `key` is the NAME of the environment variable, never its value. `sync: false`
+      # means Render does not store a value here -- you paste it into the Render
+      # dashboard once. Putting real values in this file would publish them: this
+      # repository is public and this file is tracked.
+      #
+      # AED_NOTIFY_KEY encrypts every stored Discord webhook. Keep a copy somewhere
+      # outside Render; losing it makes them all permanently undecryptable.
       - key: AED_NOTIFY_KEY
         sync: false
-      - key: AED_NOTIFY_DB
-        value: /data/notify.db
+      # Connection string for the hosted Postgres, e.g. Supabase or Neon.
+      - key: DATABASE_URL
+        sync: false

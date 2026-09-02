@@ -1,9 +1,10 @@
 import os
-import tempfile
 import unittest
 
-os.environ.setdefault("AED_NOTIFY_DB",
-                      os.path.join(tempfile.gettempdir(), "aed-notify-tests", "notify.db"))
+# Isolation is by schema: reset_for_tests() refuses to touch "public". Set here as
+# well as in __init__.py because `unittest discover -s service/tests` imports these as
+# top-level modules, so the package __init__ never runs.
+os.environ.setdefault("AED_NOTIFY_SCHEMA", "aed_test")
 os.environ.setdefault("AED_NOTIFY_KEY", "bXl0ZXN0a2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM=")
 
 from service import store
@@ -36,11 +37,11 @@ class AuthenticationBypassTests(unittest.TestCase):
         it. Such rows exist from earlier auto-provisioning."""
         sid, _ = store.create_subscriber(URL)
         with store.get_db() as db:
-            db.execute("UPDATE subscribers SET token_hash='' WHERE id=?", (sid,))
+            db.execute("UPDATE subscribers SET token_hash='' WHERE id=%s", (sid,))
         self.assertFalse(store.authenticate(sid, "g" * 40))
         with store.get_db() as db:
             self.assertEqual(
-                db.execute("SELECT token_hash FROM subscribers WHERE id=?", (sid,)).fetchone()[0], "")
+                db.execute("SELECT token_hash FROM subscribers WHERE id=%s", (sid,)).fetchone()[0], "")
 
     def test_a_real_subscriber_still_authenticates(self):
         sid, token = store.create_subscriber(URL)
@@ -78,13 +79,13 @@ class SubscriberStoreTests(unittest.TestCase):
         hand over everyone's Discord channels."""
         sid, _ = store.create_subscriber(URL)
         with store.get_db() as db:
-            raw = db.execute("SELECT webhook_enc FROM subscribers WHERE id=?", (sid,)).fetchone()[0]
+            raw = db.execute("SELECT webhook_enc FROM subscribers WHERE id=%s", (sid,)).fetchone()[0]
         self.assertNotIn(b"discord.com", raw)
 
     def test_token_is_not_stored_in_the_clear(self):
         sid, token = store.create_subscriber(URL)
         with store.get_db() as db:
-            stored = db.execute("SELECT token_hash FROM subscribers WHERE id=?", (sid,)).fetchone()[0]
+            stored = db.execute("SELECT token_hash FROM subscribers WHERE id=%s", (sid,)).fetchone()[0]
         self.assertNotIn(token, stored)
 
     def test_set_webhook_replaces_it(self):

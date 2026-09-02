@@ -1,0 +1,58 @@
+name: Cloud checker
+
+# The notification service runs on a Render free instance, which has no scheduler and
+# spins down when idle. So the check cycle is driven from here instead of in-process.
+#
+# Every 10 minutes rather than 15 on purpose: Render idles a free service out after
+# about 15 minutes without traffic, so a 10-minute call keeps it awake. That matters
+# beyond the checker -- a sleeping instance makes the download button in a Discord
+# notification cold-start for 30-60s before it responds.
+#
+# GitHub's scheduler is best-effort and runs late under load, so treat the interval as
+# "about every 10-20 minutes". Fine for anime that air once a week.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:          # lets you force a cycle by hand
+
+concurrency:
+  group: cloud-checker
+  cancel-in-progress: false   # never run two scrape cycles at once
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger a check cycle
+        env:
+          SERVICE_URL: ${{ vars.CLOUD_SERVICE_URL }}
+        run: |
+          if [ -z "$SERVICE_URL" ]; then
+            echo "::error::Repository variable CLOUD_SERVICE_URL is not set"
+            exit 1
+          fi
+
+          # --max-time is generous: a cold instance can take a minute to wake before
+          # it even starts scraping.
+          code=$(curl -sS -o response.json -w '%{http_code}' \
+                   --max-time 600 \
+                   -X POST "${SERVICE_URL%/}/v1/check")
+
+          echo "HTTP $code"
+          cat response.json || true
+          echo
+
+          if [ "$code" != "200" ]; then
+            echo "::error::check cycle failed with HTTP $code"
+            exit 1
+          fi
+
+          # Surface the counts in the run summary so a silently-zero checker is
+          # visible without opening the logs.
+          {
+            echo "### Cloud check"
+            echo '```json'
+            cat response.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
