@@ -2,6 +2,7 @@ import os
 import json
 import sys
 import threading
+import time
 
 # --- GLOBAL CONSTANTS ---
 # Everything the app persists lives under APP_DIR. Setting AED_APP_DIR before import
@@ -206,6 +207,48 @@ def cloud_register_and_sync(service_url: str = None, webhook_url: str = None) ->
     return True, f"Successfully registered and synced {len(get_watchlist())} anime with cloud service!"
 
 
+_cloud_log_seen = {}
+_CLOUD_LOG_REPEAT_AFTER = 300.0
+
+
+def _cloud_log(message: str) -> None:
+    """Record a cloud-sync problem somewhere a person can actually find it.
+
+    These calls used to fail completely silently: cloud_fetch_commands caught every
+    exception and returned [], so a rotated token looked exactly like "no commands
+    waiting". A remote download would simply never arrive, with no clue anywhere on
+    the machine -- which is precisely how a stale in-memory token went unnoticed.
+
+    Repeats are collapsed per message, not just against the previous one. The poller
+    heartbeats and fetches every 20 seconds, so during an outage two different
+    messages alternate -- tracking only the last one suppressed nothing and still
+    wrote thousands of lines a day.
+
+    Best effort throughout: a logging failure must never break a download.
+    """
+    now = time.time()
+    if now - _cloud_log_seen.get(message, 0.0) < _CLOUD_LOG_REPEAT_AFTER:
+        return
+    _cloud_log_seen[message] = now
+    if len(_cloud_log_seen) > 200:
+        # Unbounded only if every failure is unique; drop what is no longer suppressing.
+        for key, seen_at in list(_cloud_log_seen.items()):
+            if now - seen_at >= _CLOUD_LOG_REPEAT_AFTER:
+                del _cloud_log_seen[key]
+    try:
+        path = os.path.join(APP_DIR, "cloud.log")
+        # Keep at most two files so a long outage cannot fill the disk.
+        try:
+            if os.path.getsize(path) > 512_000:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except Exception:
+        pass
+
+
 def cloud_recover_identity() -> bool:
     """Re-register after the service has forgotten us, returning whether it worked.
 
@@ -402,7 +445,8 @@ def cloud_send_heartbeat() -> bool:
 
     try:
         return cloud_request_with_recovery(_send)
-    except Exception:
+    except Exception as e:
+        _cloud_log(f"heartbeat failed: {type(e).__name__}: {e}")
         return False
 
 
@@ -427,7 +471,11 @@ def cloud_fetch_commands() -> list[dict]:
 
     try:
         return cloud_request_with_recovery(_fetch)
-    except Exception:
+    except Exception as e:
+        # This is the one that hid a stale token: an empty list is indistinguishable
+        # from "no commands waiting", so a broken remote download looked like nothing
+        # had been queued at all.
+        _cloud_log(f"fetch commands failed: {type(e).__name__}: {e}")
         return []
 
 
@@ -453,7 +501,10 @@ def cloud_ack_command(command_id: int) -> bool:
 
     try:
         return cloud_request_with_recovery(_ack)
-    except Exception:
+    except Exception as e:
+        # A failed ack means the command stays pending and will be executed again on
+        # the next poll, so it is worth seeing rather than guessing at duplicates.
+        _cloud_log(f"ack command {command_id} failed: {type(e).__name__}: {e}")
         return False
 
 

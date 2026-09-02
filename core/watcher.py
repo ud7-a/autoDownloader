@@ -168,6 +168,10 @@ def run_watcher(single_pass: bool = False):
         return
 
     loop_count = 0
+    # Transitions are logged, not iterations: this loop runs every 15 seconds, so
+    # logging each pass would bury the events that matter. Without any line at all,
+    # "standing down because the GUI is up" looked identical to "hung" in the log.
+    paused_for_gui = False
     while True:
         try:
             s_url, sub_id, token, enabled = load_cloud_credentials()
@@ -180,10 +184,17 @@ def run_watcher(single_pass: bool = False):
 
             # If main UI is active, let it handle heartbeats and commands
             if is_main_app_running():
+                if not paused_for_gui:
+                    log("Main app is running -> pausing; it handles heartbeats and commands.")
+                    paused_for_gui = True
                 if single_pass:
                     break
                 time.sleep(15)
                 continue
+
+            if paused_for_gui:
+                log("Main app closed -> resuming heartbeats and command polling.")
+                paused_for_gui = False
 
             # Send heartbeat so PC is ONLINE 🟢
             if send_heartbeat(s_url, sub_id, token):
