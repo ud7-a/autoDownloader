@@ -1,6 +1,5 @@
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import (FluentWindow, FluentIcon as FIF, MessageBoxBase,
                             SubtitleLabel, BodyLabel, PushButton)
 
@@ -206,9 +205,6 @@ class AppWindow(FluentWindow):
         # Wire up the update signal
         signals.update_available.connect(self.prompt_update)
 
-        # Initialize System Tray integration
-        self._force_quit = False
-        self._init_system_tray()
 
         # Auto-check the Watchlist shortly after launch and periodically while open
         if get_watchlist():
@@ -231,36 +227,14 @@ class AppWindow(FluentWindow):
         if autostart_commands:
             QTimer.singleShot(600, lambda: self._execute_remote_commands(autostart_commands))
 
-    def _init_system_tray(self):
-        import os
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "app_icon.png")
-        if not os.path.exists(icon_path):
-            icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "app_icon.ico")
+    def raise_to_front(self):
+        """Bring the window forward, e.g. when a remote download command arrives.
 
-        self.tray_icon = QSystemTrayIcon(self)
-        if os.path.exists(icon_path):
-            self.tray_icon.setIcon(QIcon(icon_path))
-
-        tray_menu = QMenu()
-        open_action = QAction("Open Auto Episodes Downloader", self)
-        open_action.triggered.connect(self._restore_from_tray)
-        tray_menu.addAction(open_action)
-
-        check_action = QAction("Check Watchlist Now", self)
-        check_action.triggered.connect(self.watchlist_interface.check_today)
-        tray_menu.addAction(check_action)
-
-        tray_menu.addSeparator()
-
-        quit_action = QAction("Exit", self)
-        quit_action.triggered.connect(self._quit_application)
-        tray_menu.addAction(quit_action)
-
-        self.tray_icon.setContextMenu(tray_menu)
-        self.tray_icon.activated.connect(self._on_tray_activated)
-        self.tray_icon.show()
-
-    def _restore_from_tray(self):
+        Kept after the system tray was removed: this is window elevation, not a tray
+        restore. Staying resident in the tray is now the featherweight watcher's job
+        (core/watcher.py), which launches this app on demand instead of keeping a
+        whole Qt process in memory waiting.
+        """
         self.showNormal()
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
         self.activateWindow()
@@ -276,14 +250,6 @@ class AppWindow(FluentWindow):
                 ctypes.windll.user32.SwitchToThisWindow(hwnd, True)
             except Exception:
                 pass
-
-    def _on_tray_activated(self, reason):
-        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
-            self._restore_from_tray()
-
-    def _quit_application(self):
-        self._force_quit = True
-        self.close()
 
     def _poll_cloud_commands(self):
         """Background poller that sends heartbeat and checks for incoming remote download commands."""
@@ -320,7 +286,7 @@ class AppWindow(FluentWindow):
         if not new_commands:
             return
 
-        self._restore_from_tray()
+        self.raise_to_front()
         self.switchTo(self.downloader_interface)
 
         # Deduplicate incoming commands to prevent multiple identical downloads
@@ -548,20 +514,10 @@ class AppWindow(FluentWindow):
         _play_first_video(folder, self, episodes)
 
     def closeEvent(self, event):
-        # If Cloud Notifications are enabled and user closed via [X], minimize to tray instead of quitting!
-        if app_settings.get("cloud_notify_enabled") and not getattr(self, "_force_quit", False):
-            event.ignore()
-            self.hide()
-            if not getattr(self, "_tray_notified", False):
-                self._tray_notified = True
-                self.tray_icon.showMessage(
-                    "Auto Episodes Downloader",
-                    "Minimized to system tray. Listening for remote Discord downloads.",
-                    QSystemTrayIcon.MessageIcon.Information,
-                    2500
-                )
-            return
-
+        # Closing means closing. This used to hide to the system tray whenever cloud
+        # notifications were on, so the app kept a whole Qt process resident just to
+        # listen for remote downloads. The featherweight watcher does that in ~16 MB
+        # and launches this app when a command actually arrives.
         app_settings["window_maximized"] = self.isMaximized()
         
         # Only save normal geometry if it's not minimized
