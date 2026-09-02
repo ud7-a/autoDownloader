@@ -16,7 +16,7 @@ PROFILE_DIR = os.path.join(APP_DIR, "SeleniumProfile")
 DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
-APP_VERSION = "4.4.0"
+APP_VERSION = "4.5.0"
 DEFAULT_CLOUD_SERVICE_URL = "https://aed-notification-service.onrender.com"
 
 # --- GLOBAL LOCKS ---
