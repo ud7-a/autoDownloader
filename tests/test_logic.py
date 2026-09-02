@@ -28,7 +28,8 @@ from ui.downloader_tab import (compact_episode_spec, spec_to_ranges,        # no
                                encode_check_url)
 from ui.watchlist_tab import entries_airing_today                            # noqa: E402
 from ui.search_tab import (extract_domain, _full_res, AnimeDetailsThread,   # noqa: E402
-                           SUPPORTED_SITES, DEFAULT_SITE_FLOWS, resolve_site_flow)
+                           SUPPORTED_SITES, DEFAULT_SITE_FLOWS, resolve_site_flow,
+                           site_display_name, site_icon_path)
 from utils.config import sites_data, config_lock            # noqa: E402
 from core.selenium_engine import (_format_eta, _aria_convert_unit,          # noqa: E402
                                   parse_smart_xpath, episode_url_variants,
@@ -1123,6 +1124,42 @@ class SiteConfigTests(unittest.TestCase):
         """The engine tries paths in order, so ordering is behaviour, not cosmetics."""
         paths = DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]
         self.assertEqual(list(paths), ["mediafire", "google drive", "Workupload", "rf"])
+
+
+class SiteDisplayTests(unittest.TestCase):
+    """The Search dropdown shows a name and a favicon instead of the raw host."""
+
+    def test_drops_the_tld(self):
+        self.assertEqual(site_display_name("witanime.life"), "witanime")
+
+    def test_drops_the_subdomain_too(self):
+        """"eta." is plumbing -- the site is animerco."""
+        self.assertEqual(site_display_name("eta.animerco.org"), "animerco")
+
+    def test_handles_a_two_part_suffix(self):
+        self.assertEqual(site_display_name("example.co.uk"), "example")
+        self.assertEqual(site_display_name("a.b.example.co.uk"), "example")
+
+    def test_accepts_a_full_url(self):
+        self.assertEqual(site_display_name("https://www.animerco.org/x"), "animerco")
+
+    def test_empty_and_single_label_hosts_survive(self):
+        self.assertEqual(site_display_name(""), "")
+        self.assertEqual(site_display_name("localhost"), "localhost")
+
+    def test_names_are_distinct(self):
+        """Two sites collapsing to the same label would make the dropdown ambiguous."""
+        names = [site_display_name(d) for d in SUPPORTED_SITES]
+        self.assertEqual(len(names), len(set(names)), names)
+
+    def test_every_supported_site_ships_an_icon(self):
+        """Forgetting to run tools/fetch_site_icons.py for a new site only costs the
+        picture (it falls back to a globe), which is exactly why nobody would notice."""
+        for domain in SUPPORTED_SITES:
+            self.assertTrue(site_icon_path(domain), f"{domain} has no bundled favicon")
+
+    def test_unknown_site_has_no_icon(self):
+        self.assertEqual(site_icon_path("not-a-real-site.example"), "")
 
 
 class CloudSyncHelperTests(unittest.TestCase):

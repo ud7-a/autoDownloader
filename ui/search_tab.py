@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import copy
 import time
 import base64
@@ -9,7 +10,7 @@ from collections import defaultdict
 from urllib.parse import urlparse, quote, unquote
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel)
 from qfluentwidgets import (LineEdit, PrimaryPushButton, ComboBox, ToolButton,
                             SimpleCardWidget, SmoothScrollArea, FluentIcon as FIF,
@@ -84,6 +85,67 @@ def extract_domain(url):
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+# Suffixes that are two labels long, so "example.co.uk" still reads as "example".
+# Only what the shipped sites could plausibly use -- this is a display helper, not a
+# public-suffix implementation, and the fallback (second-to-last label) is already
+# right for every ordinary domain.
+_TWO_PART_SUFFIXES = {"co.uk", "com.br", "co.jp", "com.tr", "co.in", "com.au", "co.kr"}
+
+
+def site_display_name(domain):
+    """Domain -> the site's name alone: "eta.animerco.org" becomes "animerco".
+
+    The dropdown shows this instead of the raw host. Users pick a website by its
+    name; the TLD and the subdomain in front of it are plumbing that only makes the
+    two entries harder to tell apart at a glance.
+    """
+    host = extract_domain(domain)
+    if not host:
+        return ""
+    parts = [p for p in host.split(".") if p]
+    if len(parts) < 2:
+        return host
+    if ".".join(parts[-2:]) in _TWO_PART_SUFFIXES and len(parts) >= 3:
+        return parts[-3]
+    return parts[-2]
+
+
+def site_icon_path(domain, must_exist=True):
+    """Path to a supported site's bundled favicon, or "" when it has none.
+
+    Icons ship as assets rather than being fetched: the sites reset a plain Python
+    HTTPS request, and the dropdown is built on the startup path where nothing may
+    touch the network. tools/fetch_site_icons.py refreshes them through Chrome.
+    """
+    host = extract_domain(domain)
+    if not host:
+        return ""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(base, "assets", "site_icons", f"{host}.png")
+    if must_exist and not os.path.exists(path):
+        return ""
+    return path
+
+
+# Both favicons are hard-edged squares of solid colour, which read as stickers next
+# to the app's rounded cards and buttons. The corners are softened when the icon is
+# built rather than baked into the asset, so the file stays the site's real favicon
+# and the radius can change without re-fetching anything. Rendered at 64px and
+# scaled down by Qt, so the rounding scales with it and stays sharp on a 200% display.
+SITE_ICON_PX = 64
+SITE_ICON_RADIUS = 12
+
+
+def site_icon(domain):
+    """QIcon for a supported site: its favicon with rounded corners, else a globe."""
+    path = site_icon_path(domain)
+    if path:
+        pix = rounded_pixmap(path, SITE_ICON_PX, SITE_ICON_PX, SITE_ICON_RADIUS)
+        if pix is not None:
+            return QIcon(pix)
+    return FIF.GLOBE.icon()
 
 
 def friendly_browser_error(message, domain=""):
@@ -1135,18 +1197,34 @@ class AnimeSearchWidget(QWidget):
     # ---- domains ----
     def refresh_domains(self, select=None):
         # Only the fixed supported websites are offered -- users can't add sites.
+        # Each item shows the site's name and favicon, and carries the real domain as
+        # its data: every caller reads the domain back through _current_domain(), so
+        # what is displayed can change without touching the search or profile logic.
         self.combo_domain.blockSignals(True)
         self.combo_domain.clear()
         domains = list(SUPPORTED_SITES.keys())
-        self.combo_domain.addItems(domains)
+        for domain in domains:
+            self.combo_domain.addItem(site_display_name(domain),
+                                      icon=site_icon(domain), userData=domain)
         if select and select in domains:
-            self.combo_domain.setCurrentText(select)
+            self.combo_domain.setCurrentIndex(domains.index(select))
         self.combo_domain.blockSignals(False)
+        self._sync_combo_icon()
+
+    def _sync_combo_icon(self):
+        """Show the selected site's favicon on the closed combo as well.
+
+        ComboBox.setCurrentIndex only pushes the text, so without this the icon
+        appears in the open list and vanishes the moment a site is picked.
+        """
+        self.combo_domain.setIcon(site_icon(self._current_domain()))
 
     def _current_domain(self):
-        return self.combo_domain.currentText().strip()
+        # currentData(), not currentText() -- the text is now the display name.
+        return (self.combo_domain.currentData() or "").strip()
 
     def _on_domain_changed(self, _index):
+        self._sync_combo_icon()
         # Switching website clears stale results but keeps the typed query, so the
         # user can re-run the same search on the other site.
         self.lbl_status.setText("")
@@ -1170,7 +1248,8 @@ class AnimeSearchWidget(QWidget):
 
         self.btn_search.setEnabled(False)
         self.lbl_status.setText("")
-        self._show_state("", f"Searching {domain}…", f"Looking for “{query}”.", busy=True)
+        self._show_state("", f"Searching {site_display_name(domain)}…",
+                         f"Looking for “{query}”.", busy=True)
 
         th = AnimeSearchThread(query, template)
         th.finished.connect(self.on_search_finished)
