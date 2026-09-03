@@ -95,7 +95,18 @@ def build_host_resolver_rules(hosts=None, timeout=6, only_broken=True):
     setup for a broken one. Pinning stays reserved for the case it actually fixes --
     a resolver that returns nothing at all.
     """
-    hosts = tuple(hosts) if hosts else DEFAULT_HOSTS
+    if hosts:
+        hosts = tuple(hosts)
+    else:
+        # Hosts the app has actually been redirected to get pinned as well. A site
+        # that moves is exactly when the new host is missing from the list above --
+        # on the very networks that need pinning to reach it at all.
+        try:
+            from core.site_health import learned_hosts
+            extra = tuple(h for h in learned_hosts() if h not in DEFAULT_HOSTS)
+        except Exception:
+            extra = ()
+        hosts = DEFAULT_HOSTS + extra
     from concurrent.futures import ThreadPoolExecutor
     if only_broken:
         with ThreadPoolExecutor(max_workers=min(8, len(hosts))) as ex:

@@ -135,8 +135,12 @@ def canonical_day(raw):
 
 def fetch_schedule(driver, domain, settle=2.5):
     """Scrape one site's schedule. Returns [{"day","title","url"}] with canonical days."""
-    script = _SITE_SCRIPTS.get(domain)
-    url = SCHEDULE_URLS.get(domain)
+    # Looked up by site name, not exact host: animerco redirects eta.* -> det.*, and
+    # an exact-host miss here made the scrape return [] -- swallowed by the caller,
+    # so every entry silently lost its release day.
+    from core.site_health import lookup as site_lookup
+    script = site_lookup(_SITE_SCRIPTS, domain)
+    url = site_lookup(SCHEDULE_URLS, domain)
     if not script or not url:
         return []
     driver.get(url)
@@ -224,12 +228,6 @@ def is_scheduled(entry, items):
     return find_day(entry, items) is not None
 
 
-def _domain_of(url):
-    from urllib.parse import urlparse
-    host = (urlparse(url or "").netloc or "").lower()
-    return host[4:] if host.startswith("www.") else host
-
-
 def find_day(entry, items, season=None):
     """Which day this entry airs on, or None.
 
@@ -238,7 +236,10 @@ def find_day(entry, items, season=None):
     matches rather than every season of the show.
     """
     url = (entry.get("url") or "").rstrip("/")
-    strategy = SCHEDULE_MATCH.get(_domain_of(url), "title")
+    from core.site_health import lookup as site_lookup
+    # By site name: a moved host would otherwise fall to the "title" default, which
+    # is the wrong strategy for witanime and matches the wrong show without a word.
+    strategy = site_lookup(SCHEDULE_MATCH, url, "title")
 
     if url:                                  # an exact URL hit always wins
         for item in items:

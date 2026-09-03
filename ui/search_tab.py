@@ -17,6 +17,8 @@ from qfluentwidgets import (LineEdit, PrimaryPushButton, ComboBox, ToolButton,
                             InfoBar, InfoBarPosition, IndeterminateProgressRing)
 
 from utils.config import app_settings, sites_data, save_config, config_lock
+from core.site_health import (site_key, lookup as site_lookup, record_landing,
+                              record_detection, broken_sites)
 from ui.styles import rounded_pixmap
 
 # Fixed list of supported websites (domain -> search URL template). The Search tab
@@ -87,29 +89,18 @@ def extract_domain(url):
     return host
 
 
-# Suffixes that are two labels long, so "example.co.uk" still reads as "example".
-# Only what the shipped sites could plausibly use -- this is a display helper, not a
-# public-suffix implementation, and the fallback (second-to-last label) is already
-# right for every ordinary domain.
-_TWO_PART_SUFFIXES = {"co.uk", "com.br", "co.jp", "com.tr", "co.in", "com.au", "co.kr"}
-
-
 def site_display_name(domain):
     """Domain -> the site's name alone: "eta.animerco.org" becomes "animerco".
 
-    The dropdown shows this instead of the raw host. Users pick a website by its
-    name; the TLD and the subdomain in front of it are plumbing that only makes the
-    two entries harder to tell apart at a glance.
+    The dropdown and the watchlist cards show this instead of the raw host. Users
+    pick a website by its name; the TLD and the subdomain in front of it are
+    plumbing that only makes the entries harder to tell apart at a glance.
+
+    Same function the site tables are keyed through (site_health.site_key), on
+    purpose: a second implementation of "which site is this" is how a subdomain
+    move ends up fixed in one place and still broken in another.
     """
-    host = extract_domain(domain)
-    if not host:
-        return ""
-    parts = [p for p in host.split(".") if p]
-    if len(parts) < 2:
-        return host
-    if ".".join(parts[-2:]) in _TWO_PART_SUFFIXES and len(parts) >= 3:
-        return parts[-3]
-    return parts[-2]
+    return site_key(domain)
 
 
 def site_icon_path(domain, must_exist=True):
@@ -131,9 +122,9 @@ def site_icon_path(domain, must_exist=True):
     # eta.animerco.org -> det.animerco.org, and a watchlist entry that recorded the
     # landing host would otherwise show a generic globe. Assets stay keyed by exact
     # host (that is what the fetch tool writes), so match on the name instead.
-    name = site_display_name(host)
+    key = site_key(host)
     for supported in SUPPORTED_SITES:
-        if supported != host and site_display_name(supported) == name:
+        if supported != host and site_key(supported) == key:
             alt = os.path.join(icons, f"{supported}.png")
             if os.path.exists(alt):
                 return alt
@@ -220,14 +211,18 @@ def resolve_site_flow(domain):
     Domains with no built-in flow still inherit from the richest same-domain profile,
     since that is the only source of steps they have.
     """
-    if domain in DEFAULT_SITE_FLOWS:
-        flow = DEFAULT_SITE_FLOWS[domain]
+    # Matched by site name, not exact host: animerco redirects eta.* -> det.*, and
+    # keying on the host meant a profile built from the redirected page had no
+    # built-in flow at all and silently fell through to inheritance.
+    flow = site_lookup(DEFAULT_SITE_FLOWS, domain)
+    if flow:
         return copy.deepcopy(flow["step_paths"]), flow.get("next_btn_xpath", "")
 
+    key = site_key(domain)
     paths, nxt, best = {}, "", -1
     with config_lock:
         for cfg in sites_data.values():
-            if extract_domain(cfg.get("url", "")) != domain:
+            if site_key(cfg.get("url", "")) != key or not key:
                 continue
             sp = cfg.get("step_paths", {}) or {}
             count = sum(len(v) for v in sp.values() if isinstance(v, list))
@@ -722,6 +717,14 @@ class AnimeDetailsThread(QThread):
             return
         if entries:
             self.finished.emit(entries)
+        elif site_key(self.anime_url) in broken_sites():
+            # Repeated empty results on pages that were full of links. That is the
+            # site changing its layout, not this anime lacking episodes -- saying
+            # "no episodes" would send the user hunting for a fault on their end.
+            self.error.emit(
+                f"{site_display_name(self.anime_url)} seems to have changed its layout — "
+                "episode detection is failing on every title from this site, not just "
+                "this one. It needs an app update to follow the change.")
         else:
             self.error.emit("Could not detect episodes for this title.")
 
@@ -746,6 +749,12 @@ class AnimeDetailsThread(QThread):
             driver = acquire_driver()
         try:
             driver.get(anime_url)
+            # Every detection loads a page anyway, so this is where a site move shows
+            # up first -- for free, with no request of its own.
+            try:
+                record_landing(anime_url, driver.current_url)
+            except Exception:
+                pass
 
             # Seasons-based site FIRST: an anime page often shows a "latest episodes"
             # widget for OTHER shows, which would otherwise be grabbed as this anime's
@@ -753,6 +762,7 @@ class AnimeDetailsThread(QThread):
             # is server-rendered, so poll until seasons appear OR flat episodes are
             # already derivable, returning in a fraction of a second.
             seasons = []
+            anchors = []
             end = time.time() + 5.0
             while time.time() < end:
                 if should_cancel():
@@ -789,13 +799,18 @@ class AnimeDetailsThread(QThread):
                                 e["cover"] = cov
                         except Exception:
                             pass
+                    record_detection(anime_url, len(anchors), len(entries))
                     return entries
 
             # Flat site: episodes listed directly on the anime page (e.g. witanime).
             template, max_ep = self._derive_ready(driver, timeout=4.0)
             if template:
+                record_detection(anime_url, len(anchors), 1)
                 return [{"label": "", "template": template, "max_ep": max_ep,
                          "poster": "", "cover": ""}]
+            # A page full of links that yields nothing is a layout change, not an
+            # anime with no episodes -- record it so the app can say which it was.
+            record_detection(anime_url, len(anchors), 0)
             return []
         finally:
             if own:

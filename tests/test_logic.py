@@ -36,6 +36,7 @@ from core.selenium_engine import (_format_eta, _aria_convert_unit,          # no
                                   is_block_page, _host_of, tab_matches_path,
                                   PATH_HOSTS, rotate_error_log)
 from core.schedule import SCHEDULE_URLS, SCHEDULE_MATCH                     # noqa: E402
+from core import site_health                                                # noqa: E402
 from utils.browser_flags import DEFAULT_HOSTS                               # noqa: E402
 
 
@@ -251,6 +252,115 @@ class SeasonLabelTests(unittest.TestCase):
 
     def test_empty_falls_back_to_generic(self):
         self.assertEqual(self.label("", ""), "Season")
+
+
+class SiteKeyTests(unittest.TestCase):
+    """Which site a host belongs to, independent of subdomain and TLD."""
+
+    def test_subdomain_and_tld_are_ignored(self):
+        self.assertEqual(site_health.site_key("eta.animerco.org"), "animerco")
+        self.assertEqual(site_health.site_key("det.animerco.org"), "animerco")
+        self.assertEqual(site_health.site_key("animerco.org"), "animerco")
+        self.assertEqual(site_health.site_key("https://www.animerco.org/x"), "animerco")
+
+    def test_two_part_suffix(self):
+        self.assertEqual(site_health.site_key("a.b.example.co.uk"), "example")
+
+    def test_degenerate_hosts(self):
+        self.assertEqual(site_health.site_key(""), "")
+        self.assertEqual(site_health.site_key("localhost"), "localhost")
+
+    def test_matches_the_name_shown_in_the_ui(self):
+        """One implementation, or a move gets fixed in one place and not the other."""
+        for domain in SUPPORTED_SITES:
+            self.assertEqual(site_display_name(domain), site_health.site_key(domain))
+
+
+class SiteLookupTests(unittest.TestCase):
+    TABLE = {"witanime.life": "wit", "eta.animerco.org": "ani"}
+
+    def test_exact_host_wins(self):
+        self.assertEqual(site_health.lookup(self.TABLE, "witanime.life"), "wit")
+
+    def test_a_moved_host_still_finds_its_entry(self):
+        """The whole point: det.* is not a key, but it is the same site."""
+        self.assertEqual(site_health.lookup(self.TABLE, "det.animerco.org"), "ani")
+        self.assertEqual(
+            site_health.lookup(self.TABLE, "https://det.animerco.org/animes/bleach/"), "ani")
+
+    def test_unknown_site_gets_the_default(self):
+        self.assertIsNone(site_health.lookup(self.TABLE, "example.com"))
+        self.assertEqual(site_health.lookup(self.TABLE, "example.com", "fallback"), "fallback")
+
+    def test_empty_table_is_safe(self):
+        self.assertIsNone(site_health.lookup({}, "witanime.life"))
+
+
+class SiteHealthStateTests(unittest.TestCase):
+    """Learning a site move, and telling a layout break from an empty page."""
+
+    def setUp(self):
+        site_health.reset_for_tests()
+        self._path = site_health._path()
+        if os.path.exists(self._path):
+            os.remove(self._path)
+        self.addCleanup(site_health.reset_for_tests)
+
+    def test_a_move_within_one_site_is_learned_once(self):
+        got = site_health.record_landing("https://eta.animerco.org/animes/bleach/",
+                                         "https://det.animerco.org/animes/bleach/")
+        self.assertEqual(got, "det.animerco.org")
+        self.assertIn("det.animerco.org", site_health.learned_hosts())
+        # Seeing it again is not news; only a host we have not recorded is reported.
+        self.assertEqual(site_health.record_landing("https://eta.animerco.org/a/",
+                                                    "https://det.animerco.org/a/"), "")
+
+    def test_leaving_for_a_file_host_is_not_a_move(self):
+        """Download links go to mediafire and Drive constantly. Treating those as the
+        anime site relocating would pin file hosts as if they were the site."""
+        self.assertEqual(site_health.record_landing("https://witanime.life/episode/x/",
+                                                    "https://www.mediafire.com/file/y"), "")
+        self.assertEqual(site_health.learned_hosts(), ())
+
+    def test_landing_where_we_asked_is_not_a_move(self):
+        self.assertEqual(site_health.record_landing("https://witanime.life/a/",
+                                                    "https://witanime.life/a/"), "")
+        self.assertEqual(site_health.learned_hosts(), ())
+
+    def test_a_content_rich_page_yielding_nothing_is_a_break(self):
+        for _ in range(2):
+            site_health.record_detection("https://witanime.life/anime/x/", 2428, 0)
+        self.assertIn("witanime", site_health.broken_sites())
+
+    def test_one_empty_page_is_not_yet_a_break(self):
+        """A single anime with no episodes is far more likely than a site rewrite."""
+        site_health.record_detection("https://witanime.life/anime/x/", 2428, 0)
+        self.assertEqual(site_health.broken_sites(), ())
+
+    def test_a_nearly_empty_page_is_not_evidence(self):
+        """No anchors means a block page or a failed load, not a layout change."""
+        for _ in range(5):
+            site_health.record_detection("https://witanime.life/anime/x/", 3, 0)
+        self.assertEqual(site_health.broken_sites(), ())
+
+    def test_a_successful_detection_clears_the_break(self):
+        for _ in range(3):
+            site_health.record_detection("https://witanime.life/anime/x/", 2428, 0)
+        self.assertIn("witanime", site_health.broken_sites())
+        site_health.record_detection("https://witanime.life/anime/y/", 2428, 4)
+        self.assertEqual(site_health.broken_sites(), ())
+
+    def test_state_survives_a_restart(self):
+        site_health.record_landing("https://eta.animerco.org/a/", "https://det.animerco.org/a/")
+        site_health.reset_for_tests()          # as if the app were relaunched
+        self.assertIn("det.animerco.org", site_health.learned_hosts())
+
+    def test_a_corrupt_state_file_is_not_fatal(self):
+        with open(self._path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        site_health.reset_for_tests()
+        self.assertEqual(site_health.learned_hosts(), ())
+        self.assertEqual(site_health.broken_sites(), ())
 
 
 class SeasonLinkTests(unittest.TestCase):
