@@ -36,7 +36,7 @@ from core.selenium_engine import (_format_eta, _aria_convert_unit,          # no
                                   is_block_page, _host_of, tab_matches_path,
                                   PATH_HOSTS, rotate_error_log)
 from core.schedule import SCHEDULE_URLS, SCHEDULE_MATCH                     # noqa: E402
-from core import site_health                                                # noqa: E402
+from core import site_health, nav_block                                     # noqa: E402
 from utils.browser_flags import DEFAULT_HOSTS                               # noqa: E402
 
 
@@ -252,6 +252,94 @@ class SeasonLabelTests(unittest.TestCase):
 
     def test_empty_falls_back_to_generic(self):
         self.assertEqual(self.label("", ""), "Season")
+
+
+class NavBlockTests(unittest.TestCase):
+    """Cancelling interstitial navigations. This layer fails page loads outright, so
+    a wrong pattern breaks a download rather than merely failing to block an ad."""
+
+    class _Recorder:
+        """Stands in for the CDP socket and records what would have been sent."""
+        def __init__(self):
+            self.sent = []
+
+        def __call__(self, method, params=None, session_id=None):
+            self.sent.append((method, params or {}))
+
+    def blocker(self, patterns=None):
+        b = nav_block.NavBlocker(None, patterns)
+        b._send = self.rec = self._Recorder()
+        return b
+
+    def pause(self, url, patterns=None):
+        b = self.blocker(patterns)
+        b._on_paused("session-1", {"requestId": "req-1", "request": {"url": url}})
+        return b
+
+    def test_the_interstitial_matches(self):
+        b = self.blocker()
+        self.assertTrue(b.matches("https://www.fast.io/alternatives/google-drive/"
+                                  "?utm_source=mfftr_error"))
+        self.assertTrue(b.matches("http://fast.io/"))
+
+    def test_no_pattern_can_block_a_real_download_host(self):
+        """The invariant that matters. Cancelling a navigation to Drive or MediaFire
+        would break every episode, which is worse than the ad it defends against."""
+        b = self.blocker()
+        for path_name, hosts in PATH_HOSTS.items():
+            for host in hosts:
+                self.assertFalse(b.matches(f"https://{host}/file/abc"),
+                                 f"{path_name}: {host} must never be blocked")
+
+    def test_the_anime_sites_are_never_blocked(self):
+        b = self.blocker()
+        for domain in SUPPORTED_SITES:
+            self.assertFalse(b.matches(f"https://{domain}/episode/x/"), domain)
+
+    def test_a_match_is_failed(self):
+        b = self.pause("https://www.fast.io/alternatives/google-drive/")
+        method, params = self.rec.sent[0]
+        self.assertEqual(method, "Fetch.failRequest")
+        self.assertEqual(params["errorReason"], "BlockedByClient")
+        self.assertEqual(params["requestId"], "req-1")
+        self.assertEqual(b.blocked, ["https://www.fast.io/alternatives/google-drive/"])
+
+    def test_a_non_match_is_continued_not_failed(self):
+        """The safety property: if the pattern semantics ever surprise us, letting a
+        request through is the harmless error. Failing it would brick downloads."""
+        b = self.pause("https://drive.google.com/uc?id=123")
+        self.assertEqual(self.rec.sent[0][0], "Fetch.continueRequest")
+        self.assertEqual(b.blocked, [])
+
+    def test_a_paused_event_without_a_request_id_is_ignored(self):
+        b = self.blocker()
+        b._on_paused("session-1", {"request": {"url": "https://fast.io/"}})
+        self.assertEqual(self.rec.sent, [])
+        self.assertEqual(b.blocked, [])
+
+    def test_a_held_target_is_always_released(self):
+        """A target held for the debugger that is never released stays frozen for
+        good -- that would break every download, not just the ad."""
+        b = self.blocker()
+        b._arm_session("session-1")
+        self.assertIn("Runtime.runIfWaitingForDebugger", [m for m, _ in self.rec.sent])
+
+    def test_released_even_when_enabling_fetch_fails(self):
+        b = self.blocker()
+
+        def explode(method, params=None, session_id=None):
+            self.rec(method, params, session_id)
+            if method == "Fetch.enable":
+                raise RuntimeError("socket died")
+
+        b._send = explode
+        b._arm_session("session-1")
+        self.assertIn("Runtime.runIfWaitingForDebugger", [m for m, _ in self.rec.sent])
+
+    def test_wildcards_do_not_match_everything(self):
+        b = self.blocker(["*fast.io*"])
+        self.assertFalse(b.matches("https://witanime.life/"))
+        self.assertFalse(b.matches(""))
 
 
 class SiteKeyTests(unittest.TestCase):

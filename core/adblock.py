@@ -37,9 +37,9 @@ AD_URL_PATTERNS = [
     # Interstitial landing pages a download link can be redirected to instead of the
     # file. Listed so their assets and beacons are refused, but be clear about the
     # limit: Network.setBlockedURLs only refuses subresources -- a top-level
-    # navigation to a blocked host still loads (measured). So this does NOT stop such
-    # a page opening in its own tab; the engine's destination check is what handles
-    # that, by closing the tab and keeping the real download tab.
+    # navigation to a blocked host still loads (measured, twice). Cancelling the
+    # navigation itself needs the CDP Fetch domain, which is core.nav_block; the
+    # engine's destination check (PATH_HOSTS) remains the last line behind both.
     "*fast.io*",
 ]
 

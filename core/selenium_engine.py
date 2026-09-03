@@ -445,20 +445,31 @@ def create_browser(download_dir, headless=True):
     # Running the blocklist only when the extension failed left the users who had a
     # working extension with no protection against exactly that redirect.
     #
+    # Neither of them can cancel the navigation itself, so core.nav_block is a third
+    # layer: it pauses a Document request to a known interstitial via the CDP Fetch
+    # domain and fails it outright, so fast.io never loads in any tab. That is the
+    # one that fixes the reported "the ad intercepts the Google Drive click".
+    #
     # AED_ADBLOCK selects which of them run, for isolating a page whose own download
     # link stops resolving when its scripts are refused:
-    #   (unset)/both  -- extension + blocklist (normal)
+    #   (unset)/both  -- extension + blocklist + navigation blocking (normal)
     #   extension     -- extension only, no request blocking
-    #   blocklist     -- request blocking only, no extension
+    #   blocklist     -- request blocking + navigation blocking, no extension
     #   off           -- neither
-    from core import extensions, adblock
+    from core import extensions, adblock, nav_block
     mode = (os.environ.get("AED_ADBLOCK") or "both").strip().lower()
     loaded = False
     if mode in ("both", "extension"):
         loaded = extensions.load_into(driver)
+    blocker = None
     if mode in ("both", "blocklist"):
         adblock.apply(driver)
-    _debug_log("BROWSER READY", adblock_mode=mode, extension_loaded=loaded)
+        blocker = nav_block.apply(driver)
+        # Held on the driver so it lives as long as the browser does, and so the
+        # caller can see what was cancelled.
+        driver._aed_nav_blocker = blocker
+    _debug_log("BROWSER READY", adblock_mode=mode, extension_loaded=loaded,
+               nav_blocking=blocker is not None)
     if mode != "both":
         signals.update_status.emit(f"Status: ⚙️ Ad blocking mode: {mode}.", "#f39c12")
     elif loaded:
