@@ -575,6 +575,41 @@ def download_covers(driver, img_urls, cache_dir=None):
     return paths
 
 
+# Every anchor on the page, with the fields detection needs, in ONE round-trip.
+#
+# Selenium's get_attribute() is a separate HTTP call to chromedriver -- 2-4 ms each
+# on this machine. Detection read up to four attributes plus a nested find_element
+# off every anchor, and witanime's One Piece page carries 2428 of them, so a single
+# _find_season_links pass measured 22.4 s and a single _derive_page pass 10.0 s
+# (43.3 s for the whole detection). The same data collected here takes 26 ms.
+_ANCHORS_JS = """
+return Array.prototype.map.call(document.getElementsByTagName('a'), function (a) {
+    var img = a.querySelector('img');
+    return {
+        href: a.href || '',
+        onclick: a.getAttribute('onclick') || '',
+        // innerText rather than textContent, to match what Selenium's .text returned
+        // here (rendered text only) so season labels come out identical.
+        text: (a.innerText || a.textContent || '').trim(),
+        title: a.getAttribute('title') || '',
+        poster: a.getAttribute('data-src') || '',
+        // The poster often sits on a descendant <img> instead of the anchor itself.
+        imgPoster: img ? (img.getAttribute('data-src') || img.getAttribute('src') || '') : ''
+    };
+});
+"""
+
+
+def page_anchors(driver):
+    """Anchors on the currently-loaded page as plain dicts. Never raises: a page
+    that navigates mid-script just yields no anchors, and the caller polls again."""
+    try:
+        rows = driver.execute_script(_ANCHORS_JS) or []
+    except Exception:
+        return []
+    return [r for r in rows if isinstance(r, dict)]
+
+
 class AnimeSearchThread(QThread):
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
@@ -711,10 +746,12 @@ class AnimeDetailsThread(QThread):
             while time.time() < end:
                 if should_cancel():
                     return []
-                seasons = self._find_season_links(driver)
+                # Read the page once and let both checks work off it.
+                anchors = page_anchors(driver)
+                seasons = self._find_season_links(driver, anchors)
                 if seasons:
                     break
-                t, _ = self._derive_page(driver)
+                t, _ = self._derive_page(driver, anchors)
                 if t:      # flat page already lists episodes -> handle below
                     break
                 time.sleep(0.2)
@@ -770,20 +807,16 @@ class AnimeDetailsThread(QThread):
             time.sleep(0.2)
         return "", 0
 
-    def _derive_page(self, driver):
-        """Derive (template, max_ep) from the currently-loaded page, or ('', 0)."""
-        from selenium.webdriver.common.by import By
-        hrefs, onclicks = [], []
-        for a in driver.find_elements(By.TAG_NAME, "a"):
-            try:
-                h = a.get_attribute("href")
-                if h:
-                    hrefs.append(h)
-                oc = a.get_attribute("onclick")
-                if oc:
-                    onclicks.append(oc)
-            except Exception:
-                continue
+    def _derive_page(self, driver, anchors=None):
+        """Derive (template, max_ep) from the currently-loaded page, or ('', 0).
+
+        `anchors` lets a caller that already read the page (see detect_entries) share
+        one page_anchors() round-trip across both checks instead of paying for two.
+        """
+        if anchors is None:
+            anchors = page_anchors(driver)
+        hrefs = [a["href"] for a in anchors if a.get("href")]
+        onclicks = [a["onclick"] for a in anchors if a.get("onclick")]
         # Prefer the openEpisode/onclick signal; fall back to href-number grouping.
         template, max_ep = self._derive_from_onclick(driver, onclicks)
         if not template:
@@ -795,7 +828,7 @@ class AnimeDetailsThread(QThread):
             template, max_ep = self._derive_single(self._onclick_episode_urls(onclicks) + hrefs)
         return (template, max_ep) if template else ("", 0)
 
-    def _find_season_links(self, driver):
+    def _find_season_links(self, driver, anchors=None):
         """Same-domain season pages (/seasons/<slug>/) linked from the anime page,
         each with its own label and (lazy-loaded) poster URL.
 
@@ -803,17 +836,24 @@ class AnimeDetailsThread(QThread):
         was found; the real image is a data-src attribute (the visible
         background-image is a loading-spinner placeholder until scrolled into view).
         """
-        from selenium.webdriver.common.by import By
-        base = urlparse(self.anime_url).netloc
+        if anchors is None:
+            anchors = page_anchors(driver)
+        # Match against the page actually loaded, not the URL that was requested.
+        # animerco now redirects eta.animerco.org -> det.animerco.org, so comparing
+        # with the requested host rejected every season link on the page: each anime
+        # fell through to the flat branch and loaded as one fake episode.
+        base = ""
+        try:
+            base = urlparse(driver.current_url).netloc
+        except Exception:
+            pass
+        base = base or urlparse(self.anime_url).netloc
         by_url, order = {}, []
-        for a in driver.find_elements(By.TAG_NAME, "a"):
-            try:
-                h = a.get_attribute("href") or ""
-                txt = (a.text or "").strip()
-                title_attr = a.get_attribute("title") or ""
-                poster = a.get_attribute("data-src") or ""
-            except Exception:
-                continue
+        for a in anchors:
+            h = a.get("href") or ""
+            txt = (a.get("text") or "").strip()
+            title_attr = a.get("title") or ""
+            poster = a.get("poster") or ""
             p = urlparse(h)
             if p.netloc != base:
                 continue
@@ -825,11 +865,7 @@ class AnimeDetailsThread(QThread):
             clean = f"{p.scheme}://{p.netloc}{p.path}"
             # Poster may sit on a descendant <img> instead of the anchor's data-src.
             if not poster:
-                try:
-                    img = a.find_element(By.TAG_NAME, "img")
-                    poster = img.get_attribute("data-src") or img.get_attribute("src") or ""
-                except Exception:
-                    poster = ""
+                poster = a.get("imgPoster") or ""
             if poster.startswith("data:"):
                 poster = ""  # placeholder spinner, not a real cover
             rec = by_url.get(clean)

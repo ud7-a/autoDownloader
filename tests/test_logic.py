@@ -253,6 +253,62 @@ class SeasonLabelTests(unittest.TestCase):
         self.assertEqual(self.label("", ""), "Season")
 
 
+class SeasonLinkTests(unittest.TestCase):
+    """Which season links on an anime page count as this anime's seasons."""
+
+    class _FakeDriver:
+        """_find_season_links only ever reads current_url off the driver."""
+        def __init__(self, current_url):
+            self.current_url = current_url
+
+    @staticmethod
+    def _anchor(href, text="", title="", poster="", img_poster=""):
+        return {"href": href, "text": text, "title": title, "onclick": "",
+                "poster": poster, "imgPoster": img_poster}
+
+    def links(self, anchors, requested="https://eta.animerco.org/animes/bleach/",
+              landed="https://det.animerco.org/animes/bleach/"):
+        det = AnimeDetailsThread(requested)
+        det.anime_url = requested
+        return det._find_season_links(self._FakeDriver(landed), anchors)
+
+    def test_links_survive_a_redirect_to_another_host(self):
+        """animerco moved eta.animerco.org -> det.animerco.org. Matching against the
+        requested host dropped every season link, so each anime fell through to the
+        flat branch and loaded as a single fake episode -- silently, with no error."""
+        got = self.links([self._anchor("https://det.animerco.org/seasons/bleach-s1/",
+                                       "Bleach Season 1")])
+        self.assertEqual([(lbl, url) for lbl, url, _ in got],
+                         [("Season 1", "https://det.animerco.org/seasons/bleach-s1/")])
+
+    def test_a_third_party_host_is_still_rejected(self):
+        self.assertEqual(self.links([self._anchor("https://other.example/seasons/x/", "S1")]), [])
+
+    def test_the_seasons_index_and_calendar_are_skipped(self):
+        """/seasons/ is the index and /season/<year> is the seasonal calendar."""
+        got = self.links([self._anchor("https://det.animerco.org/seasons/", "All"),
+                          self._anchor("https://det.animerco.org/season/2024/", "2024")])
+        self.assertEqual(got, [])
+
+    def test_poster_falls_back_to_a_descendant_image(self):
+        got = self.links([self._anchor("https://det.animerco.org/seasons/s1/", "Season 1",
+                                       img_poster="https://det.animerco.org/p.jpg")])
+        self.assertEqual(got[0][2], "https://det.animerco.org/p.jpg")
+
+    def test_placeholder_data_uri_is_not_a_poster(self):
+        got = self.links([self._anchor("https://det.animerco.org/seasons/s1/", "Season 1",
+                                       poster="data:image/gif;base64,R0lGOD")])
+        self.assertEqual(got[0][2], "")
+
+    def test_duplicate_links_merge_and_keep_the_poster(self):
+        """A season is usually linked twice -- once as art, once as a title."""
+        url = "https://det.animerco.org/seasons/s1/"
+        got = self.links([self._anchor(url, "", img_poster="https://det.animerco.org/p.jpg"),
+                          self._anchor(url, "Season 1")])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][2], "https://det.animerco.org/p.jpg")
+
+
 class SingleEntryDetectionTests(unittest.TestCase):
     """Movies/OVAs are published as a single entry with no episode number, and the
     grouping strategies need >=2 links -- so without a single-entry fallback they

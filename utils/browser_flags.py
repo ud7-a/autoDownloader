@@ -30,7 +30,10 @@ GOOGLE_DNS_API = "https://dns.google/resolve"
 # are actually fetched from.
 DEFAULT_HOSTS = (
     "witanime.life", "www.witanime.life",
-    "eta.animerco.org", "animerco.org", "www.animerco.org",
+    # det.* is where eta.animerco.org now redirects. Pinning only the entry host
+    # would leave the host every page actually loads from unresolved, which is the
+    # failure this list exists to prevent.
+    "eta.animerco.org", "det.animerco.org", "animerco.org", "www.animerco.org",
     "www.mediafire.com", "mediafire.com",
     "drive.google.com", "drive.usercontent.google.com",
     "workupload.com", "www.workupload.com",
