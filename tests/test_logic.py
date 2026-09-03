@@ -1217,6 +1217,21 @@ class SiteDisplayTests(unittest.TestCase):
     def test_unknown_site_has_no_icon(self):
         self.assertEqual(site_icon_path("not-a-real-site.example"), "")
 
+    def test_a_moved_subdomain_keeps_the_sites_icon(self):
+        """animerco redirects eta.animerco.org -> det.animerco.org. An entry that
+        recorded the landing host would otherwise fall back to a generic globe."""
+        self.assertEqual(site_icon_path("det.animerco.org"),
+                         site_icon_path("eta.animerco.org"))
+
+    def test_any_mirror_of_a_supported_site_matches_by_name(self):
+        """Deliberately loose: mirrors are what this fallback is for, so another
+        animerco host matches even on a different TLD."""
+        self.assertEqual(site_icon_path("animerco.net"),
+                         site_icon_path("eta.animerco.org"))
+
+    def test_an_unrelated_host_gets_no_icon(self):
+        self.assertEqual(site_icon_path("example.co.uk"), "")
+
 
 class CloudSyncHelperTests(unittest.TestCase):
     """Guards client-side cloud notification sync logic and settings."""

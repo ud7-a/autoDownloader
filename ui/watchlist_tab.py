@@ -16,6 +16,12 @@ from qfluentwidgets import (PushButton, PrimaryPushButton, SimpleCardWidget, Smo
 from utils.config import (get_watchlist, remove_watch, update_watch, app_settings, APP_DIR,
                           cloud_register_and_sync, cloud_unsubscribe, save_config)
 from ui.styles import apply_danger_style, apply_tinted_style, rounded_pixmap
+from ui.search_tab import extract_domain, site_display_name, site_icon
+
+
+# Favicon size on a watchlist card. Sits next to the 11px site name, so it reads as
+# part of that line rather than as a second poster.
+SITE_BADGE_PX = 14
 
 
 def _today_key():
@@ -374,9 +380,23 @@ class WatchCard(SimpleCardWidget):
         self.lbl_status.setStyleSheet("background: transparent; font-size: 12px;")
         info.addWidget(self.lbl_status)
 
-        sub = QLabel(entry.get("domain", ""))
+        # Website: favicon + name without the TLD, same as the Search tab's dropdown.
+        # Entries followed before the domain was stored (and any written with it
+        # blank) fall back to the host of the anime URL rather than showing nothing.
+        domain = entry.get("domain") or extract_domain(entry.get("url", ""))
+        site = QHBoxLayout()
+        site.setContentsMargins(0, 0, 0, 0)
+        site.setSpacing(6)
+        favicon = QLabel()
+        favicon.setFixedSize(SITE_BADGE_PX, SITE_BADGE_PX)
+        favicon.setStyleSheet("background: transparent;")
+        favicon.setPixmap(site_icon(domain).pixmap(SITE_BADGE_PX, SITE_BADGE_PX))
+        site.addWidget(favicon)
+        sub = QLabel(site_display_name(domain))
         sub.setStyleSheet("color: #777777; background: transparent; font-size: 11px;")
-        info.addWidget(sub)
+        site.addWidget(sub)
+        site.addStretch(1)
+        info.addLayout(site)
 
         root.addLayout(info, 1)
 

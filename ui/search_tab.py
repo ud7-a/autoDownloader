@@ -123,10 +123,21 @@ def site_icon_path(domain, must_exist=True):
     if not host:
         return ""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(base, "assets", "site_icons", f"{host}.png")
-    if must_exist and not os.path.exists(path):
-        return ""
-    return path
+    icons = os.path.join(base, "assets", "site_icons")
+    path = os.path.join(icons, f"{host}.png")
+    if not must_exist or os.path.exists(path):
+        return path
+    # A site that moves subdomain keeps its icon: animerco now redirects
+    # eta.animerco.org -> det.animerco.org, and a watchlist entry that recorded the
+    # landing host would otherwise show a generic globe. Assets stay keyed by exact
+    # host (that is what the fetch tool writes), so match on the name instead.
+    name = site_display_name(host)
+    for supported in SUPPORTED_SITES:
+        if supported != host and site_display_name(supported) == name:
+            alt = os.path.join(icons, f"{supported}.png")
+            if os.path.exists(alt):
+                return alt
+    return ""
 
 
 # Both favicons are hard-edged squares of solid colour, which read as stickers next
