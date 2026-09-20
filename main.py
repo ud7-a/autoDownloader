@@ -36,6 +36,26 @@ from PyQt6.QtGui import QFont
 
 _startup_mark("PyQt6 imported")
 
+def _qt_write(stream, text):
+    """Write a Qt message, if there is anywhere at all to write it.
+
+    A --windowed build has no console, so sys.stdout and sys.stderr are None. The
+    handler below is a callback from Qt's C++ side, and an unhandled Python
+    exception there aborts the whole process (0xC0000409) -- so one Qt message that
+    happened not to be in the ignore list killed the app outright.
+
+    That is why it died "suddenly": the QSS noise qfluentwidgets produces is all
+    ignored, but a background thread finishing (a watchlist check finding a new
+    episode, a download starting) can emit a threading warning, which is not, and
+    the very first one took the process down.
+    """
+    try:
+        if stream is not None:
+            stream.write(text)
+    except Exception:
+        pass
+
+
 def suppress_qt_warnings(msg_type, _context, message):
     # Filter out common annoying style sheet warnings from QFluentWidgets / Qt
     ignored_phrases = [
@@ -47,22 +67,63 @@ def suppress_qt_warnings(msg_type, _context, message):
     ]
     if any(phrase in message for phrase in ignored_phrases):
         return
-        
+
     # Write other messages to standard stderr/stdout
     if msg_type == QtMsgType.QtDebugMsg:
-        sys.stdout.write(f"Debug: {message}\n")
+        _qt_write(sys.stdout, f"Debug: {message}\n")
     elif msg_type == QtMsgType.QtInfoMsg:
-        sys.stdout.write(f"Info: {message}\n")
+        _qt_write(sys.stdout, f"Info: {message}\n")
     elif msg_type == QtMsgType.QtWarningMsg:
-        sys.stderr.write(f"Warning: {message}\n")
+        _qt_write(sys.stderr, f"Warning: {message}\n")
     elif msg_type == QtMsgType.QtCriticalMsg:
-        sys.stderr.write(f"Critical: {message}\n")
+        _qt_write(sys.stderr, f"Critical: {message}\n")
     elif msg_type == QtMsgType.QtFatalMsg:
-        sys.stderr.write(f"Fatal: {message}\n")
-        sys.exit(-1)
+        # Qt tears the process down itself after this returns. Raising SystemExit
+        # here would be one more unhandled exception inside a C++ callback.
+        _qt_write(sys.stderr, f"Fatal: {message}\n")
 
 # Silently suppress visual parsing warnings to keep the console clean
 qInstallMessageHandler(suppress_qt_warnings)
+
+def launch_watcher():
+    """Start the lightweight background watcher, if cloud notifications are enabled.
+
+    A frozen build runs this same exe with --watcher. That matters: aed_watcher.pyw
+    is not bundled (tools/build_release.py ships only assets/ and tools/), so the
+    previous `if os.path.exists(watcher_pyw)` test was always False on an installed
+    copy and the app never started a watcher at all. The Windows Run key at login was
+    the only thing that ever did, which is why this PC kept being reported offline.
+
+    Safe to call more than once: the watcher exits immediately if another one is
+    already running.
+    """
+    from utils.config import app_settings
+    if not app_settings.get("cloud_notify_enabled"):
+        return
+    try:
+        import subprocess
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--watcher"]
+            cwd = os.path.dirname(sys.executable)
+        else:
+            watcher_pyw = os.path.abspath(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "aed_watcher.pyw"))
+            if not os.path.exists(watcher_pyw):
+                return
+            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            if not os.path.exists(pythonw):
+                pythonw = sys.executable
+            cmd = [pythonw, watcher_pyw]
+            cwd = os.path.dirname(os.path.abspath(__file__))
+        # No console window, and no inherited stdio: a child whose stdout is None
+        # raises on its first print, which is the same trap that killed this process.
+        subprocess.Popen(cmd, cwd=cwd,
+                         creationflags=(0x08000000 if sys.platform == "win32" else 0),
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
 
 def cleanup_old_exe():
     if getattr(sys, 'frozen', False):
@@ -220,24 +281,22 @@ if __name__ == "__main__":
     # Check for updates in the background ONLY after the window is fully initialized and listening!
     from core.updater import check_for_updates_silently
     threading.Thread(target=check_for_updates_silently, daemon=True).start()
-    
+
+    # Start the watcher NOW rather than on the way out. It is what reports this PC as
+    # online, and launching it only after app.exec() returned meant a crash -- or a
+    # kill, or a power cut -- left nothing running at all, so the cloud marked the PC
+    # offline and the Discord "download" button refused to queue anything. The watcher
+    # pauses itself while this app is up (see core/watcher.py) and refuses to start a
+    # second copy, so starting it early costs a sleeping process and nothing else.
+    launch_watcher()
+
     exit_code = app.exec()
 
     # Release mutex on exit
     if _main_app_mutex:
         ctypes.windll.kernel32.CloseHandle(_main_app_mutex)
 
-    # Launch lightweight background watcher (<25MB) if cloud notifications are enabled
-    if app_settings.get("cloud_notify_enabled"):
-        try:
-            import subprocess
-            watcher_pyw = os.path.abspath(os.path.join(os.path.dirname(__file__), "aed_watcher.pyw"))
-            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            if not os.path.exists(pythonw):
-                pythonw = sys.executable
-            if os.path.exists(watcher_pyw):
-                subprocess.Popen([pythonw, watcher_pyw], cwd=os.path.dirname(__file__))
-        except Exception:
-            pass
+    # Again on the way out, in case the one above died during the session.
+    launch_watcher()
 
     sys.exit(exit_code)
