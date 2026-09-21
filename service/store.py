@@ -381,6 +381,17 @@ def queue_command(subscriber_id: str, anime_url: str, anime_title: str, episodes
             "VALUES (%s, '', %s, %s, %s) ON CONFLICT (id) DO NOTHING",
             (subscriber_id, b"", now, now)
         )
+        # Collapse duplicates: one tap opens the action page (which used to queue on
+        # load) and then presses the button, and a link can be re-opened. Return the
+        # existing pending command for the same episode instead of stacking identical
+        # ones the PC would then download more than once.
+        existing = db.execute(
+            "SELECT id FROM commands WHERE subscriber_id = %s AND anime_url = %s "
+            "AND episodes = %s AND status = 'pending' ORDER BY id ASC LIMIT 1",
+            (subscriber_id, anime_url, episodes)
+        ).fetchone()
+        if existing:
+            return existing[0]
         row = db.execute(
             "INSERT INTO commands (subscriber_id, anime_url, anime_title, episodes, status, created_at) "
             "VALUES (%s, %s, %s, %s, 'pending', %s) RETURNING id",

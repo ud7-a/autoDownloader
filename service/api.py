@@ -225,8 +225,9 @@ body{font-family:"Segoe UI Variable","Segoe UI",sans-serif;text-align:center;pad
             status_code=401
         )
 
-    # Auto-queue download command for PC
-    store.queue_command(sid, url, title or url, ep or "latest")
+    # Do NOT queue here. This page loads whenever the link is opened -- including link
+    # previews and reloads -- so queuing on load double-triggered every download. The
+    # button below is the single deliberate action; it POSTs to /v1/queue/submit.
     is_online = store.is_subscriber_online(sid)
 
     status_badge_class = "badge-online" if is_online else "badge-offline"

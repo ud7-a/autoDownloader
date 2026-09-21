@@ -35,15 +35,23 @@ class RemoteCommandTests(unittest.TestCase):
         self.assertTrue(store.is_subscriber_online(self.sid))
 
     def test_queue_and_fetch_commands(self):
-        # 1. Queue a download command via public web action
         url = "https://witanime.life/anime/rezero/"
         ep = "15"
         sig = crypto.sign_action(self.sid, f"{url}:{ep}")
+
+        # 1. Opening the action page does NOT queue -- the page loads on every view
+        # (previews, reloads), so queuing on load double-triggered downloads. It just
+        # renders; the button queues.
         r = self.client.get(f"/v1/queue?sid={self.sid}&url={url}&title=ReZero&ep={ep}&sig={sig}")
         self.assertEqual(r.status_code, 200)
-        self.assertIn("Download Queued", r.text)
+        self.assertEqual(len(store.get_pending_commands(self.sid)), 0)
 
-        # 2. Fetch pending commands from desktop app endpoint
+        # 2. Pressing the button (its POST) queues the command.
+        r = self.client.post("/v1/queue/submit", json={
+            "sid": self.sid, "url": url, "title": "ReZero", "ep": ep, "sig": sig})
+        self.assertEqual(r.status_code, 200)
+
+        # 3. Fetch pending commands from the desktop app endpoint
         r = self.client.get(f"/v1/subscribers/{self.sid}/commands", headers=self.auth_headers)
         self.assertEqual(r.status_code, 200)
         cmds = r.json().get("commands", [])
@@ -51,15 +59,39 @@ class RemoteCommandTests(unittest.TestCase):
         self.assertEqual(cmds[0]["anime_url"], url)
         self.assertEqual(cmds[0]["episodes"], ep)
 
-        # 3. Acknowledge command execution
+        # 4. Acknowledge command execution
         cmd_id = cmds[0]["id"]
         r = self.client.post(f"/v1/subscribers/{self.sid}/commands/{cmd_id}/ack", headers=self.auth_headers)
         self.assertEqual(r.status_code, 200)
 
-        # 4. Verify queue is now empty
+        # 5. Verify queue is now empty
         r = self.client.get(f"/v1/subscribers/{self.sid}/commands", headers=self.auth_headers)
         self.assertEqual(r.status_code, 200)
         self.assertEqual(len(r.json().get("commands", [])), 0)
+
+    def test_duplicate_submits_collapse_to_one_command(self):
+        """One tap opens the page and presses the button; a link can be re-opened.
+        Identical pending commands must not stack, or the PC downloads twice."""
+        url = "https://witanime.life/anime/rezero/"
+        ep = "15"
+        sig = crypto.sign_action(self.sid, f"{url}:{ep}")
+        body = {"sid": self.sid, "url": url, "title": "ReZero", "ep": ep, "sig": sig}
+
+        first = self.client.post("/v1/queue/submit", json=body)
+        second = self.client.post("/v1/queue/submit", json=body)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        # Same command id both times, and only one pending row.
+        self.assertEqual(first.json()["command_id"], second.json()["command_id"])
+        self.assertEqual(len(store.get_pending_commands(self.sid)), 1)
+
+    def test_a_different_episode_queues_separately(self):
+        url = "https://witanime.life/anime/rezero/"
+        for ep in ("15", "16"):
+            sig = crypto.sign_action(self.sid, f"{url}:{ep}")
+            self.client.post("/v1/queue/submit", json={
+                "sid": self.sid, "url": url, "title": "ReZero", "ep": ep, "sig": sig})
+        self.assertEqual(len(store.get_pending_commands(self.sid)), 2)
 
     def test_invalid_signature_is_rejected(self):
         url = "https://witanime.life/anime/rezero/"
