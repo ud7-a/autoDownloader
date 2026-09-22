@@ -1,0 +1,77 @@
+{
+    "url": "https://witanime.site/watch/mushoku-tensei-iii-isekai-ittara-honki-dasu/{x}",
+    "next_btn_xpath": "الحلقة التالية",
+    "step_paths": {
+        "FHD - Mediafire": [
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                "delay": 1.0
+            },
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mediafire')]",
+                "delay": 5.0
+            },
+            {
+                "xpath": "//*[@id=\"downloadButton\"]",
+                "delay": 2.0
+            }
+        ],
+        "FHD - Google Drive": [
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                "delay": 2.0
+            },
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]",
+                "delay": 3.0
+            },
+            {
+                "xpath": "Download anyway",
+                "delay": 2.0
+            }
+        ],
+        "FHD - wtsrv": [
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                "delay": 1.0
+            },
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wtsrv')]",
+                "delay": 5.0
+            },
+            {
+                "xpath": "//*[@id=\"downloadButton\"]",
+                "delay": 2.0
+            }
+        ],
+        "FHD - Workupload": [
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                "delay": 2.0
+            },
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'workupload')]",
+                "delay": 5.0
+            },
+            {
+                "xpath": "//*[@id=\"file\"]/div[3]/div/a",
+                "delay": 2.0
+            }
+        ],
+        "FHD - gofile": [
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                "delay": 1.0
+            },
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gofile')]",
+                "delay": 5.0
+            },
+            {
+                "xpath": "//button[@data-action='download']",
+                "delay": 2.0
+            }
+        ]
+    },
+    "last_episodes": "1-13"
+}

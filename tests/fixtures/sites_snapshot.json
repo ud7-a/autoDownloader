@@ -1,7 +1,7 @@
 {
   "dns_hosts": [
-    "witanime.life",
-    "www.witanime.life",
+    "witanime.site",
+    "www.witanime.site",
     "eta.animerco.org",
     "det.animerco.org",
     "animerco.org",
@@ -44,11 +44,11 @@
   },
   "schedule_match": {
     "eta.animerco.org": "title",
-    "witanime.life": "url"
+    "witanime.site": "url"
   },
   "schedule_urls": {
     "eta.animerco.org": "https://eta.animerco.org/schedule/",
-    "witanime.life": "https://witanime.life/مواعيد-الحلقات/"
+    "witanime.site": "https://witanime.site/schedule"
   },
   "site_flows": {
     "eta.animerco.org": {
@@ -76,43 +76,73 @@
         ]
       }
     },
-    "witanime.life": {
+    "witanime.site": {
       "next_btn_xpath": "الحلقة التالية",
       "step_paths": {
-        "Workupload": [
+        "FHD - Google Drive": [
           {
-            "delay": 5.0,
-            "xpath": "workupload #last"
+            "delay": 2.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]"
           },
           {
-            "delay": 5.0,
-            "xpath": "//*[@id=\\\"file\\\"]/div[3]/div/a"
-          }
-        ],
-        "google drive": [
-          {
             "delay": 3.0,
-            "xpath": "google drive #last"
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]"
           },
           {
             "delay": 2.0,
             "xpath": "Download anyway"
           }
         ],
-        "mediafire": [
+        "FHD - Mediafire": [
           {
-            "delay": 7.0,
-            "xpath": "mediafire #last"
+            "delay": 1.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]"
           },
           {
-            "delay": 3.0,
+            "delay": 5.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mediafire')]"
+          },
+          {
+            "delay": 2.0,
             "xpath": "//*[@id=\"downloadButton\"]"
           }
         ],
-        "rf": [
+        "FHD - Workupload": [
           {
-            "delay": 11.0,
-            "xpath": "rf #last"
+            "delay": 2.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]"
+          },
+          {
+            "delay": 5.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'workupload')]"
+          },
+          {
+            "delay": 2.0,
+            "xpath": "//*[@id=\"file\"]/div[3]/div/a"
+          }
+        ],
+        "FHD - gofile": [
+          {
+            "delay": 1.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]"
+          },
+          {
+            "delay": 5.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gofile')]"
+          },
+          {
+            "delay": 2.0,
+            "xpath": "//button[@data-action='download']"
+          }
+        ],
+        "FHD - wtsrv": [
+          {
+            "delay": 1.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]"
+          },
+          {
+            "delay": 5.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wtsrv')]"
           },
           {
             "delay": 2.0,
@@ -124,6 +154,6 @@
   },
   "supported_sites": {
     "eta.animerco.org": "https://eta.animerco.org/?s={query}",
-    "witanime.life": "https://witanime.life/?search_param=animes&s={query}"
+    "witanime.site": "https://witanime.site/search?q={query}"
   }
 }

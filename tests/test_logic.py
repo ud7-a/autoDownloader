@@ -201,7 +201,7 @@ class EpisodeUrlVariantTests(unittest.TestCase):
 
 class DomainAndCoverTests(unittest.TestCase):
     def test_extract_domain_strips_scheme_and_www(self):
-        self.assertEqual(extract_domain("https://WWW.Witanime.life/x"), "witanime.life")
+        self.assertEqual(extract_domain("https://WWW.Witanime.site/x"), "witanime.site")
 
     def test_extract_domain_accepts_bare_host(self):
         self.assertEqual(extract_domain("eta.animerco.org"), "eta.animerco.org")
@@ -338,7 +338,7 @@ class NavBlockTests(unittest.TestCase):
 
     def test_wildcards_do_not_match_everything(self):
         b = self.blocker(["*fast.io*"])
-        self.assertFalse(b.matches("https://witanime.life/"))
+        self.assertFalse(b.matches("https://witanime.site/"))
         self.assertFalse(b.matches(""))
 
 
@@ -365,10 +365,10 @@ class SiteKeyTests(unittest.TestCase):
 
 
 class SiteLookupTests(unittest.TestCase):
-    TABLE = {"witanime.life": "wit", "eta.animerco.org": "ani"}
+    TABLE = {"witanime.site": "wit", "eta.animerco.org": "ani"}
 
     def test_exact_host_wins(self):
-        self.assertEqual(site_health.lookup(self.TABLE, "witanime.life"), "wit")
+        self.assertEqual(site_health.lookup(self.TABLE, "witanime.site"), "wit")
 
     def test_a_moved_host_still_finds_its_entry(self):
         """The whole point: det.* is not a key, but it is the same site."""
@@ -381,7 +381,7 @@ class SiteLookupTests(unittest.TestCase):
         self.assertEqual(site_health.lookup(self.TABLE, "example.com", "fallback"), "fallback")
 
     def test_empty_table_is_safe(self):
-        self.assertIsNone(site_health.lookup({}, "witanime.life"))
+        self.assertIsNone(site_health.lookup({}, "witanime.site"))
 
 
 class SiteHealthStateTests(unittest.TestCase):
@@ -406,36 +406,36 @@ class SiteHealthStateTests(unittest.TestCase):
     def test_leaving_for_a_file_host_is_not_a_move(self):
         """Download links go to mediafire and Drive constantly. Treating those as the
         anime site relocating would pin file hosts as if they were the site."""
-        self.assertEqual(site_health.record_landing("https://witanime.life/episode/x/",
+        self.assertEqual(site_health.record_landing("https://witanime.site/episode/x/",
                                                     "https://www.mediafire.com/file/y"), "")
         self.assertEqual(site_health.learned_hosts(), ())
 
     def test_landing_where_we_asked_is_not_a_move(self):
-        self.assertEqual(site_health.record_landing("https://witanime.life/a/",
-                                                    "https://witanime.life/a/"), "")
+        self.assertEqual(site_health.record_landing("https://witanime.site/a/",
+                                                    "https://witanime.site/a/"), "")
         self.assertEqual(site_health.learned_hosts(), ())
 
     def test_a_content_rich_page_yielding_nothing_is_a_break(self):
         for _ in range(2):
-            site_health.record_detection("https://witanime.life/anime/x/", 2428, 0)
+            site_health.record_detection("https://witanime.site/anime/x/", 2428, 0)
         self.assertIn("witanime", site_health.broken_sites())
 
     def test_one_empty_page_is_not_yet_a_break(self):
         """A single anime with no episodes is far more likely than a site rewrite."""
-        site_health.record_detection("https://witanime.life/anime/x/", 2428, 0)
+        site_health.record_detection("https://witanime.site/anime/x/", 2428, 0)
         self.assertEqual(site_health.broken_sites(), ())
 
     def test_a_nearly_empty_page_is_not_evidence(self):
         """No anchors means a block page or a failed load, not a layout change."""
         for _ in range(5):
-            site_health.record_detection("https://witanime.life/anime/x/", 3, 0)
+            site_health.record_detection("https://witanime.site/anime/x/", 3, 0)
         self.assertEqual(site_health.broken_sites(), ())
 
     def test_a_successful_detection_clears_the_break(self):
         for _ in range(3):
-            site_health.record_detection("https://witanime.life/anime/x/", 2428, 0)
+            site_health.record_detection("https://witanime.site/anime/x/", 2428, 0)
         self.assertIn("witanime", site_health.broken_sites())
-        site_health.record_detection("https://witanime.life/anime/y/", 2428, 4)
+        site_health.record_detection("https://witanime.site/anime/y/", 2428, 4)
         self.assertEqual(site_health.broken_sites(), ())
 
     def test_state_survives_a_restart(self):
@@ -512,7 +512,7 @@ class SingleEntryDetectionTests(unittest.TestCase):
     grouping strategies need >=2 links -- so without a single-entry fallback they
     look like "no episodes at all"."""
 
-    MOVIE = "https://witanime.life/episode/فيلم-bleach-sennen-kessen-hen-kashin-tan-movie/"
+    MOVIE = "https://witanime.site/episode/فيلم-bleach-sennen-kessen-hen-kashin-tan-movie/"
 
     def setUp(self):
         self.det = AnimeDetailsThread("")
@@ -528,22 +528,22 @@ class SingleEntryDetectionTests(unittest.TestCase):
         self.assertNotIn("{x}", template)
 
     def test_percent_encoded_url_is_decoded(self):
-        encoded = ("https://witanime.life/episode/"
+        encoded = ("https://witanime.site/episode/"
                    "%d9%81%d9%8a%d9%84%d9%85-bleach-sennen-kessen-hen-kashin-tan-movie/")
         template, _ = self.det._derive_single([encoded])
         self.assertEqual(template, self.MOVIE)
 
     def test_lone_numbered_episode_stays_parameterised(self):
         """A series with only ep 1 uploaded must still template, so later uploads work."""
-        template, max_ep = self.det._derive_single(["https://witanime.life/episode/show-الحلقة-1/"])
-        self.assertEqual(template, "https://witanime.life/episode/show-الحلقة-{x}/")
+        template, max_ep = self.det._derive_single(["https://witanime.site/episode/show-الحلقة-1/"])
+        self.assertEqual(template, "https://witanime.site/episode/show-الحلقة-{x}/")
         self.assertEqual(max_ep, 1)
 
     def test_two_entries_are_left_to_the_grouping_logic(self):
         self.assertEqual(self.det._derive_single([self.MOVIE, "https://x/episode/other-1/"]), ("", 0))
 
     def test_non_episode_links_are_ignored(self):
-        self.assertEqual(self.det._derive_single(["https://witanime.life/anime-genre/x/"]), ("", 0))
+        self.assertEqual(self.det._derive_single(["https://witanime.site/anime-genre/x/"]), ("", 0))
 
     def test_duplicate_links_still_count_as_one(self):
         """The poster overlay repeats the same openEpisode link."""
@@ -686,6 +686,73 @@ class ConcurrencyControllerTests(unittest.TestCase):
         self.assertIn("manual", manual.describe())
 
 
+class CrossSiteReleaseDayTests(unittest.TestCase):
+    """witanime.site refuses automated access to its schedule, so its entries got no
+    release day at all. A weekday belongs to the show, not the site, so it is borrowed
+    from another site's schedule -- strictly, since a wrong day is worse than none."""
+
+    WIT = "https://witanime.site/anime/{}/"
+    # animerco's rows only: witanime's own schedule could not be read.
+    ANIMERCO_ONLY = [
+        {"day": "sunday", "title": "Mushoku Tensei: Isekai Ittara Honki Dasu Season 3",
+         "url": "https://det.animerco.org/seasons/mushoku-season-3/"},
+        {"day": "friday", "title": "Tensei shitara Slime Datta Ken Season 4",
+         "url": "https://det.animerco.org/seasons/slime-season-4/"},
+        {"day": "wednesday", "title": "Re:Zero kara Hajimeru Isekai Seikatsu Season 4",
+         "url": "https://det.animerco.org/seasons/rezero-season-4/"},
+        {"day": "monday", "title": "Grand Blue Season 3",
+         "url": "https://det.animerco.org/seasons/grand-blue-season-3/"},
+    ]
+
+    def setUp(self):
+        from core import schedule
+        self.s = schedule
+
+    def day(self, title, slug, items=None):
+        entry = {"title": title, "url": self.WIT.format(slug)}
+        return self.s.find_day(entry, self.ANIMERCO_ONLY if items is None else items)
+
+    def test_borrows_the_day_when_its_own_schedule_is_missing(self):
+        self.assertEqual(self.day("Tensei shitara Slime Datta Ken 4th Season", "slime-4"),
+                         "friday")
+        self.assertEqual(self.day("Re:Zero kara Hajimeru Isekai Seikatsu 4th Season", "rz-4"),
+                         "wednesday")
+
+    def test_roman_numeral_season_matches_a_numbered_one(self):
+        """The watchlist said 'Mushoku Tensei III'; animerco says 'Season 3'."""
+        self.assertEqual(self.day("Mushoku Tensei III: Isekai Ittara Honki Dasu", "mt-3"),
+                         "sunday")
+
+    def test_a_different_season_is_never_borrowed(self):
+        """Seasons are separate anime pages on witanime -- the reason it was URL-only."""
+        self.assertIsNone(self.day("Tensei shitara Slime Datta Ken 3rd Season", "slime-3"))
+
+    def test_an_unnumbered_title_does_not_take_a_numbered_season(self):
+        self.assertIsNone(self.day("Grand Blue", "grand-blue"))
+
+    def test_no_containment_guessing_across_sites(self):
+        """Cross-site is exact-title only; a partial overlap is not enough."""
+        self.assertIsNone(self.day("Tensei shitara Slime", "slime"))
+
+    def test_when_its_own_schedule_was_read_the_url_rule_still_holds(self):
+        """A readable witanime schedule that lacks the URL means genuinely not airing."""
+        items = self.ANIMERCO_ONLY + [
+            {"day": "tuesday", "title": "Something Else",
+             "url": "https://witanime.site/anime/something-else/"}]
+        self.assertIsNone(self.day("Tensei shitara Slime Datta Ken 4th Season",
+                                   "slime-4", items))
+
+    def test_season_number_reads_roman_numerals(self):
+        self.assertEqual(self.s.season_number("Mushoku Tensei III: Isekai"), 3)
+        self.assertEqual(self.s.season_number("Overlord IV"), 4)
+        self.assertEqual(self.s.season_number("Title VIII"), 8)
+
+    def test_season_number_ignores_names_that_merely_contain_letters(self):
+        self.assertIsNone(self.s.season_number("HUNTER X HUNTER"))
+        self.assertIsNone(self.s.season_number("I Got a Cheat Skill"))
+        self.assertIsNone(self.s.season_number("Vinland Saga"))
+
+
 class ScheduleMatchingTests(unittest.TestCase):
     """Matching a watchlist entry to its release day. witanime can be matched by URL;
     animerco only publishes season links, so those fall back to titles."""
@@ -695,7 +762,7 @@ class ScheduleMatchingTests(unittest.TestCase):
         self.s = schedule
         self.items = [
             {"day": "saturday", "title": "Bleach: Sennen Kessen-hen - Kashin-tan",
-             "url": "https://witanime.life/anime/bleach-sennen-kessen-hen-kashin-tan/"},
+             "url": "https://witanime.site/anime/bleach-sennen-kessen-hen-kashin-tan/"},
             {"day": "sunday", "title": "Mushoku Tensei III: Isekai Ittara Honki Dasu",
              "url": "https://eta.animerco.org/seasons/mushoku-tensei-iii-season-1/"},
             {"day": "friday", "title": "Tensei shitara Slime Datta Ken Season 4",
@@ -717,12 +784,12 @@ class ScheduleMatchingTests(unittest.TestCase):
 
     def test_url_match_wins(self):
         entry = {"title": "totally different name",
-                 "url": "https://witanime.life/anime/bleach-sennen-kessen-hen-kashin-tan/"}
+                 "url": "https://witanime.site/anime/bleach-sennen-kessen-hen-kashin-tan/"}
         self.assertEqual(self.s.find_day(entry, self.items), "saturday")
 
     def test_url_match_ignores_trailing_slash(self):
         entry = {"title": "x",
-                 "url": "https://witanime.life/anime/bleach-sennen-kessen-hen-kashin-tan"}
+                 "url": "https://witanime.site/anime/bleach-sennen-kessen-hen-kashin-tan"}
         self.assertEqual(self.s.find_day(entry, self.items), "saturday")
 
     def test_title_match_when_url_differs(self):
@@ -754,7 +821,7 @@ class ScheduleMatchingTests(unittest.TestCase):
     def test_witanime_matches_only_the_airing_season_page(self):
         """Each season is its own /anime/ page there, and by title they are
         indistinguishable -- so a title guess would flag every season as airing."""
-        w = "https://witanime.life/anime/"
+        w = "https://witanime.site/anime/"
         items = [{"day": "monday", "title": "Grand Blue Season 3",
                   "url": w + "grand-blue-season-3/"}]
         airing = {"title": "Grand Blue Season 3", "url": w + "grand-blue-season-3/"}
@@ -823,17 +890,17 @@ class CheckUrlEncodingTests(unittest.TestCase):
     and every such profile silently fell through to the DNS-only check."""
 
     def test_arabic_path_is_encoded(self):
-        out = encode_check_url("https://witanime.life/episode/one-piece-الحلقة-444/")
+        out = encode_check_url("https://witanime.site/episode/one-piece-الحلقة-444/")
         out.encode("ascii")   # must not raise -- this is what urllib does internally
-        self.assertTrue(out.startswith("https://witanime.life/episode/one-piece-"))
+        self.assertTrue(out.startswith("https://witanime.site/episode/one-piece-"))
         self.assertIn("%D8%A7", out)
 
     def test_already_encoded_url_is_unchanged(self):
-        url = "https://witanime.life/episode/one-piece-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-444/"
+        url = "https://witanime.site/episode/one-piece-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-444/"
         self.assertEqual(encode_check_url(url), url)
 
     def test_encoding_is_idempotent(self):
-        raw = "https://witanime.life/episode/one-piece-الحلقة-444/"
+        raw = "https://witanime.site/episode/one-piece-الحلقة-444/"
         once = encode_check_url(raw)
         self.assertEqual(encode_check_url(once), once)
 
@@ -873,25 +940,25 @@ class SiteFlowPrecedenceTests(unittest.TestCase):
     def test_builtin_wins_over_an_existing_profile(self):
         with config_lock:
             sites_data["Old Anime"] = {
-                "url": "https://witanime.life/episode/whatever-{x}/",
+                "url": "https://witanime.site/episode/whatever-{x}/",
                 "next_btn_xpath": "WRONG",
                 # deliberately richer than the built-in, which used to win on count
-                "step_paths": {"mediafire": [{"xpath": "junk", "delay": 99.0},
+                "step_paths": {"FHD - Mediafire": [{"xpath": "junk", "delay": 99.0},
                                              {"xpath": "junk2", "delay": 99.0},
                                              {"xpath": "junk3", "delay": 99.0}]},
             }
-        paths, nxt = resolve_site_flow("witanime.life")
-        self.assertEqual(paths, DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"])
-        self.assertEqual(nxt, DEFAULT_SITE_FLOWS["witanime.life"]["next_btn_xpath"])
+        paths, nxt = resolve_site_flow("witanime.site")
+        self.assertEqual(paths, DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"])
+        self.assertEqual(nxt, DEFAULT_SITE_FLOWS["witanime.site"]["next_btn_xpath"])
         self.assertNotIn("junk", str(paths))
 
     def test_returned_flow_is_a_copy(self):
         """The caller writes this into a profile; mutating it must not corrupt the
         shipped default for every later download in the same session."""
-        paths, _ = resolve_site_flow("witanime.life")
-        paths["mediafire"][0]["delay"] = 123.0
+        paths, _ = resolve_site_flow("witanime.site")
+        paths["FHD - Mediafire"][0]["delay"] = 123.0
         self.assertNotEqual(
-            DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]["mediafire"][0]["delay"],
+            DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]["FHD - Mediafire"][0]["delay"],
             123.0)
 
     def test_unsupported_domain_still_inherits_from_a_profile(self):
@@ -913,28 +980,40 @@ class SiteFlowPrecedenceTests(unittest.TestCase):
 
 class WitanimeTemplateTests(unittest.TestCase):
     """Pins the shipped witanime flow to the template it is meant to be. A stray edit
-    to a delay or an xpath here changes downloads for every anime on the site."""
+    to a delay or an xpath here changes downloads for every anime on the site.
 
-    EXPECTED = {
-        "mediafire": [("mediafire #last", 7.0), ('//*[@id="downloadButton"]', 3.0)],
-        "google drive": [("google drive #last", 3.0), ("Download anyway", 2.0)],
-        "Workupload": [("workupload #last", 5.0),
-                       ('//*[@id=\\"file\\"]/div[3]/div/a', 5.0)],
-        "rf": [("rf #last", 11.0), ('//*[@id="downloadButton"]', 2.0)],
-    }
+    The template is a real, working profile exported from the app
+    (fixtures/witanime_template.json) -- compared against directly rather than
+    retyped here, so the test and the template cannot drift apart."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "fixtures", "witanime_template.json")
+        with open(path, encoding="utf-8") as f:
+            cls.template = json.load(f)
 
     def test_flow_matches_the_template(self):
-        flow = DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]
-        self.assertEqual(list(flow), list(self.EXPECTED), "path names or order changed")
-        for name, steps in self.EXPECTED.items():
+        flow = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
+        expected = self.template["step_paths"]
+        self.assertEqual(list(flow), list(expected), "path names or order changed")
+        for name, steps in expected.items():
             self.assertEqual(len(flow[name]), len(steps), f"{name}: step count changed")
-            for i, (xpath, delay) in enumerate(steps):
-                self.assertEqual(flow[name][i]["xpath"], xpath, f"{name}[{i}] xpath")
-                self.assertEqual(float(flow[name][i]["delay"]), delay, f"{name}[{i}] delay")
+            for i, step in enumerate(steps):
+                self.assertEqual(flow[name][i]["xpath"], step["xpath"], f"{name}[{i}] xpath")
+                self.assertEqual(float(flow[name][i]["delay"]), float(step["delay"]),
+                                 f"{name}[{i}] delay")
 
-    def test_next_button_is_the_arabic_next_episode_label(self):
-        self.assertEqual(DEFAULT_SITE_FLOWS["witanime.life"]["next_btn_xpath"],
-                         "الحلقة التالية")
+    def test_next_button_matches_the_template(self):
+        self.assertEqual(DEFAULT_SITE_FLOWS["witanime.site"]["next_btn_xpath"],
+                         self.template["next_btn_xpath"])
+        self.assertEqual(self.template["next_btn_xpath"], "الحلقة التالية")
+
+    def test_per_anime_fields_stay_out_of_the_flow(self):
+        """The template's url and episode range belong to one anime, not the site."""
+        flow = DEFAULT_SITE_FLOWS["witanime.site"]
+        self.assertNotIn("url", flow)
+        self.assertNotIn("last_episodes", flow)
 
 
 class ErrorLogRotationTests(unittest.TestCase):
@@ -1028,6 +1107,358 @@ class WatchlistTodayFilterTests(unittest.TestCase):
         from ui.watchlist_tab import _today_key
         from core.schedule import DAY_ORDER
         self.assertIn(_today_key(), DAY_ORDER)
+
+
+class LogCleanupTests(unittest.TestCase):
+    """Logs are cleared at every start so they cannot grow for months. The app
+    folder also holds the user's data, so only log files may ever match."""
+
+    def make_dir(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        files = {
+            "watcher.log": "x" * 5000, "chromedriver.log": "y", "cloud.log": "z",
+            "aria2c_error.log": "e", "aria2c_error.log.1": "old", "ui_stalls.log": "s",
+            # must survive
+            "sites_config.json": "{}", "download_history.db": "db",
+            "install_log.txt": "installer", "site_health.json": "{}",
+            "catalog.logic": "not a log", "notes.log.bak": "not a rotation",
+        }
+        for name, body in files.items():
+            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                f.write(body)
+        os.makedirs(os.path.join(d, "SeleniumProfile"))
+        with open(os.path.join(d, "SeleniumProfile", "chrome_debug.log"), "w") as f:
+            f.write("browser's own")
+        return d
+
+    def test_only_logs_are_removed(self):
+        from utils.log_cleanup import clear_logs
+        d = self.make_dir()
+        cleared, busy = clear_logs(d)
+        self.assertEqual(sorted(cleared), ["aria2c_error.log", "aria2c_error.log.1",
+                                           "chromedriver.log", "cloud.log",
+                                           "ui_stalls.log", "watcher.log"])
+        self.assertEqual(busy, [])
+        left = sorted(os.listdir(d))
+        self.assertEqual(left, ["SeleniumProfile", "catalog.logic", "download_history.db",
+                                "install_log.txt", "notes.log.bak", "site_health.json",
+                                "sites_config.json"])
+
+    def test_subfolders_are_never_entered(self):
+        from utils.log_cleanup import clear_logs
+        d = self.make_dir()
+        clear_logs(d)
+        self.assertTrue(os.path.exists(os.path.join(d, "SeleniumProfile", "chrome_debug.log")))
+
+    def test_a_log_held_open_elsewhere_is_emptied_instead(self):
+        from utils.log_cleanup import clear_logs
+        d = self.make_dir()
+        path = os.path.join(d, "chromedriver.log")
+        holder = open(path, "a", encoding="utf-8")      # like a running chromedriver
+        self.addCleanup(holder.close)
+        cleared, busy = clear_logs(d)
+        self.assertIn("chromedriver.log", cleared)
+        self.assertEqual(os.path.getsize(path), 0)
+
+    def test_missing_folder_is_not_an_error(self):
+        from utils.log_cleanup import clear_logs
+        self.assertEqual(clear_logs(os.path.join(tempfile.gettempdir(), "no-such-aed-dir")),
+                         ([], []))
+
+
+class WitanimeUrlMigrationTests(unittest.TestCase):
+    """Pre-move witanime URLs must be rewritten to the new host AND path format:
+    the old host fails TLS, so the engine never reaches a not-found page that would
+    trigger its own URL fallbacks."""
+
+    def m(self, url):
+        from utils.config import migrate_witanime_url
+        return migrate_witanime_url(url)
+
+    def test_old_episode_template_becomes_watch_template(self):
+        self.assertEqual(
+            self.m("https://witanime.life/episode/tensei-shitara-slime-datta-ken-4th-season-الحلقة-{x}"),
+            "https://witanime.site/watch/tensei-shitara-slime-datta-ken-4th-season/{x}")
+
+    def test_concrete_episode_and_trailing_slash(self):
+        self.assertEqual(self.m("https://witanime.net/episode/bleach-sennen-kessen-hen-الحلقة-26/"),
+                         "https://witanime.site/watch/bleach-sennen-kessen-hen/26")
+
+    def test_percent_encoded_arabic_is_understood(self):
+        self.assertEqual(
+            self.m("https://witanime.life/episode/one-piece-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-{x}/"),
+            "https://witanime.site/watch/one-piece/{x}")
+
+    def test_old_episode_path_on_new_host_is_rewritten_too(self):
+        self.assertEqual(self.m("https://witanime.site/episode/naruto-الحلقة-{x}"),
+                         "https://witanime.site/watch/naruto/{x}")
+
+    def test_anime_page_gets_host_swap_only(self):
+        self.assertEqual(self.m("https://witanime.life/anime/bleach-sennen-kessen-hen-kashin-tan/"),
+                         "https://witanime.site/anime/bleach-sennen-kessen-hen-kashin-tan/")
+
+    def test_current_urls_and_other_sites_are_untouched(self):
+        for u in ("https://witanime.site/watch/mushoku-tensei-iii-isekai-ittara-honki-dasu/{x}",
+                  "https://witanime.site/watch/movie/summer-wars",
+                  "https://det.animerco.org/episodes/x-الحلقة-{x}/", "", None):
+            self.assertEqual(self.m(u), u)
+
+
+class SearchTitleTests(unittest.TestCase):
+    def test_html_entities_are_decoded(self):
+        from ui.search_tab import clean_title
+        self.assertEqual(clean_title("I&#039;ll Become a Villainess"), "I'll Become a Villainess")
+        self.assertEqual(clean_title("Tom &amp; Jerry"), "Tom & Jerry")
+
+    def test_whitespace_is_tidied_and_empty_is_safe(self):
+        from ui.search_tab import clean_title
+        self.assertEqual(clean_title("  Re:Zero \n 4th  Season "), "Re:Zero 4th Season")
+        self.assertEqual(clean_title(None), "")
+
+
+class AvailablePathTests(unittest.TestCase):
+    """Before choosing a mirror the engine looks at which ones the episode offers.
+    A missing mirror used to cost ~20 s of waiting for a button that never came."""
+
+    def flows(self):
+        from ui.search_tab import DEFAULT_SITE_FLOWS
+        return (DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"],
+                DEFAULT_SITE_FLOWS["eta.animerco.org"]["step_paths"])
+
+    def test_witanime_probe_is_the_host_button_not_the_shared_fhd_button(self):
+        from core.selenium_engine import path_probes
+        wit, _ = self.flows()
+        probes = path_probes(wit)
+        self.assertEqual(set(probes), set(wit))
+        for name, steps in wit.items():
+            self.assertEqual(probes[name], steps[1]["xpath"], name)
+            self.assertNotEqual(probes[name], steps[0]["xpath"], name)
+
+    def test_animerco_probe_is_the_host_row(self):
+        from core.selenium_engine import path_probes
+        _, ani = self.flows()
+        probes = path_probes(ani)
+        for name, steps in ani.items():
+            self.assertEqual(probes[name], steps[0]["xpath"], name)
+
+    def test_single_path_profile_has_no_probe(self):
+        from core.selenium_engine import path_probes
+        self.assertEqual(path_probes({"only": [{"xpath": "//a", "delay": 1}]}), {"only": None})
+
+    def test_identical_paths_have_no_probe(self):
+        from core.selenium_engine import path_probes
+        same = [{"xpath": "//a", "delay": 1}]
+        self.assertEqual(path_probes({"a": same, "b": list(same)}), {"a": None, "b": None})
+
+    def test_absent_mirrors_are_skipped_in_priority_order(self):
+        """The Mushoku episode checked live: Mediafire and Workupload present,
+        Google Drive and wtsrv absent."""
+        from core.selenium_engine import choose_paths
+        order = ["FHD - Mediafire", "FHD - Google Drive", "FHD - wtsrv", "FHD - Workupload"]
+        found = {"FHD - Mediafire": True, "FHD - Google Drive": False,
+                 "FHD - wtsrv": False, "FHD - Workupload": True}
+        self.assertEqual(choose_paths(order, found), ["FHD - Mediafire", "FHD - Workupload"])
+
+    def test_priority_follows_the_profile_not_the_page(self):
+        from core.selenium_engine import choose_paths
+        order = ["a", "b", "c"]
+        self.assertEqual(choose_paths(order, {"c": True, "a": True, "b": False}), ["a", "c"])
+
+    def test_nothing_found_falls_back_to_every_path(self):
+        """Inconclusive (layout changed, page not ready) must behave exactly as before."""
+        from core.selenium_engine import choose_paths
+        order = ["a", "b"]
+        self.assertEqual(choose_paths(order, {"a": False, "b": False}), order)
+        self.assertEqual(choose_paths(order, {}), order)
+
+    def test_paths_without_a_probe_are_kept(self):
+        from core.selenium_engine import choose_paths
+        self.assertEqual(choose_paths(["a", "b", "c"], {"a": False, "b": None, "c": True}),
+                         ["b", "c"])
+
+    def test_engine_lookup_never_raises_and_tries_all_on_error(self):
+        from core.selenium_engine import available_paths
+
+        class Broken:
+            def execute_script(self, *a):
+                raise RuntimeError("tab crashed")
+
+        wit, _ = self.flows()
+        to_try, found = available_paths(Broken(), wit, timeout=0)
+        self.assertEqual(to_try, list(wit))
+
+    def test_engine_lookup_uses_one_script_call_when_links_are_there(self):
+        from core.selenium_engine import available_paths
+        wit, _ = self.flows()
+        calls = []
+
+        class Page:
+            def execute_script(self, js, probes):
+                calls.append(1)
+                return {"FHD - Mediafire": True, "FHD - Workupload": True}
+
+        to_try, _ = available_paths(Page(), wit, timeout=4)
+        self.assertEqual(to_try, ["FHD - Mediafire", "FHD - Workupload"])
+        self.assertEqual(len(calls), 1)
+
+
+class MovieFlagTests(unittest.TestCase):
+    """Search cards flag movies from the result link, on both sites."""
+
+    def test_animerco_movies_are_flagged(self):
+        from ui.search_tab import is_movie_link
+        self.assertTrue(is_movie_link(
+            "https://det.animerco.org/movies/chainsaw-man-movie-reze-hen/"))
+        self.assertTrue(is_movie_link(
+            "https://det.animerco.org/movies/%d9%81%d9%8a%d9%84%d9%85-kimi-no-na-wa/"))
+
+    def test_witanime_movies_are_flagged(self):
+        from ui.search_tab import is_movie_link
+        self.assertTrue(is_movie_link("https://witanime.site/movie/summer-wars"))
+
+    def test_series_are_not_flagged(self):
+        from ui.search_tab import is_movie_link
+        self.assertFalse(is_movie_link(
+            "https://det.animerco.org/animes/tensei-shitara-slime-datta-ken/"))
+        self.assertFalse(is_movie_link(
+            "https://witanime.site/anime/tensei-shitara-slime-datta-ken-4th-season"))
+
+    def test_movie_in_slug_alone_is_not_a_movie(self):
+        from ui.search_tab import is_movie_link
+        self.assertFalse(is_movie_link("https://witanime.site/anime/movie-maker-club"))
+        self.assertFalse(is_movie_link(
+            "https://det.animerco.org/animes/kimetsu-no-yaiba-movie-hen/"))
+
+    def test_bad_input_is_safe(self):
+        from ui.search_tab import is_movie_link
+        self.assertFalse(is_movie_link(""))
+        self.assertFalse(is_movie_link(None))
+
+
+class PosterFramingTests(unittest.TestCase):
+    """rounded_from_image must fit the whole poster, not slice out its middle.
+
+    It used to crop only, so a 164x200 search cover shown as a 56x84 Watchlist
+    poster lost everything above and below a small central window."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def poster(self, w=164, h=200, band=50):
+        from PyQt6.QtGui import QImage, QColor, QPainter
+        img = QImage(w, h, QImage.Format.Format_RGB32)
+        img.fill(QColor(0, 0, 255))
+        p = QPainter(img)
+        p.fillRect(0, 0, w, band, QColor(0, 255, 0))   # title band across the top
+        p.end()
+        return img
+
+    def colour_at(self, pix, x, y):
+        c = pix.toImage().pixelColor(x, y)
+        return c.red(), c.green(), c.blue()
+
+    def test_small_frame_keeps_the_top_of_the_poster(self):
+        from ui.styles import rounded_from_image
+        pix = rounded_from_image(self.poster(), 56, 84, 6)
+        self.assertEqual((pix.width(), pix.height()), (56, 84))
+        r, g, b = self.colour_at(pix, 28, 8)
+        self.assertGreater(g, 200, "top band was cropped away -- poster not fitted")
+        r, g, b = self.colour_at(pix, 28, 70)
+        self.assertGreater(b, 200)
+
+    def test_large_source_is_fitted_not_sliced(self):
+        """animerco covers arrive up to 500px; the search card is 164x200."""
+        from ui.styles import rounded_from_image
+        pix = rounded_from_image(self.poster(375, 500, band=120), 164, 200, 8)
+        self.assertEqual((pix.width(), pix.height()), (164, 200))
+        self.assertGreater(self.colour_at(pix, 82, 10)[1], 200)
+
+    def test_already_fitted_image_is_unchanged_in_size(self):
+        from ui.styles import rounded_from_image
+        pix = rounded_from_image(self.poster(164, 200), 164, 200, 8)
+        self.assertEqual((pix.width(), pix.height()), (164, 200))
+
+    def test_null_image_is_safe(self):
+        from PyQt6.QtGui import QImage
+        from ui.styles import rounded_from_image
+        self.assertIsNone(rounded_from_image(QImage(), 56, 84))
+        self.assertIsNone(rounded_from_image(None, 56, 84))
+
+    def test_dense_screen_gets_device_pixels_at_the_same_layout_size(self):
+        """At 125% a 56x84 poster drawn at 56x84 pixels was stretched and soft."""
+        from unittest import mock
+        from ui import styles
+        for scale, expect in ((1.25, (70, 105)), (2.0, (112, 168))):
+            with mock.patch.object(styles, "render_scale", return_value=scale):
+                pix = styles.rounded_from_image(self.poster(), 56, 84, 6)
+            self.assertEqual((pix.width(), pix.height()), expect)
+            self.assertAlmostEqual(pix.devicePixelRatio(), scale)
+            size = pix.deviceIndependentSize()
+            self.assertEqual((round(size.width()), round(size.height())), (56, 84))
+
+    def test_render_scale_is_bounded(self):
+        from ui.styles import render_scale
+        self.assertGreaterEqual(render_scale(), 1.0)
+        self.assertLessEqual(render_scale(), 3.0)
+
+
+class WatchlistCoverTests(unittest.TestCase):
+    """Search hands covers over as decoded QImages. Follow used to accept only a
+    path, so every anime followed after that change was stored without a poster."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtCore import QCoreApplication
+        cls._app = QCoreApplication.instance() or QCoreApplication([])
+
+    def image(self):
+        from PyQt6.QtGui import QImage, QColor
+        img = QImage(164, 200, QImage.Format.Format_RGB32)
+        img.fill(QColor(200, 30, 30))
+        return img
+
+    def test_qimage_cover_is_saved_to_disk(self):
+        from ui.watchlist_tab import _persist_cover
+        path = _persist_cover("https://witanime.site/anime/test-qimage/", self.image())
+        self.assertTrue(path, "a QImage cover must produce a stored poster")
+        self.assertTrue(os.path.exists(path))
+        self.assertIn("watchlist_covers", path)
+        self.assertTrue(path.startswith(os.environ["AED_APP_DIR"]))
+
+    def test_saved_cover_is_kept_decoded_for_the_card(self):
+        """The card must not have to open the file it was just given, on the GUI
+        thread -- that first read is what froze the Search grid."""
+        from ui import watchlist_tab
+        path = watchlist_tab._persist_cover("https://x/anime/held/", self.image())
+        self.assertIn(path, watchlist_tab._saved_covers)
+
+    def test_path_cover_still_copies(self):
+        from ui.watchlist_tab import _persist_cover
+        src = os.path.join(os.environ["AED_APP_DIR"], "src_cover.img")
+        self.assertTrue(self.image().save(src, "JPEG"))
+        path = _persist_cover("https://x/anime/from-path/", src)
+        self.assertTrue(path and os.path.exists(path))
+
+    def test_nothing_to_store_returns_empty(self):
+        from PyQt6.QtGui import QImage
+        from ui.watchlist_tab import _persist_cover
+        self.assertEqual(_persist_cover("https://x/a/", ""), "")
+        self.assertEqual(_persist_cover("https://x/a/", None), "")
+        self.assertEqual(_persist_cover("https://x/a/", QImage()), "")
+        self.assertEqual(_persist_cover("https://x/a/", r"C:\no\such\file.img"), "")
+
+    def test_missing_cover_is_detected(self):
+        from ui.watchlist_tab import _cover_is_missing
+        self.assertTrue(_cover_is_missing({}))
+        self.assertTrue(_cover_is_missing({"cover": ""}))
+        self.assertTrue(_cover_is_missing({"cover": r"C:\gone\0cc79bc068a6f160.img"}))
+        src = os.path.join(os.environ["AED_APP_DIR"], "present.img")
+        self.assertTrue(self.image().save(src, "JPEG"))
+        self.assertFalse(_cover_is_missing({"cover": src}))
 
 
 class CloudRecoveryTests(unittest.TestCase):
@@ -1371,20 +1802,28 @@ class SiteConfigTests(unittest.TestCase):
     def test_witanime_has_all_its_hosts(self):
         """Mirrors the maintained witanime profile export -- a dropped path here means
         episodes silently fail on whichever host went missing."""
-        paths = DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]
-        self.assertEqual(set(paths), {"mediafire", "google drive", "Workupload", "rf"})
+        paths = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
+        self.assertEqual(set(paths), {"FHD - Google Drive", "FHD - Mediafire",
+                                      "FHD - wtsrv", "FHD - Workupload", "FHD - gofile"})
 
     def test_witanime_path_order_is_preserved(self):
         """The engine tries paths in order, so ordering is behaviour, not cosmetics."""
-        paths = DEFAULT_SITE_FLOWS["witanime.life"]["step_paths"]
-        self.assertEqual(list(paths), ["mediafire", "google drive", "Workupload", "rf"])
+        paths = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
+        self.assertEqual(list(paths), ["FHD - Mediafire", "FHD - Google Drive",
+                                       "FHD - wtsrv", "FHD - Workupload", "FHD - gofile"])
+
+    def test_gofile_ends_on_its_download_button(self):
+        """Checked live: the gofile folder page's only [data-action=download]."""
+        steps = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]["FHD - gofile"]
+        self.assertEqual(steps[-1]["xpath"], "//button[@data-action='download']")
+        self.assertIn("'gofile'", steps[1]["xpath"])
 
 
 class SiteDisplayTests(unittest.TestCase):
     """The Search dropdown shows a name and a favicon instead of the raw host."""
 
     def test_drops_the_tld(self):
-        self.assertEqual(site_display_name("witanime.life"), "witanime")
+        self.assertEqual(site_display_name("witanime.site"), "witanime")
 
     def test_drops_the_subdomain_too(self):
         """"eta." is plumbing -- the site is animerco."""
@@ -1479,3 +1918,169 @@ class CloudSyncHelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class LoadConfigSaveTests(unittest.TestCase):
+    """load_config() persists its migrations with save_config(), and WHERE that save
+    sits decides what lands on disk. These read the file back rather than memory:
+    memory is always correct by the time anyone looks, which is exactly how a save
+    that corrupted the file went unnoticed."""
+
+    WEBHOOK = "https://discord.com/api/webhooks/123/abc"
+    TOKEN = "tok_0123456789abcdef0123456789abcdef"
+
+    def setUp(self):
+        import copy
+        import utils.config as cfg
+        self.cfg = cfg
+        self._settings = copy.deepcopy(cfg.app_settings)
+        self._sites = copy.deepcopy(cfg.sites_data)
+        self.path = cfg.CONFIG_FILE
+        self._saved_file = None
+        if os.path.exists(self.path):
+            with open(self.path, encoding="utf-8") as f:
+                self._saved_file = f.read()
+
+    def tearDown(self):
+        self.cfg.app_settings.clear()
+        self.cfg.app_settings.update(self._settings)
+        self.cfg.sites_data.clear()
+        self.cfg.sites_data.update(self._sites)
+        if self._saved_file is None:
+            if os.path.exists(self.path):
+                os.remove(self.path)
+        else:
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(self._saved_file)
+
+    def _load_with_legacy_profile(self):
+        """Write a config whose profile uses the old "steps" format -- so load_config
+        has a migration to save -- load it, and return what ended up on disk."""
+        import json
+        cfg = self.cfg
+        data = {
+            "settings": {
+                "discord_webhook": cfg.encrypt_webhook(self.WEBHOOK),
+                "cloud_token": cfg.encrypt_webhook(self.TOKEN),
+                "download_dir": r"C:\my\animes",
+                "watchlist": [{"title": "Show", "url": "https://example.test/anime/show/"}],
+            },
+            "sites": {"Old Profile": {"url": "https://example.test/ep-{x}",
+                                      "steps": [{"xpath": "Download", "delay": 1.0}]}},
+        }
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        cfg.sites_data.clear()
+        cfg.load_config()
+        with open(self.path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_the_migration_is_persisted(self):
+        prof = self._load_with_legacy_profile()["sites"]["Old Profile"]
+        self.assertIn("step_paths", prof)
+        self.assertNotIn("steps", prof)
+
+    def test_secrets_on_disk_are_encrypted_exactly_once(self):
+        """Saving before the decrypt wrote encrypt(encrypt(x)). One decrypt on the
+        next launch then gave ciphertext: cloud auth and the webhook silently died."""
+        disk = self._load_with_legacy_profile()["settings"]
+        self.assertEqual(self.cfg.decrypt_webhook(disk["discord_webhook"]), self.WEBHOOK)
+        self.assertEqual(self.cfg.decrypt_webhook(disk["cloud_token"]), self.TOKEN)
+
+    def test_user_settings_survive_the_save(self):
+        """Saving before the settings loop wrote factory defaults over them."""
+        disk = self._load_with_legacy_profile()["settings"]
+        self.assertEqual(disk["download_dir"], r"C:\my\animes")
+        self.assertEqual(len(disk["watchlist"]), 1)
+
+    def test_memory_holds_cleartext_after_load(self):
+        self._load_with_legacy_profile()
+        self.assertEqual(self.cfg.app_settings["discord_webhook"], self.WEBHOOK)
+        self.assertEqual(self.cfg.app_settings["cloud_token"], self.TOKEN)
+
+    def test_pre_move_witanime_urls_are_rewritten_on_disk(self):
+        """Profile url, Watchlist url AND latest_template -- the template is what a
+        Watchlist or Discord download opens, and it used to stay on the dead host."""
+        import json
+        cfg = self.cfg
+        data = {
+            "settings": {
+                "discord_webhook": cfg.encrypt_webhook(self.WEBHOOK),
+                "watchlist": [{
+                    "title": "Slime", "domain": "witanime.life",
+                    "url": "https://witanime.life/anime/tensei-shitara-slime-datta-ken-4th-season/",
+                    "latest_template": "https://witanime.life/episode/tensei-shitara-slime-datta-ken-4th-season-الحلقة-{x}/",
+                }],
+            },
+            "sites": {"Slime": {
+                "url": "https://witanime.life/episode/tensei-shitara-slime-datta-ken-4th-season-الحلقة-{x}",
+                "step_paths": {"p": [{"xpath": "//a", "delay": 1}]}, "last_episodes": "17"}},
+        }
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        cfg.sites_data.clear()
+        cfg.load_config()
+        with open(self.path, encoding="utf-8") as f:
+            disk = json.load(f)
+        self.assertEqual(disk["sites"]["Slime"]["url"],
+                         "https://witanime.site/watch/tensei-shitara-slime-datta-ken-4th-season/{x}")
+        self.assertEqual(disk["sites"]["Slime"]["last_episodes"], "17")
+        w = disk["settings"]["watchlist"][0]
+        self.assertEqual(w["url"],
+                         "https://witanime.site/anime/tensei-shitara-slime-datta-ken-4th-season/")
+        self.assertEqual(w["latest_template"],
+                         "https://witanime.site/watch/tensei-shitara-slime-datta-ken-4th-season/{x}")
+        self.assertEqual(w["domain"], "witanime.site")
+        self.assertEqual(cfg.decrypt_webhook(disk["settings"]["discord_webhook"]), self.WEBHOOK)
+
+
+class ConfigMigrationTests(unittest.TestCase):
+    def test_witanime_url_and_template_migration(self):
+        from utils.config import load_config, app_settings, sites_data, encrypt_webhook
+        
+        test_data = {
+            "settings": {
+                "discord_webhook": encrypt_webhook("https://discord.com/api/webhooks/123/abc"),
+                "watchlist": [
+                    {
+                        "url": "https://witanime.life/anime/one-piece/",
+                        "latest_template": "https://witanime.site/watch/one-piece-الحلقة-{x}/"
+                    }
+                ]
+            },
+            "sites": {
+                "Witanime Profile": {
+                    "url": "https://witanime.site/watch/one-piece-الحلقة-{x}/"
+                }
+            }
+        }
+        
+        import json
+        import utils.config
+        with open(os.path.join(utils.config.APP_DIR, "sites_config.json"), "w", encoding="utf-8") as f:
+            json.dump(test_data, f)
+            
+        utils.config.sites_data.clear()
+        utils.config.app_settings["watchlist"] = []
+        load_config()
+        # Since load_config reads it into app_settings:
+        with open(os.path.join(utils.config.APP_DIR, "sites_config.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+            utils.config.app_settings["watchlist"] = data.get("watchlist", [])
+        
+        # We must call the migration block directly or load_config does it:
+        # Wait, load_config DOES the migration! So it modifies data and THEN we can check it.
+        # But load_config doesn't put watchlist back into app_settings, it modifies app_settings directly!
+        # Ah, load_config reads data["watchlist"] and migrates IT. But it modifies `app_settings.get("watchlist", [])` IN PLACE!
+        # If `app_settings["watchlist"]` is empty, it migrates nothing!
+        load_config()
+        
+        self.assertEqual("https://discord.com/api/webhooks/123/abc", app_settings["discord_webhook"])
+        
+        prof = sites_data["Witanime Profile"]
+        self.assertEqual("https://witanime.site/watch/one-piece-الحلقة-{x}/", prof["url"])
+        
+        w = app_settings["watchlist"][0]
+        self.assertEqual("https://witanime.site/anime/one-piece/", w["url"])
+        self.assertEqual("https://witanime.site/watch/one-piece-الحلقة-{x}/", w["latest_template"])
+

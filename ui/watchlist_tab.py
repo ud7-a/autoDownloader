@@ -16,7 +16,7 @@ from qfluentwidgets import (PushButton, PrimaryPushButton, SimpleCardWidget, Smo
 from utils.config import (get_watchlist, remove_watch, update_watch, app_settings, APP_DIR,
                           cloud_register_and_sync, cloud_unsubscribe, save_config)
 from ui.styles import apply_danger_style, apply_tinted_style, rounded_pixmap
-from ui.search_tab import extract_domain, site_display_name, site_icon
+from ui.search_tab import extract_domain, site_display_name, site_icon, is_movie_link
 
 
 # Favicon size on a watchlist card. Sits next to the 11px site name, so it reads as
@@ -43,20 +43,44 @@ def entries_airing_today(entries, today):
             if not w.get("release_day") or w.get("release_day") == today]
 
 
-def _persist_cover(url, cover_path):
-    """Copy a (temp-cached) cover into a durable Watchlist folder so it survives
-    temp pruning. Returns the persistent path, or "" if there's nothing to copy."""
-    if not cover_path or not os.path.exists(cover_path):
+# Covers saved this session, kept decoded. A card built right after Follow would
+# otherwise open the file that was written a moment earlier, on the GUI thread --
+# and the first read of freshly written image bytes on Windows can take seconds
+# (the same thing that froze the Search grid).
+_saved_covers = {}
+
+
+def _persist_cover(url, cover):
+    """Store a cover in the durable Watchlist folder so it survives temp pruning.
+
+    `cover` is a decoded QImage (what Search hands over now) or a path to a cached
+    file. Returns the persistent path, or "" if there is nothing to store.
+    """
+    from PyQt6.QtGui import QImage
+    if isinstance(cover, QImage):
+        if cover.isNull():
+            return ""
+    elif not cover or not os.path.exists(cover):
         return ""
     try:
         dest_dir = os.path.join(APP_DIR, "watchlist_covers")
         os.makedirs(dest_dir, exist_ok=True)
         key = hashlib.md5(url.encode("utf-8", "replace")).hexdigest()[:16]
         dest = os.path.join(dest_dir, f"{key}.img")
-        shutil.copy2(cover_path, dest)
+        if isinstance(cover, QImage):
+            if not cover.save(dest, "JPEG", 90):
+                return ""
+            _saved_covers[dest] = cover
+        else:
+            shutil.copy2(cover, dest)
         return dest
     except Exception:
         return ""
+
+
+def _cover_is_missing(entry):
+    c = (entry or {}).get("cover", "")
+    return not c or not os.path.exists(c)
 
 
 def _builtin_sound_path():
@@ -360,13 +384,23 @@ class WatchCard(SimpleCardWidget):
         poster.setFixedSize(56, 84)
         poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cover = entry.get("cover", "")
-        pix = rounded_pixmap(cover, 56, 84, 6) if cover else None
+        held = _saved_covers.get(cover) if cover else None
+        if held is not None:
+            from ui.styles import rounded_from_image
+            pix = rounded_from_image(held, 56, 84, 6)
+        else:
+            pix = rounded_pixmap(cover, 56, 84, 6) if cover else None
         if pix is not None:
             poster.setPixmap(pix)
         else:
             poster.setText("🎞️")
             poster.setStyleSheet("border-radius: 6px; background-color: #1e1e1e; "
                                  "color: #555555; font-size: 24px;")
+        # Same flag as the Search cards, scaled down to this 56px poster.
+        self.lbl_movie = None
+        if is_movie_link(entry.get("url", "")):
+            from ui.styles import add_movie_badge
+            self.lbl_movie = add_movie_badge(poster, font_px=7, padding="1px 3px", offset=3)
         root.addWidget(poster)
 
         info = QVBoxLayout()
@@ -612,11 +646,16 @@ class WatchlistWidget(QWidget):
 
     def follow(self, title, url, domain, cover=""):
         """Add an anime to the watchlist (called from Search) and check it once."""
-        from utils.config import add_watch
-        added = add_watch({"title": title, "url": url, "domain": domain,
-                           "cover": _persist_cover(url, cover),
-                           "seen_max": None, "latest_max": None,
-                           "latest_template": "", "new_count": 0, "checked": 0})
+        from utils.config import add_watch, update_watch
+        # Match ignoring a trailing slash: restored entries end in "/" while search
+        # links may not, and an exact match would add the same anime twice.
+        existing = next((w for w in get_watchlist()
+                         if (w.get("url") or "").rstrip("/") == url.rstrip("/")), None)
+        added = existing is None and add_watch(
+            {"title": title, "url": url, "domain": domain,
+             "cover": _persist_cover(url, cover),
+             "seen_max": None, "latest_max": None,
+             "latest_template": "", "new_count": 0, "checked": 0})
         self.refresh_cards()
         if added:
             InfoBar.success("Now Watching", f"'{title}' added to your Watchlist.",
@@ -624,7 +663,18 @@ class WatchlistWidget(QWidget):
             self._start_check([w for w in get_watchlist() if w.get("url") == url])
             self.refresh_schedule()   # a new follow has no release day yet
         else:
-            InfoBar.info("Already Watching", f"'{title}' is already in your Watchlist.",
+            # Following again is how a lost poster comes back: the file can go
+            # missing (three restored entries pointed at covers that no longer
+            # existed), and nothing else would ever replace it.
+            healed = ""
+            if existing is not None and _cover_is_missing(existing):
+                healed = _persist_cover(existing.get("url", url), cover)
+                if healed:
+                    update_watch(existing.get("url", url), cover=healed)
+                    self.refresh_cards()
+            InfoBar.info("Already Watching",
+                         f"'{title}' is already in your Watchlist."
+                         + (" Its poster has been restored." if healed else ""),
                          position=InfoBarPosition.TOP, duration=3000, parent=self.window())
 
     def remove_one(self, url):

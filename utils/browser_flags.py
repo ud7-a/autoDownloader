@@ -29,7 +29,7 @@ GOOGLE_DNS_API = "https://dns.google/resolve"
 # Hostnames worth pinning: the supported anime sites plus the file hosts episodes
 # are actually fetched from.
 DEFAULT_HOSTS = (
-    "witanime.life", "www.witanime.life",
+    "witanime.site", "www.witanime.site",
     # det.* is where eta.animerco.org now redirects. Pinning only the entry host
     # would leave the host every page actually loads from unresolved, which is the
     # failure this list exists to prevent.

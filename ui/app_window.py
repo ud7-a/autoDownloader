@@ -204,7 +204,7 @@ class AppWindow(FluentWindow):
 
         # Wire up the update signal
         signals.update_available.connect(self.prompt_update)
-
+        signals.remote_commands_received.connect(self._execute_remote_commands)
 
         # Auto-check the Watchlist shortly after launch and periodically while open
         if get_watchlist():
@@ -259,7 +259,7 @@ class AppWindow(FluentWindow):
             cloud_send_heartbeat()
             cmds = cloud_fetch_commands()
             if cmds:
-                QTimer.singleShot(0, lambda: self._execute_remote_commands(cmds))
+                signals.remote_commands_received.emit(cmds)
         threading.Thread(target=_bg, daemon=True).start()
 
     def _execute_remote_commands(self, commands: list[dict]):
@@ -295,15 +295,49 @@ class AppWindow(FluentWindow):
         for cmd in new_commands:
             url = cmd.get("anime_url", "")
             title = cmd.get("anime_title", "")
-            ep_spec = str(cmd.get("episodes", "1"))
+            ep_spec = str(cmd.get("episodes", "") or "").strip()
+            
             if not url:
                 continue
+
+            # Witanime moved (witanime.life/.net -> witanime.site). Commands queued before
+            # that still carry the old URL; rewrite it so the local entry still matches.
+            from utils.config import migrate_witanime_url
+            url = migrate_witanime_url(url)
+
+            def _norm(u):
+                import re
+                return re.sub(r"^https?://(www\.)?", "", u).rstrip("/")
+
+            # Find matching watchlist entry for template & domain
+            entry = next((w for w in get_watchlist() if _norm(w.get("url", "")) == _norm(url)), None)
+
+            if not entry:
+                InfoBar.error(
+                    "Cloud Download Failed",
+                    f"Watchlist entry missing for {title or url}. Update it in the app and trigger again.",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=5000
+                )
+                continue
+
+            if not any(ch.isdigit() for ch in ep_spec):
+                latest = entry.get("latest_max") or entry.get("seen_max") or 0
+                if not latest:
+                    InfoBar.error(
+                        "Cloud Download Failed",
+                        f"Cannot resolve latest episode for {title or url}.",
+                        parent=self,
+                        position=InfoBarPosition.TOP,
+                        duration=5000
+                    )
+                    continue
+                ep_spec = str(latest)
 
             key = (url, ep_spec)
             if key not in seen_keys:
                 seen_keys.add(key)
-                # Find matching watchlist entry for template & domain
-                entry = next((w for w in get_watchlist() if w.get("url") == url), None)
                 template = entry.get("latest_template") if entry else ""
                 domain = entry.get("domain") if entry else ("witanime" if "witanime" in url else "animerco")
                 if not template:

@@ -859,8 +859,13 @@ class DownloaderWidget(QWidget):
         # user's, and save_config() (which _begin_download calls) drops _transient
         # entries -- shadowing a real profile under its own key would delete it.
         from ui.search_tab import resolve_site_flow, DEFAULT_SITE_FLOWS
+        from core.site_health import lookup as site_lookup
         step_paths, next_btn = resolve_site_flow(domain)
-        pinned_flow = step_paths if domain in DEFAULT_SITE_FLOWS else None
+        # Match by site name, not the exact host: the flow table is keyed "witanime.life"
+        # while entries now say "witanime.site", and a remote command can pass a bare
+        # "witanime". An exact `in` check missed all of those and left the built-in flow
+        # unpinned even though resolve_site_flow (which also matches by name) returned it.
+        pinned_flow = step_paths if site_lookup(DEFAULT_SITE_FLOWS, domain) else None
 
         transient = site_key not in sites_data
         if transient:

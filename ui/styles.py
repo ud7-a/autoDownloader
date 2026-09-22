@@ -8,6 +8,23 @@ _ROUNDED_CACHE = {}
 _ROUNDED_CACHE_MAX = 240
 
 
+def render_scale():
+    """Pixels per logical pixel to render posters at: the densest attached screen.
+
+    Posters used to be drawn at exactly their logical size, so on a 125% display
+    Windows stretched a 56x84 Watchlist poster to 70x105 and every one looked soft
+    next to the crisp text beside it. Rendering at the densest screen's ratio keeps
+    them sharp there, and Qt scales down cleanly on any less dense monitor.
+    """
+    try:
+        from PyQt6.QtGui import QGuiApplication
+        screens = QGuiApplication.screens() if QGuiApplication.instance() else []
+        ratio = max((s.devicePixelRatio() for s in screens), default=1.0)
+    except Exception:
+        ratio = 1.0
+    return min(max(ratio, 1.0), 3.0)
+
+
 def rounded_pixmap(path, w, h, radius=6):
     """Load an image, center-crop to w×h, and clip to rounded corners.
     Returns a QPixmap, or None if the image can't be loaded.
@@ -22,8 +39,9 @@ def rounded_pixmap(path, w, h, radius=6):
     from PyQt6.QtCore import QSize
     from PyQt6.QtGui import QImageReader
 
+    scale = render_scale()
     try:
-        key = (path, os.path.getmtime(path), w, h, radius)
+        key = (path, os.path.getmtime(path), w, h, radius, scale)
     except OSError:
         return None
     cached = _ROUNDED_CACHE.get(key)
@@ -33,31 +51,97 @@ def rounded_pixmap(path, w, h, radius=6):
     reader = QImageReader(path)
     reader.setAutoTransform(True)
     size = reader.size()
+    pw, ph = math.ceil(w * scale), math.ceil(h * scale)
     if size.isValid() and size.width() > 0 and size.height() > 0:
-        # Cover-fit: scale so both dimensions reach the target, then centre-crop.
-        factor = max(w / size.width(), h / size.height())
-        reader.setScaledSize(QSize(max(w, int(math.ceil(size.width() * factor))),
-                                   max(h, int(math.ceil(size.height() * factor)))))
+        # Cover-fit at the size actually drawn (device pixels). Only ever let the
+        # decoder shrink: asking it to enlarge is a blunt resize, and
+        # rounded_from_image does any enlarging smoothly anyway.
+        factor = max(pw / size.width(), ph / size.height())
+        if factor < 1:
+            reader.setScaledSize(QSize(max(pw, int(math.ceil(size.width() * factor))),
+                                       max(ph, int(math.ceil(size.height() * factor)))))
     image = reader.read()
     if image.isNull():
         return None
-    x = max(0, (image.width() - w) // 2)
-    y = max(0, (image.height() - h) // 2)
-    image = image.copy(x, y, w, h)
-
-    out = QPixmap(w, h)
-    out.fill(Qt.GlobalColor.transparent)
-    p = QPainter(out)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    clip = QPainterPath()
-    clip.addRoundedRect(QRectF(0, 0, w, h), radius, radius)
-    p.setClipPath(clip)
-    p.drawImage(0, 0, image)
-    p.end()
+    out = rounded_from_image(image, w, h, radius)
+    if out is None:
+        return None
 
     if len(_ROUNDED_CACHE) >= _ROUNDED_CACHE_MAX:
         _ROUNDED_CACHE.pop(next(iter(_ROUNDED_CACHE)))
     _ROUNDED_CACHE[key] = out
+    return out
+
+
+def add_movie_badge(poster, font_px=10, padding="2px 6px", offset=6):
+    """Pin a "MOVIE" flag to a poster label's top-left corner and return it.
+
+    A child of the poster, so replacing the poster's pixmap later leaves it in
+    place. Search cards and Watchlist cards both use this, sized to their poster.
+    The font lives in the stylesheet on purpose: a placeholder poster carries its
+    own font-size (34px for the glyph), which cascades to children and blew the
+    badge up when it was set through setFont().
+    """
+    from PyQt6.QtWidgets import QLabel
+    badge = QLabel("MOVIE", poster)
+    badge.setStyleSheet("background-color: #4cc2ff; color: #0b1a24; "
+                        f"border-radius: 4px; padding: {padding}; "
+                        "font-family: 'Segoe UI Variable', 'Segoe UI'; "
+                        f"font-size: {font_px}px; font-weight: bold; "
+                        "letter-spacing: 0.5px;")
+    badge.setToolTip("Movie")
+    badge.adjustSize()
+    badge.move(offset, offset)
+    badge.raise_()
+    return badge
+
+
+def rounded_from_image(image, w, h, radius=6):
+    """Centre-crop an ALREADY LOADED image to w×h and clip it to rounded corners.
+
+    The point of taking an image rather than a path: rounded_pixmap() opens the file
+    and decodes it, and doing that on the GUI thread is what froze the window. The
+    captured stack was always the same -- set_cover -> rounded_pixmap ->
+    QImageReader.size() -- blocking for up to 16 s while a worker thread was busy
+    writing those very files (Windows makes a first read of a freshly written file
+    expensive, virus scanning included). Whoever already holds the decoded image can
+    hand it straight here and the GUI thread only paints.
+    """
+    if image is None or image.isNull():
+        return None
+    # Cover-fit before cropping. This used to crop straight away, which is only
+    # right when the caller had already scaled the image to fit -- rounded_pixmap
+    # does, but a QImage handed over directly often has not: a 164x200 search cover
+    # shown as a 56x84 Watchlist poster came out as a zoomed-in slice of its middle,
+    # and so did a 375x500 animerco cover on a 164x200 search card.
+    #
+    # Everything below works in device pixels (w, h times render_scale()), and the
+    # result is tagged with that ratio so it still lays out at w x h. See
+    # render_scale() for why drawing at the logical size looked soft.
+    import math
+    scale = render_scale()
+    pw, ph = math.ceil(w * scale), math.ceil(h * scale)
+    iw, ih = image.width(), image.height()
+    factor = max(pw / iw, ph / ih)
+    sw, sh = max(pw, math.ceil(iw * factor)), max(ph, math.ceil(ih * factor))
+    if (sw, sh) != (iw, ih):
+        image = image.scaled(sw, sh, Qt.AspectRatioMode.IgnoreAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+    x = max(0, (image.width() - pw) // 2)
+    y = max(0, (image.height() - ph) // 2)
+    image = image.copy(x, y, pw, ph)
+
+    out = QPixmap(pw, ph)
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    clip = QPainterPath()
+    clip.addRoundedRect(QRectF(0, 0, pw, ph), radius * scale, radius * scale)
+    p.setClipPath(clip)
+    p.drawImage(0, 0, image)
+    p.end()
+    out.setDevicePixelRatio(scale)
     return out
 
 

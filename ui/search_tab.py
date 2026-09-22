@@ -9,9 +9,9 @@ import threading
 from collections import defaultdict
 from urllib.parse import urlparse, quote, unquote
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel)
 from qfluentwidgets import (LineEdit, PrimaryPushButton, ComboBox, ToolButton,
                             SimpleCardWidget, SmoothScrollArea, FluentIcon as FIF,
                             InfoBar, InfoBarPosition, IndeterminateProgressRing)
@@ -24,7 +24,7 @@ from ui.styles import rounded_pixmap
 # Fixed list of supported websites (domain -> search URL template). The Search tab
 # only allows these; users cannot add arbitrary sites.
 SUPPORTED_SITES = {
-    "witanime.life": "https://witanime.life/?search_param=animes&s={query}",
+    "witanime.site": "https://witanime.site/search?q={query}",
     "eta.animerco.org": "https://eta.animerco.org/?s={query}",
 }
 
@@ -32,24 +32,38 @@ SUPPORTED_SITES = {
 # search profile has no existing same-domain profile to inherit steps from. Without
 # this a new profile would have empty step_paths and couldn't download.
 DEFAULT_SITE_FLOWS = {
-    "witanime.life": {
+    # Taken from a hand-tuned working profile ("template witanime.json"). Order is
+    # the fallback order: Mediafire first, then Google Drive, then witanime's own
+    # wtsrv mirror, then Workupload, then gofile.
+    "witanime.site": {
         "next_btn_xpath": "الحلقة التالية",
         "step_paths": {
-            "mediafire": [
-                {"xpath": "mediafire #last", "delay": 7.0},
-                {"xpath": '//*[@id="downloadButton"]', "delay": 3.0},
+            "FHD - Mediafire": [
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 1.0},
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mediafire')]", "delay": 5.0},
+                {"xpath": '//*[@id="downloadButton"]', "delay": 2.0},
             ],
-            "google drive": [
-                {"xpath": "google drive #last", "delay": 3.0},
+            "FHD - Google Drive": [
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 2.0},
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]", "delay": 3.0},
                 {"xpath": "Download anyway", "delay": 2.0},
             ],
-            "Workupload": [
-                {"xpath": "workupload #last", "delay": 5.0},
-                {"xpath": '//*[@id=\\"file\\"]/div[3]/div/a', "delay": 5.0},
-            ],
-            "rf": [
-                {"xpath": "rf #last", "delay": 11.0},
+            "FHD - wtsrv": [
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 1.0},
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wtsrv')]", "delay": 5.0},
                 {"xpath": '//*[@id="downloadButton"]', "delay": 2.0},
+            ],
+            "FHD - Workupload": [
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 2.0},
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'workupload')]", "delay": 5.0},
+                {"xpath": '//*[@id="file"]/div[3]/div/a', "delay": 2.0},
+            ],
+            # gofile opens in the same tab (no popup) on a folder page holding the
+            # episode; its Download button is the only [data-action=download] there.
+            "FHD - gofile": [
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 1.0},
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gofile')]", "delay": 5.0},
+                {"xpath": "//button[@data-action='download']", "delay": 2.0},
             ],
         },
     },
@@ -101,6 +115,34 @@ def site_display_name(domain):
     move ends up fixed in one place and still broken in another.
     """
     return site_key(domain)
+
+
+def clean_title(title):
+    """A result title as a person would write it: HTML entities decoded, spaces tidied.
+
+    Titles scraped from page markup can arrive still encoded -- witanime's live
+    search page carries "I&#039;ll" -- and from the card they flow into profile
+    names, download folder names and the Watchlist, and break schedule matching,
+    which compares plain titles. Applied to every site's results.
+    """
+    import html
+    text = html.unescape(title or "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def is_movie_link(url):
+    """True if a search result links to a movie rather than a series.
+
+    Both sites say so in the path: witanime uses /movie/<slug>, animerco
+    /movies/<slug> (a mixed "slime" page came back as three /animes/ and one
+    /movies/). Whole path segments only, so a series whose slug merely contains
+    "movie" is not flagged.
+    """
+    try:
+        segments = urlparse(url or "").path.lower().split("/")
+    except Exception:
+        return False
+    return "movie" in segments or "movies" in segments
 
 
 def site_icon_path(domain, must_exist=True):
@@ -239,6 +281,12 @@ def _make_headless_driver():
     from subprocess import CREATE_NO_WINDOW
 
     options = webdriver.ChromeOptions()
+    # Hand the page back once the DOM is parsed instead of waiting for every image,
+    # font and ad script to settle. Search and detection only ever read the DOM, and
+    # both poll for content afterwards, so anything rendered late is still picked up.
+    # Measured on animerco: a search page load went 617 -> 532 ms and an anime page
+    # 623 -> 355 ms -- and detection pays that once per season, up to 25 of them.
+    options.page_load_strategy = "eager"
     options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
@@ -315,6 +363,15 @@ def release_driver():
     except RuntimeError:
         pass
 
+# Deliberately NOT pre-warming the browser here.
+#
+# Launching Chrome ahead of the first search looks like free speed -- it takes ~1.4 s
+# and only the first query pays it. Measured with an empty cover cache, though, doing
+# it on a background thread froze the UI: 1 stall of 880 ms with the warm-up on, none
+# with it off, same search. Starting a browser is not idle work. _make_headless_driver
+# resolves ~15 hostnames over HTTPS through apply_dns_flags before Chrome even starts,
+# and that Python work holds the GIL against the UI thread. A 1.4 s wait the user
+# chose by pressing Search beats a freeze that arrives while they are typing.
 def shutdown_shared_driver():
     """Tear down the shared search browser. Never blocks indefinitely: if a search
     is mid-flight holding the lock, we grab the driver reference under a bounded
@@ -538,19 +595,97 @@ def _best_cover_url(url):
     return url
 
 
-def download_covers(driver, img_urls, cache_dir=None):
+# Reading a cover file for the FIRST time after it was written costs around half a
+# second on Windows -- the on-access scan of bytes that have just arrived from the
+# net. Measured on a page of 19: downloading and decoding them all took 528 ms, the
+# next search re-reading those same files took 10171 ms, and a third search over the
+# now-settled files took 47 ms. So the cost is real, once per file, and serial.
+#
+# Two answers, both cheap. Read the cached files concurrently, which caps that tail;
+# and after writing new ones, read them once in the background so the charge is paid
+# while nobody is waiting. Only the read is spread across threads -- decoding and the
+# signal that follows stay on the calling thread, because Qt objects belong to the
+# thread that made them.
+_COVER_IO_WORKERS = 8
+
+
+def _read_cover_files(paths):
+    """Read several cache files at once. Returns {path: bytes}, skipping failures."""
+    if not paths:
+        return {}
+
+    def one(p):
+        try:
+            with open(p, "rb") as f:
+                return p, f.read()
+        except OSError:
+            return p, None
+
+    from concurrent.futures import ThreadPoolExecutor
+    workers = min(_COVER_IO_WORKERS, len(paths))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return {p: data for p, data in pool.map(one, paths) if data}
+
+
+def _warm_cover_files(paths):
+    """Pay the first-read cost of freshly written covers off the critical path.
+
+    One plain daemon thread reading in sequence -- deliberately not the thread pool
+    above. A pool's workers are joined at interpreter exit, and closing the app while
+    one was still warming left chromedriver running behind it.
+    """
+    paths = [p for p in paths if p]
+    if not paths:
+        return
+
+    def warm():
+        for p in paths:
+            try:
+                with open(p, "rb") as f:
+                    f.read()
+            except OSError:
+                pass
+
+    threading.Thread(target=warm, daemon=True, name="cover-warm").start()
+
+
+def download_covers(driver, img_urls, cache_dir=None, on_image=None):
     """Download image URLs (from the current same-origin page) to local cache files.
 
     Returns a list of local paths aligned with img_urls ("" for any that failed or
     were empty). Cached by MD5 of the URL, batch-fetched in one round-trip.
+
+    `on_image(index, path, image)`, if given, is called with each cover as a decoded
+    QImage the moment it is ready, so a caller can show them one by one instead of
+    waiting for the batch. Decoding happens HERE, from the bytes already in memory:
+    reading back the file just written costs 0.7-2.9 s per cover on Windows, because
+    the first access to newly-downloaded bytes waits for the virus scanner. Nineteen
+    covers measured 55.6 s that way against 620 ms to download them all. Decoding a
+    file the scanner has already seen is ~0.3 ms, so the cached branch below can
+    still read from disk.
     """
     import hashlib
     if cache_dir is None:
         cache_dir = _covers_cache_dir()
     _prune_cover_cache(cache_dir)
 
+    from PyQt6.QtGui import QImage
+
+    def announce(index, path, data=None):
+        """Hand a decoded cover to the caller, from memory when we have the bytes."""
+        if on_image is None:
+            return
+        try:
+            img = QImage()
+            ok = img.loadFromData(data) if data is not None else img.load(path)
+            if ok and not img.isNull():
+                on_image(index, path, img)
+        except Exception:
+            pass
+
     paths = [""] * len(img_urls)
-    to_fetch = []  # (index, url, cache_path)
+    to_fetch = []   # (index, url, cache_path)
+    cached = []     # (index, cache_path)
     for i, url in enumerate(img_urls):
         url = _best_cover_url(url)
         if not url or url.startswith("data:"):
@@ -559,8 +694,14 @@ def download_covers(driver, img_urls, cache_dir=None):
         p = os.path.join(cache_dir, f"{key}.img")
         if os.path.exists(p) and os.path.getsize(p) > 500:
             paths[i] = p
+            cached.append((i, p))
         else:
             to_fetch.append((i, url, p))
+
+    if cached:
+        blobs = _read_cover_files([p for _i, p in cached])
+        for i, p in cached:
+            announce(i, p, blobs.get(p))
 
     if to_fetch:
         try:
@@ -568,16 +709,26 @@ def download_covers(driver, img_urls, cache_dir=None):
                 _FETCH_IMGS_JS, [f[1] for f in to_fetch], COVER_MAX_EDGE) or []
         except Exception:
             data_urls = []
+        written = []
         for j, (i, _url, p) in enumerate(to_fetch):
             du = data_urls[j] if j < len(data_urls) else ""
             if isinstance(du, str) and du.startswith("data:image"):
                 try:
+                    raw = base64.b64decode(du.split(",", 1)[1])
+                except Exception:
+                    continue
+                # Show it first, write it second. The cache write is only for the
+                # next search; nothing in this one reads the file back.
+                announce(i, p, raw)
+                try:
                     with open(p, "wb") as f:
                         # Already downscaled in the browser, so it lands ready to draw.
-                        f.write(base64.b64decode(du.split(",", 1)[1]))
+                        f.write(raw)
                     paths[i] = p
+                    written.append(p)
                 except Exception:
                     pass
+        _warm_cover_files(written)
     return paths
 
 
@@ -619,11 +770,15 @@ def page_anchors(driver):
 class AnimeSearchThread(QThread):
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
+    # (link, cover) where cover is a decoded QImage whenever the worker already has
+    # one -- the GUI thread must not open and decode poster files itself.
+    cover_loaded = pyqtSignal(str, object)
 
-    def __init__(self, query, search_url_template):
+    def __init__(self, query, search_url_template, page=1):
         super().__init__()
         self.query = query
         self.search_url_template = search_url_template
+        self.page = page
 
     def _poll_heuristic(self, driver, timeout, done):
         """Repeatedly run the detector until `done(results)` is true or `timeout`
@@ -648,13 +803,185 @@ class AnimeSearchThread(QThread):
         return last
 
     def run(self):
+        search_url = self.search_url_template.replace("{query}", quote(self.query))
+        
+        # Inject page parameter
+        if self.page > 1:
+            if "witanime.site" in search_url:
+                search_url += f"&page={self.page}"
+            elif "animerco.org" in search_url:
+                search_url = search_url.replace("/?s=", f"/page/{self.page}/?s=")
+        
+        if "witanime.site" in search_url:
+            import urllib.request, re, os, hashlib
+            from PyQt6.QtGui import QImage
+            from PyQt6.QtCore import Qt
+            try:
+                entries, seen = [], set()
+                req = urllib.request.Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
+                try:
+                    html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        html = ""
+                    else:
+                        raise
+                        
+                cards = re.findall(r'''<a[^>]+href=['"]([^'"]+/(?:anime|movie)/[^'"]+)['"][^>]*>(.*?)</a>''', html, re.DOTALL | re.IGNORECASE)
+                for url, inner in cards:
+                    if url in seen: continue
+                    img = re.search(r'''<img[^>]+src=['"]([^'"]+)['"][^>]*alt=['"]([^'"]+)['"]''', inner, re.IGNORECASE)
+                    if img:
+                        cover_url, title = img.groups()
+                        # cover starts empty (a path, once fetched); img holds the URL.
+                        entries.append({"link": url, "title": title.strip(),
+                                        "cover": "", "img": cover_url})
+                        seen.add(url)
+                
+                cache_dir = _covers_cache_dir()
+                _prune_cover_cache(cache_dir)
+
+                # Cards first; covers stream in behind them.
+                #
+                # The manager is built per search, in this worker thread, and that is
+                # deliberate. Pooling one across searches was tried: a manager belongs
+                # to the thread that created it, so sharing one means moving the whole
+                # cover path onto the GUI thread -- and that version crashed natively
+                # (0xC0000409) on every run, with and without aborting in-flight
+                # replies. The only thing pooling would have saved is a DNS lookup and
+                # TLS handshake per page, which measured as noise next to the download
+                # itself. Not worth a crash.
+                targets = entries[:60]
+                self.finished.emit(entries)
+                if targets:
+                    from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+                    from PyQt6.QtCore import QUrl, QEventLoop
+
+                    manager = QNetworkAccessManager()
+                    loop = QEventLoop()
+                    pending = [len(targets)]
+                    written = []
+
+                    def on_reply(reply, entry, url):
+                        if not self.isInterruptionRequested():
+                            try:
+                                data = reply.readAll()
+                                if data:
+                                    key = hashlib.md5(url.encode("utf-8", "replace")).hexdigest()[:16]
+                                    p = os.path.join(cache_dir, f"{key}.img")
+                                    img = QImage()
+                                    if img.loadFromData(data) and not img.isNull():
+                                        img = img.scaled(164, 200,
+                                                         Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                                         Qt.TransformationMode.SmoothTransformation)
+                                        img.save(p, "JPEG", 50)
+                                        written.append(p)
+                                        # Hand over the image we already hold. Sending
+                                        # the path instead made the GUI thread reopen
+                                        # and decode this very file, while this thread
+                                        # was still writing others -- measured freezes
+                                        # of 3 to 16 s, every one of them stuck in
+                                        # QImageReader.size().
+                                        self.cover_loaded.emit(entry["link"], img)
+                                    else:
+                                        with open(p, "wb") as f:
+                                            f.write(data)
+                                        loaded = QImage()
+                                        if loaded.load(p) and not loaded.isNull():
+                                            self.cover_loaded.emit(entry["link"], loaded)
+                            except Exception:
+                                pass
+                        reply.deleteLater()
+                        pending[0] -= 1
+                        if pending[0] == 0 or self.isInterruptionRequested():
+                            loop.quit()
+
+                    # Sort the page into what must be downloaded and what is already
+                    # on disk, and start the downloads first: the cached ones used to
+                    # be decoded inline here, which held every request behind them.
+                    cached, needed = [], []
+                    for entry in targets:
+                        url = _best_cover_url(entry.get("img", ""))
+                        if not url:
+                            pending[0] -= 1
+                            continue
+                        key = hashlib.md5(url.encode("utf-8", "replace")).hexdigest()[:16]
+                        p = os.path.join(cache_dir, f"{key}.img")
+                        if os.path.exists(p) and os.path.getsize(p) > 100:
+                            cached.append((entry, p))
+                            pending[0] -= 1
+                        else:
+                            needed.append((entry, url))
+
+                    for entry, url in needed:
+                        if self.isInterruptionRequested():
+                            break
+                        req = QNetworkRequest(QUrl(url))
+                        req.setRawHeader(b"User-Agent", b"Mozilla/5.0")
+                        req.setRawHeader(b"Referer", b"https://witanime.site/")
+                        # Qt waits forever by default (transferTimeout is 0) and opens
+                        # at most 6 connections per host, so one stalled poster holds a
+                        # slot and everything behind it waits -- measured as a page
+                        # taking 16 s to deliver 6 of 24 covers that elsewhere took 1 s.
+                        # A bounded wait hands the slot back.
+                        req.setTransferTimeout(8000)
+                        reply = manager.get(req)
+                        reply.finished.connect(lambda r=reply, e=entry, u=url: on_reply(r, e, u))
+
+                    # Now the cached ones, while those downloads run. The files are
+                    # read together because the first read of a cover written by an
+                    # earlier search waits on the virus scanner -- one page of 19
+                    # measured 10.2 s read one after another, 47 ms once settled.
+                    # Decoding stays here, on this thread, so no Qt object is shared.
+                    if cached:
+                        blobs = _read_cover_files([p for _e, p in cached])
+                        for entry, p in cached:
+                            if self.isInterruptionRequested():
+                                break
+                            data = blobs.get(p)
+                            cached_img = QImage()
+                            ok = (cached_img.loadFromData(data) if data
+                                  else cached_img.load(p))
+                            if ok and not cached_img.isNull():
+                                self.cover_loaded.emit(entry["link"], cached_img)
+
+                    # Leaving a page must release its connections at once. Without
+                    # this the loop only ends when a reply arrives, so a page whose
+                    # covers are timing out held its manager (and its slots against
+                    # the image host) for the full 8 s while the next page opened 24
+                    # more -- which is why covers on the following page came back as
+                    # placeholders.
+                    from PyQt6.QtCore import QTimer as _QTimer
+                    guard = _QTimer()
+                    guard.setInterval(250)
+
+                    def _bail():
+                        if self.isInterruptionRequested():
+                            loop.quit()
+
+                    guard.timeout.connect(_bail)
+                    guard.start()
+                    try:
+                        if pending[0] > 0 and not self.isInterruptionRequested():
+                            loop.exec()
+                    finally:
+                        guard.stop()
+                        # Read what we just wrote, in the background, so the next
+                        # search over this page does not pay for it.
+                        _warm_cover_files(written)
+            except Exception as e:
+                self.error.emit(f"Witanime search failed: {e}")
+            return
+
         try:
             driver = acquire_driver()
         except Exception as e:
             self.error.emit(str(e))
             return
         try:
-            search_url = self.search_url_template.replace("{query}", quote(self.query))
+            # search_url already carries the page (built at the top of run()).
+            # Rebuilding it from the template here silently dropped /page/N/, so
+            # every animerco page loaded page 1.
             driver.get(search_url)
 
             # Smart wait: poll for result cards to appear instead of a fixed sleep.
@@ -684,12 +1011,26 @@ class AnimeSearchThread(QThread):
                 if title and link:
                     items.append({"title": title, "link": link, "img": img, "cover": ""})
 
-            # Resolve covers: cached file if present, else batch-fetch in parallel.
-            covers = download_covers(driver, [it["img"] for it in items])
-            for it, cov in zip(items, covers):
-                it["cover"] = cov
+            # Show the cards now, with no cover; stream the covers in afterwards. The
+            # covers were the whole wait on a cold cache -- the detection itself is a
+            # few ms -- so emitting first is what makes results appear promptly instead
+            # of after every poster has downloaded.
+            self.finished.emit([{"title": it["title"], "link": it["link"], "cover": ""}
+                                for it in items])
 
-            self.finished.emit([{"title": it["title"], "link": it["link"], "cover": it["cover"]} for it in items])
+            # Covers are fetched through the browser (same-origin fetch), so this must
+            # happen while the driver is still held. download_covers returns paths
+            # aligned with the inputs; announce each one as a card update.
+            # Each cover is announced as it is decoded, so the grid fills in rather
+            # than staying blank until the batch ends. Decoding happens inside
+            # download_covers, from the downloaded bytes -- re-reading the files it
+            # had just written measured 55.6 s for 19 covers (virus scanner), and
+            # sending the path instead would put that same read on the GUI thread.
+            def announce(_index, _path, image, _items=items):
+                if not self.isInterruptionRequested():
+                    self.cover_loaded.emit(_items[_index]["link"], image)
+
+            download_covers(driver, [it["img"] for it in items], on_image=announce)
         except Exception as e:
             self.error.emit(str(e))
         finally:
@@ -744,6 +1085,28 @@ class AnimeDetailsThread(QThread):
         # _find_season_links derives the base host from self.anime_url, so keep it in
         # sync (the watcher constructs this thread with an empty url and passes it here).
         self.anime_url = anime_url
+        
+        # Fast path for Witanime movies: they don't have episode lists, just a single watch page.
+        if "witanime.site/movie/" in anime_url:
+            return [{"template": anime_url.replace("/movie/", "/watch/movie/"), "max_ep": 1}]
+            
+        # --- FAST PATH FOR WITANIME.SITE (Bypasses Cloudflare headless block) ---
+        if "witanime.site" in anime_url:
+            try:
+                import urllib.request, re
+                req = urllib.request.Request(anime_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    html = response.read().decode("utf-8")
+                hrefs = re.findall(r'''href=['"]([^'"]+)['"]''', html, re.IGNORECASE)
+                template, max_ep = self._derive_from_hrefs(hrefs)
+                if template:
+                    record_detection(anime_url, len(hrefs), 1)
+                    return [{"label": "", "template": template, "max_ep": max_ep, "poster": "", "cover": ""}]
+                return []
+            except Exception:
+                return []
+        # ------------------------------------------------------------------------
+
         own = driver is None
         if own:
             driver = acquire_driver()
@@ -1061,16 +1424,22 @@ class AnimeDetailsThread(QThread):
 
 
 class AnimeResultCard(SimpleCardWidget):
-    selected = pyqtSignal(str, str, str)   # (title, href, cover_path)
+    # The cover travels as `object`: a decoded QImage (what search delivers) or a
+    # path. It used to be a str path only, and once search switched to handing over
+    # QImages the path stayed "" -- so Follow saved no poster to the Watchlist and
+    # season cards lost the anime's poster to fall back on.
+    selected = pyqtSignal(str, str, object)   # (title, href, cover)
 
-    follow = pyqtSignal(str, str, str)   # (title, href, cover_path)
+    follow = pyqtSignal(str, str, object)   # (title, href, cover)
 
     def __init__(self, title, href, cover_path, parent=None, on_load=None,
                  button_text="Load Anime", followable=False):
         super().__init__(parent)
+        from PyQt6.QtGui import QImage
         self.title = title
         self.href = href
-        self.cover_path = cover_path
+        self.cover_image = cover_path if isinstance(cover_path, QImage) else None
+        self.cover_path = "" if self.cover_image is not None else (cover_path or "")
         self._on_load = on_load
         self._button_text = button_text
         self.setFixedSize(180, 312)
@@ -1085,14 +1454,27 @@ class AnimeResultCard(SimpleCardWidget):
         cover = QLabel()
         cover.setFixedSize(164, 200)
         cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pix = rounded_pixmap(cover_path, 164, 200, 8) if (cover_path and os.path.exists(cover_path)) else None
+        if self.cover_image is not None:
+            from ui.styles import rounded_from_image
+            pix = rounded_from_image(self.cover_image, 164, 200, 8)
+        else:
+            pix = (rounded_pixmap(self.cover_path, 164, 200, 8)
+                   if (self.cover_path and os.path.exists(self.cover_path)) else None)
         if pix is not None:
             cover.setStyleSheet("background: transparent;")
             cover.setPixmap(pix)
         else:
             cover.setText("🎞️")
             cover.setStyleSheet("border-radius: 8px; background-color: #1e1e1e; color: #555555; font-size: 34px;")
+        self.lbl_cover = cover
         layout.addWidget(cover)
+
+        # Flag movies in the poster's top-left corner. A child of the cover label,
+        # so set_cover() swapping the pixmap later leaves it in place.
+        self.lbl_movie = None
+        if is_movie_link(href):
+            from ui.styles import add_movie_badge
+            self.lbl_movie = add_movie_badge(cover)
 
         lbl = QLabel(title)
         lbl.setWordWrap(True)
@@ -1117,10 +1499,40 @@ class AnimeResultCard(SimpleCardWidget):
             self.btn_follow.setCursor(Qt.CursorShape.PointingHandCursor)
             self.btn_follow.setToolTip("Watch for new episodes")
             self.btn_follow.clicked.connect(
-                lambda: self.follow.emit(self.title, self.href, self.cover_path))
+                lambda: self.follow.emit(self.title, self.href, self.cover()))
             btn_row.addWidget(self.btn_follow)
 
         layout.addLayout(btn_row)
+
+    def set_cover(self, cover):
+        """Show a cover, given either a decoded QImage or a path on disk.
+
+        A QImage is the fast road and the one the search paths use: the worker that
+        downloaded the poster already holds it decoded and scaled, so the GUI thread
+        only paints. Passing a path means the GUI thread opens and decodes the file,
+        which is what froze the window for up to 16 s -- kept only as a fallback for
+        callers that genuinely have nothing but a path.
+        """
+        import os
+        from PyQt6.QtGui import QImage
+        from ui.styles import rounded_pixmap, rounded_from_image
+
+        if isinstance(cover, QImage):
+            self.cover_image = cover
+            pix = rounded_from_image(cover, 164, 200, 8)
+        else:
+            self.cover_image = None
+            self.cover_path = cover
+            pix = (rounded_pixmap(cover, 164, 200, 8)
+                   if (cover and os.path.exists(cover)) else None)
+        if pix is not None:
+            self.lbl_cover.setStyleSheet("background: transparent;")
+            self.lbl_cover.setText("")
+            self.lbl_cover.setPixmap(pix)
+
+    def cover(self):
+        """The cover as the card holds it: a QImage if it has one, else the path."""
+        return self.cover_image if self.cover_image is not None else self.cover_path
 
     def set_followable(self, followable):
         if self.btn_follow is not None:
@@ -1130,7 +1542,7 @@ class AnimeResultCard(SimpleCardWidget):
         if self._on_load is not None:
             self._on_load()
         else:
-            self.selected.emit(self.title, self.href, self.cover_path)
+            self.selected.emit(self.title, self.href, self.cover())
 
     def mouseReleaseEvent(self, event):
         # Click anywhere on the card (outside the button) also loads it.
@@ -1141,7 +1553,7 @@ class AnimeResultCard(SimpleCardWidget):
 
 class AnimeSearchWidget(QWidget):
     profile_created_signal = pyqtSignal(str)   # new profile name -> Downloader selects it
-    follow_signal = pyqtSignal(str, str, str, str)  # (title, anime_url, domain, cover) -> Watchlist
+    follow_signal = pyqtSignal(str, str, str, object)  # (title, anime_url, domain, cover: QImage|path) -> Watchlist
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1229,14 +1641,49 @@ class AnimeSearchWidget(QWidget):
 
         self.grid_host = QWidget()
         self.grid_host.setStyleSheet("background: transparent;")
-        self.grid = QGridLayout(self.grid_host)
+        from qfluentwidgets import FlowLayout
+        self.grid = FlowLayout(self.grid_host)
         self.grid.setSpacing(14)
         self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        # FlowLayout handles alignment internally based on flow direction
         rc.addWidget(self.grid_host)
 
         self.scroll.setWidget(results_container)
         root.addWidget(self.scroll, 1)
+
+        # Pagination Navigator
+        self.paginator_container = QWidget()
+        self.paginator_container.setStyleSheet("background: transparent;")
+        pg_layout = QHBoxLayout(self.paginator_container)
+        pg_layout.setContentsMargins(0, 10, 0, 0)
+        pg_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.btn_prev_page = PrimaryPushButton("‹ Previous")
+        self.btn_prev_page.setFixedSize(100, 36)
+        self.btn_prev_page.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_prev_page.clicked.connect(self._on_prev_page)
+
+        self.lbl_page = QLabel("Page 1")
+        self.lbl_page.setStyleSheet("color: white; font-weight: bold; font-size: 14px;")
+        self.lbl_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_page.setFixedWidth(80)
+
+        self.btn_next_page = PrimaryPushButton("Next ›")
+        self.btn_next_page.setFixedSize(100, 36)
+        self.btn_next_page.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_next_page.clicked.connect(self._on_next_page)
+
+        # Left to right: Previous, page number, Next. The arrows and the order were
+        # both reversed ("Previous >" on the right of "< Next"), which read as the
+        # buttons doing the opposite of what they do.
+        pg_layout.addWidget(self.btn_prev_page)
+        pg_layout.addWidget(self.lbl_page)
+        pg_layout.addWidget(self.btn_next_page)
+        
+        self.paginator_container.hide()
+        root.addWidget(self.paginator_container)
+
+        self._current_page = 1
 
         self.refresh_domains()
         self._show_state("🔍", "Search for an anime",
@@ -1247,9 +1694,24 @@ class AnimeSearchWidget(QWidget):
 
     def _track(self, thread):
         """Keep a strong ref so GC can't delete a running thread's C++ object.
-        Prune only fully-finished threads (isRunning() False == run() returned,
-        finally-block included), so we never drop a live thread mid-run."""
-        self._threads = [t for t in self._threads if t.isRunning()]
+
+        isRunning() goes False as soon as run() returns, but the OS thread may not
+        have finished unwinding. Dropping the last reference then lets Python collect
+        the QThread while Qt still considers it alive, and the destructor blocks (or
+        aborts) -- on the GUI thread, which is where a freeze would be felt. wait()
+        on an already-finished thread returns at once, so joining first costs nothing
+        and removes that race.
+        """
+        kept = []
+        for t in self._threads:
+            if t.isRunning():
+                kept.append(t)
+            else:
+                try:
+                    t.wait(100)
+                except Exception:
+                    pass
+        self._threads = kept
         self._threads.append(thread)
 
     def showEvent(self, event):
@@ -1295,6 +1757,10 @@ class AnimeSearchWidget(QWidget):
 
     # ---- search ----
     def perform_search(self):
+        self._current_page = 1
+        self._execute_search()
+
+    def _execute_search(self):
         domain = self._current_domain()
         if not domain:
             InfoBar.warning("Website Required", "Select a website to search on first.",
@@ -1304,58 +1770,126 @@ class AnimeSearchWidget(QWidget):
         if not query:
             self._show_state("⌨️", "Type an anime title", "Enter a name above, then press Enter.")
             self.txt_query.setFocus()
+            self.paginator_container.hide()
             return
 
-        template = self._search_url_for(domain)   # fixed URL for the supported site
+        template = self._search_url_for(domain)
 
         self.btn_search.setEnabled(False)
+        self.btn_prev_page.setEnabled(False)
+        self.btn_next_page.setEnabled(False)
         self.lbl_status.setText("")
         self._show_state("", f"Searching {site_display_name(domain)}…",
-                         f"Looking for “{query}”.", busy=True)
+                         f"Looking for “{query}” (Page {self._current_page}).", busy=True)
 
-        th = AnimeSearchThread(query, template)
-        th.finished.connect(self.on_search_finished)
-        th.error.connect(self.on_search_error)
+        for t in self._threads:
+            t.requestInterruption()
+
+        # Only the newest request may touch the grid. Interruption is only a request
+        # -- a worker already past its last check still delivers -- so pressing Enter
+        # again (it works while the button is disabled) used to show both queries'
+        # results mixed in one grid, whichever finished last appended on top.
+        gen = self._next_generation()
+        th = AnimeSearchThread(query, template, page=self._current_page)
+        th.finished.connect(lambda r, g=gen: self._is_current(g) and self.on_search_finished(r))
+        th.error.connect(lambda m, g=gen: self._is_current(g) and self.on_search_error(m))
+        if hasattr(th, 'cover_loaded'):
+            th.cover_loaded.connect(
+                lambda link, c, g=gen: self._is_current(g) and self.on_cover_loaded(link, c))
         self._track(th)
         th.start()
 
+    def _next_generation(self):
+        """Start a new grid owner; anything tagged with an older number is ignored."""
+        self._grid_gen = getattr(self, "_grid_gen", 0) + 1
+        self._pending_covers = {}
+        return self._grid_gen
+
+    def _is_current(self, gen):
+        return gen == getattr(self, "_grid_gen", 0)
+
+    def _on_prev_page(self):
+        if self._current_page > 1:
+            self._current_page -= 1
+            self._execute_search()
+
+    def _on_next_page(self):
+        self._current_page += 1
+        self._execute_search()
+
     def on_search_finished(self, results):
         self.btn_search.setEnabled(True)
+        self.btn_prev_page.setEnabled(self._current_page > 1)
+        self.lbl_page.setText(f"Page {self._current_page}")
+        
         if not results:
             self.lbl_status.setText("")
-            self._show_state("😕", "No results",
-                             "Try a different title, or switch website above.")
+            if self._current_page > 1:
+                self._show_state("😕", "No more results", "You've reached the end of the results.")
+            else:
+                self._show_state("😕", "No results", "Try a different title, or switch website above.")
+            self.btn_next_page.setEnabled(False)
+            self.paginator_container.show()
             return
-        self._show_results()
+            
+        domain = self._current_domain()
+        max_per_page = 24 if "witanime" in domain else 20
+        self.btn_next_page.setEnabled(len(results) >= max_per_page)
+        
+        self.paginator_container.show()
+        
+        # Completely reveal the grid UI
+        self.spinner.setVisible(False)
+        self.placeholder.hide()
+        self.grid_host.show()
+        
         n = len(results)
-        self.lbl_status.setText(f"{n} result{'s' if n != 1 else ''} · click a card to load it.")
-        # Build cards in small batches, yielding to the event loop between each, so
-        # a big result set streams in instead of freezing the UI while every card's
-        # cover is decoded and rounded up front.
-        self._pending_results = list(results)
-        self._render_index = 0
-        self._render_gen = getattr(self, "_render_gen", 0) + 1
-        self._render_next_batch(self._render_gen)
+        self.lbl_status.setText(f"{n} result{'s' if n != 1 else ''} on this page · click a card to load it.")
+        
+        # Start from an empty grid, whatever was there. Belt and braces with the
+        # generation check: results are only ever appended below.
+        pending = getattr(self, "_pending_covers", {})
+        self.clear_grid()
+        self._pending_covers = pending
+        self._cards = {}
 
-    def _render_next_batch(self, gen):
-        if gen != getattr(self, "_render_gen", 0):
-            return   # a newer search/clear superseded this render
-        # Smaller batches keep each event-loop tick short, so scrolling and clicking
-        # stay responsive while a large result set streams in.
-        cols, batch = 5, 4
-        end = min(self._render_index + batch, len(self._pending_results))
-        for i in range(self._render_index, end):
-            r = self._pending_results[i]
-            card = AnimeResultCard(r["title"], r["link"], r["cover"], followable=True)
+        # Add all cards synchronously in one massive layout update.
+        # This completely fixes the UI unresponsiveness! FlowLayout recalculates the entire
+        # grid position map O(N^2) every time a widget is added. By adding them synchronously
+        # during one turn of the event loop, FlowLayout calculates ONCE, rather than calculating
+        # 24 separate times spread over 5 seconds across timers!
+        self.grid.setEnabled(False)
+        for r in results:
+            card = AnimeResultCard(clean_title(r["title"]), r["link"], r["cover"], followable=True)
+            self._cards[r["link"]] = card
+            
+            # A cover that arrived before this card was built is waiting for it.
+            early = self._pending_covers.pop(r["link"], "")
+            if early:
+                card.set_cover(early)
+                
             card.selected.connect(self.on_result_selected)
             card.follow.connect(self._on_follow)
-            self.grid.addWidget(card, i // cols, i % cols)
-        self._render_index = end
-        if end < len(self._pending_results):
-            QTimer.singleShot(0, lambda: self._render_next_batch(gen))
+            self.grid.addWidget(card)
+        self.grid.setEnabled(True)
+
+    def on_cover_loaded(self, link, cover):
+        """`cover` is a decoded QImage from the worker (or, rarely, a path)."""
+        card = getattr(self, "_cards", {}).get(link)
+        if card is not None:
+            card.set_cover(cover)
+        else:
+            # Card not rendered yet -- remember it.
+            if hasattr(self, "_pending_covers"):
+                self._pending_covers[link] = cover
 
     def on_search_error(self, msg):
         self.btn_search.setEnabled(True)
+        self.btn_prev_page.setEnabled(self._current_page > 1)
+        self.btn_next_page.setEnabled(False)
+        # The failed search has no pages, so leaving the previous one's navigator up
+        # (still reading "Page 3") invites paging through results that are not there.
+        self.paginator_container.hide()
         self.lbl_status.setText("")
         self._show_state("⚠️", "Search failed",
                          friendly_browser_error(msg, self._current_domain()))
@@ -1371,9 +1905,14 @@ class AnimeSearchWidget(QWidget):
         self._pending_title = title
         self._pending_cover = cover_path
         self._pending_href = href     # season cards follow the parent anime page
+        # Loading an anime takes over the grid too: a search still running must not
+        # drop its cards on top of the season list, nor this load on a new search.
+        for t in self._threads:
+            t.requestInterruption()
+        gen = self._next_generation()
         th = AnimeDetailsThread(href)
-        th.finished.connect(self.on_details_finished)
-        th.error.connect(self.on_details_error)
+        th.finished.connect(lambda e, g=gen: self._is_current(g) and self.on_details_finished(e))
+        th.error.connect(lambda m, g=gen: self._is_current(g) and self.on_details_error(m))
         self._track(th)
         th.start()
 
@@ -1391,11 +1930,13 @@ class AnimeSearchWidget(QWidget):
         self._show_season_cards(title, entries)
 
     def _show_season_cards(self, title, entries):
+        self.clear_grid()
         self._show_results()
         self.lbl_status.setText(f"'{title}' has {len(entries)} seasons — pick one to load.")
         default_cover = getattr(self, "_pending_cover", "")
-        cols = 5
         parent_href = getattr(self, "_pending_href", "")
+        
+        self.grid.setEnabled(False)
         for i, e in enumerate(entries):
             label = e.get("label") or f"Season {i + 1}"
             mx = e.get("max_ep", 1)
@@ -1408,7 +1949,8 @@ class AnimeSearchWidget(QWidget):
             # the watcher re-reads each check -- so pass the show's real title/URL.
             card.follow.connect(lambda _t, _h, _c, t=title, h=parent_href, cv=cover:
                                 self._on_follow(t, h, cv))
-            self.grid.addWidget(card, i // cols, i % cols)
+            self.grid.addWidget(card)
+        self.grid.setEnabled(True)
 
     def _load_season(self, name, template, max_ep):
         created = self._create_profile(name, template, max_ep)
@@ -1476,10 +2018,15 @@ class AnimeSearchWidget(QWidget):
         self.grid_host.show()
 
     def clear_grid(self):
-        # Invalidate any in-flight batched card render so it stops adding stale cards.
-        self._render_gen = getattr(self, "_render_gen", 0) + 1
+        # Drop references so late cover_loaded signals from the previous search can't
+        # touch cards that are being torn down.
+        self._cards = {}
+        self._pending_covers = {}
         while self.grid.count():
             item = self.grid.takeAt(0)
-            w = item.widget()
+            if item is None:
+                break
+            # FlowLayout returns QWidget directly, QLayout returns QLayoutItem
+            w = item if hasattr(item, "deleteLater") else item.widget()
             if w:
                 w.deleteLater()

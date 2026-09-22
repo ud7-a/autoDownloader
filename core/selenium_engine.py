@@ -14,7 +14,7 @@ import urllib.request
 from subprocess import CREATE_NO_WINDOW
 
 from core.signals import signals
-from utils.config import PROFILE_DIR, ARIA2C_PATH, UNRAR_PATH, APP_DIR, sites_data, app_settings, config_lock, progress_lock
+from utils.config import PROFILE_DIR, ARIA2C_PATH, UNRAR_PATH, APP_DIR, sites_data, app_settings, config_lock, progress_lock, migrate_witanime_url
 from utils.database import log_history
 
 # --- GLOBAL THREAD EVENTS ---
@@ -157,6 +157,26 @@ def episode_url_variants(url):
     63-366 as /episodes/bleach-الحلقة-N/ -- by toggling the Arabic 'anime' (انمي-)
     prefix, and sites that give the finale a special suffix, by appending it.
     """
+    variants = []
+    
+    # Handle Witanime's major layout redesign (witanime.life -> witanime.site)
+    # Old: /episode/one-piece-الحلقة-1178/
+    # New: /watch/one-piece/1178
+    from urllib.parse import unquote
+    unq_url = unquote(url)
+    if "witanime" in unq_url and "/episode/" in unq_url:
+        m_wit = re.search(r'/episode/(.*?)(?:-الحلقة-)(\d+)', unq_url)
+        if m_wit:
+            slug = m_wit.group(1)
+            ep = m_wit.group(2)
+            # Find the domain prefix
+            m_dom = re.search(r'^(https?://[^/]+)', url)
+            if m_dom:
+                # Always force the new domain just in case they have an old witanime.life template
+                domain = m_dom.group(1).replace("witanime.life", "witanime.site")
+                new_wit = f"{domain}/watch/{slug}/{ep}"
+                variants.append(new_wit)
+
     prefix_toggled = None
     m = re.search(r"^(.*/episodes/)(.+?)(/?)$", url)
     if m:
@@ -166,7 +186,6 @@ def episode_url_variants(url):
         else:
             prefix_toggled = head + "انمي-" + slug + tail
 
-    variants = []
     # Prefix toggle first: it fixes a whole range of episodes (e.g. Bleach 1-62),
     # whereas a finale suffix only fixes the single last episode.
     if prefix_toggled and prefix_toggled != url:
@@ -296,6 +315,106 @@ def tab_matches_path(url, path_name):
     return any(host == h or host.endswith("." + h) for h in hosts)
 
 
+# ---- Which download paths does this episode actually offer? ----
+#
+# A path whose host is not on the page used to cost ~20 s before the next one was
+# tried: each step waits up to 10 s per xpath variant, and there are two variants.
+# Both sites put every mirror's button in the page at load time -- witanime's host
+# buttons sit hidden inside the FHD dropdown before it is clicked, animerco's are
+# rows of the download table -- so one instant look can tell which paths are real.
+
+def path_probes(step_paths):
+    """{path name: xpath that tells this path apart from the others, or None}.
+
+    The probe is the path's first step whose xpath differs from the step at the same
+    position in every other path. On witanime every path starts with the same FHD
+    button, so the probe is step 2 (the host button); on animerco it is step 1 (the
+    host's table row). Worked out from the profile, not from per-site rules, so an
+    edited or new profile gets the same treatment. None means "can't tell" -- that
+    path is always kept.
+    """
+    names = [n for n, steps in step_paths.items() if steps]
+    probes = {}
+    for name in names:
+        steps = step_paths[name]
+        probe = None
+        for i, step in enumerate(steps):
+            xp = (step.get("xpath") or "").strip()
+            if not xp:
+                continue
+            others = [(step_paths[o][i].get("xpath") or "").strip()
+                      for o in names if o != name and len(step_paths[o]) > i]
+            if others and xp not in others:
+                probe = xp
+                break
+            if not others and len(names) > 1:
+                probe = xp          # longer than every other path: this step is its own
+                break
+        probes[name] = probe
+    return probes
+
+
+def choose_paths(order, found):
+    """Paths to try, best first, given which probes were found on the page.
+
+    `order` is the profile's priority order; `found` maps name -> True (link is
+    there), False (it is not) or None (no probe for this path). Paths shown absent
+    are skipped. If no probe matched at all, the look was inconclusive -- the layout
+    may have changed or the page not finished -- and every path is tried as before,
+    so this can never make a download fail that would have worked.
+    """
+    if not any(found.get(n) is True for n in order):
+        return list(order)
+    return [n for n in order if found.get(n) is not False]
+
+
+_PROBE_JS = """
+var out = {};
+var probes = arguments[0];
+for (var name in probes) {
+    var xps = probes[name], hit = false;
+    for (var i = 0; i < xps.length && !hit; i++) {
+        try {
+            hit = document.evaluate(xps[i], document, null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue !== null;
+        } catch (e) {}
+    }
+    out[name] = hit;
+}
+return out;
+"""
+
+
+def available_paths(driver, step_paths, timeout=4.0):
+    """Look at the loaded episode page once and return (paths to try, found map).
+
+    Polls briefly because a page can still be rendering its download section; stops
+    as soon as any probe matches. Never raises -- on any error every path is tried.
+    """
+    order = [n for n, steps in step_paths.items() if steps]
+    probes = path_probes(step_paths)
+    js_probes = {}
+    for name, raw in probes.items():
+        if raw:
+            xp = parse_smart_xpath(raw)
+            js_probes[name] = [xp, xp.replace("text()", "@value")]
+    if not js_probes:
+        return order, {n: None for n in order}
+
+    found = {}
+    deadline = time.time() + timeout
+    while True:
+        try:
+            hits = driver.execute_script(_PROBE_JS, js_probes) or {}
+        except Exception:
+            hits = {}
+        found = {n: (bool(hits.get(n)) if n in js_probes else None) for n in order}
+        if any(v is True for v in found.values()) or time.time() >= deadline:
+            break
+        time.sleep(0.5)
+    return choose_paths(order, found), found
+
+
 def parse_smart_xpath(raw_input):
     raw_input = raw_input.strip()
     if not raw_input: return ""
@@ -312,31 +431,35 @@ def parse_smart_xpath(raw_input):
         text_part = raw_input.lower()
         return f"//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text_part}')]"
 
-def kill_stuck_chrome_processes():
-    try: 
-        subprocess.run(["taskkill", "/F", "/IM", "chromedriver.exe", "/T"], 
-                       creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except: pass
-    
-    # Securely list and terminate chrome.exe instances matching SeleniumProfile or --headless using wmic
-    try:
-        cmd = ["wmic", "process", "where", "name='chrome.exe'", "get", "processid,commandline", "/format:csv"]
-        res = subprocess.run(cmd, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
-        for line in res.stdout.splitlines():
-            if "," in line:
-                parts = line.strip().split(",")
-                if len(parts) >= 3:
-                    cmdline = parts[1]
-                    pid = parts[2]
-                    if pid.isdigit() and ("SeleniumProfile" in cmdline or "--headless" in cmdline):
-                        subprocess.run(["taskkill", "/F", "/PID", pid, "/T"], 
-                                       creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        # Safe fallback: only kill by name if parsing fails
+def kill_stuck_chrome_processes(started_before=None):
+    """Kill browsers this app owns: its SeleniumProfile, anything headless, chromedriver.
+
+    The user's own Chrome must never be touched. The previous version enumerated with
+    wmic and, when that failed, fell back to `taskkill /F /IM chrome.exe` -- which
+    closes every tab the user has open. wmic is deprecated and already gone from newer
+    Windows builds, so that fallback was one update away from firing on a machine with
+    dozens of real tabs. psutil is bundled, so enumerate with that and have no
+    kill-everything path at all.
+
+    `started_before` limits the sweep to processes older than that timestamp. Startup
+    cleanup passes this app's own start time so it clears leftovers from a crashed
+    session and can never kill a browser this run just launched.
+    """
+    import psutil
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
         try:
-            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"], 
-                           creationflags=CREATE_NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except: pass
+            name = (proc.info.get("name") or "").lower()
+            if "chrome" not in name:          # covers chrome.exe and chromedriver.exe
+                continue
+            if started_before is not None and (proc.info.get("create_time") or 0) >= started_before:
+                continue
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            if ("chromedriver" in name
+                    or "SeleniumProfile" in cmdline
+                    or "--headless" in cmdline):
+                proc.kill()
+        except Exception:
+            continue                          # vanished, or not ours to touch
     time.sleep(1)
     if not os.path.exists(PROFILE_DIR): return
     for lock in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
@@ -405,7 +528,8 @@ def create_browser(download_dir, headless=True):
 
     if headless: 
         options.add_argument("--headless=new")
-        options.add_argument("--window-size=1920,1080") 
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     else: 
         options.add_argument("--start-maximized") 
 
@@ -436,6 +560,12 @@ def create_browser(download_dir, headless=True):
     service = Service()
     service.creation_flags = CREATE_NO_WINDOW
     driver = webdriver.Chrome(options=options, service=service)
+    
+    if headless:
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        })
+        
     driver.set_page_load_timeout(45)
     # The two blockers do different jobs, so both are applied rather than one being
     # a fallback for the other. The extension hides leftover ad slots and disarms
@@ -953,7 +1083,10 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
         with config_lock:
             config = sites_data.get(site_key, {})
             
-        url_template = config.get("url", "")
+        # Also migrated here, not only at config load: a download can arrive with a
+        # URL that load_config never saw -- a Discord command queued in the cloud
+        # before the witanime move, or a temporary Watchlist profile.
+        url_template = migrate_witanime_url(config.get("url", ""))
         # A caller can pin the click-flow for this run. Watchlist downloads use it to
         # force the built-in flow for supported sites, so a same-named profile with
         # hand-edited steps can't change how the episode is fetched. The profile in
@@ -1120,7 +1253,20 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                     except Exception as captcha_err:
                         print(f"Captcha solving failed: {captcha_err}")
 
-                    for path_name, steps in step_paths.items():
+                    # Only try the mirrors this episode actually has, in the profile's
+                    # priority order. A missing one used to cost ~20 s of waiting for
+                    # a button that was never going to appear.
+                    to_try, found = available_paths(driver, step_paths)
+                    skipped = [n for n, v in found.items() if v is False and n not in to_try]
+                    if skipped:
+                        signals.update_status.emit(
+                            f"Status: Ep {x} offers {', '.join(to_try)} "
+                            f"(skipping {', '.join(skipped)})", "#ffffff")
+                    if os.environ.get("AED_DEBUG_LOG"):
+                        _debug_log("PATHS", episode=x, found=found, trying=to_try)
+
+                    for path_name in to_try:
+                        steps = step_paths.get(path_name) or []
                         if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) or path_success: break
                         if not steps: continue
                         

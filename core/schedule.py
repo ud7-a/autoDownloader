@@ -36,7 +36,7 @@ ARABIC_DAYS = {
 }
 
 SCHEDULE_URLS = {
-    "witanime.life": "https://witanime.life/مواعيد-الحلقات/",
+    "witanime.site": "https://witanime.site/schedule",
     "eta.animerco.org": "https://eta.animerco.org/schedule/",
 }
 
@@ -50,7 +50,7 @@ SCHEDULE_URLS = {
 # "title" -- animerco only links /seasons/, never the /animes/ page a search
 #            result uses, so its titles are the only thing available to compare.
 SCHEDULE_MATCH = {
-    "witanime.life": "url",
+    "witanime.site": "url",
     "eta.animerco.org": "title",
 }
 
@@ -59,12 +59,23 @@ _SEASON_NUMBER = re.compile(
     re.IGNORECASE)
 
 
+# Roman-numeral seasons ("Mushoku Tensei III"). Uppercase and whole-token only, and I,
+# V and X are left out on purpose: "I" is usually the pronoun, and a lone "X" or "V" is
+# more often part of a name ("HUNTER X HUNTER") than a season.
+_ROMAN_SEASON = re.compile(r"(?<![A-Za-z])(II|III|IV|VI|VII|VIII|IX)(?![A-Za-z])")
+_ROMAN = {"II": 2, "III": 3, "IV": 4, "VI": 6, "VII": 7, "VIII": 8, "IX": 9}
+
+
 def season_number(title):
-    """The season number stated in a title, or None. 'Grand Blue Season 3' -> 3."""
+    """The season number stated in a title, or None.
+
+    'Grand Blue Season 3' -> 3, 'Slime 4th Season' -> 4, 'Mushoku Tensei III' -> 3.
+    """
     m = _SEASON_NUMBER.search(title or "")
-    if not m:
-        return None
-    return int(m.group(1) or m.group(2))
+    if m:
+        return int(m.group(1) or m.group(2))
+    r = _ROMAN_SEASON.search(title or "")
+    return _ROMAN[r.group(1)] if r else None
 
 # witanime: walk the document in order; each anime link belongs to the most recent
 # day heading above it.
@@ -103,7 +114,7 @@ return out;
 """
 
 _SITE_SCRIPTS = {
-    "witanime.life": _WITANIME_JS,
+    "witanime.site": _WITANIME_JS,
     "eta.animerco.org": _ANIMERCO_JS,
 }
 
@@ -111,7 +122,9 @@ _SITE_SCRIPTS = {
 # listing for the same show, so they are stripped before comparing.
 _SEASON_NOISE = re.compile(
     r"\b(season|s|part|cour|الموسم|الجزء)\s*\d+\b|\b(2nd|3rd|4th|5th)\s+season\b|"
-    r"\bfinal\s+season\b|\bseason\b", re.IGNORECASE)
+    r"\bfinal\s+season\b|\bseason\b|"
+    # Roman-numeral seasons, matching _ROMAN_SEASON (text is lowercased by now).
+    r"\b(ii|iii|iv|vi|vii|viii|ix)\b", re.IGNORECASE)
 _PUNCT = re.compile(r"[^\w\s]|_", re.UNICODE)
 _SPACES = re.compile(r"\s+")
 
@@ -135,16 +148,62 @@ def canonical_day(raw):
 
 def fetch_schedule(driver, domain, settle=2.5):
     """Scrape one site's schedule. Returns [{"day","title","url"}] with canonical days."""
-    # Looked up by site name, not exact host: animerco redirects eta.* -> det.*, and
-    # an exact-host miss here made the scrape return [] -- swallowed by the caller,
-    # so every entry silently lost its release day.
     from core.site_health import lookup as site_lookup
-    script = site_lookup(_SITE_SCRIPTS, domain)
     url = site_lookup(SCHEDULE_URLS, domain)
-    if not script or not url:
-        return []
+    if not url: return []
+
+    if "witanime.site" in domain:
+        try:
+            import urllib.request
+            import re
+            
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                html = response.read().decode("utf-8")
+            
+            DAYS_PATTERN = 'السبت|الأحد|الاحد|الإثنين|الاثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة'
+            day_re = re.compile(f'^({DAYS_PATTERN})$')
+            
+            raw = []
+            current_day = None
+            
+            # Extract relevant h2/h3 and a tags in document order
+            tags = re.finditer(r'<(h[23]|a)\b([^>]*)>(.*?)</\1>', html, re.IGNORECASE | re.DOTALL)
+            for match in tags:
+                tag = match.group(1).lower()
+                attrs = match.group(2)
+                inner = match.group(3)
+                
+                # Strip nested HTML tags for the text content
+                text = re.sub(r'<[^>]+>', '', inner).strip()
+                
+                if tag in ['h2', 'h3']:
+                    if day_re.match(text):
+                        current_day = text
+                elif tag == 'a' and current_day:
+                    href_match = re.search(r'''href=['"]([^'"]+)['"]''', attrs, re.IGNORECASE)
+                    if href_match:
+                        href = href_match.group(1)
+                        if '/anime/' in href:
+                            title_match = re.search(r'''title=['"]([^'"]+)['"]''', attrs, re.IGNORECASE)
+                            title = (title_match.group(1).strip() if title_match else '') or text
+                            if title:
+                                raw.append({'day': current_day, 'title': title, 'url': href.split('#')[0]})
+            
+            items = []
+            for row in raw:
+                day = canonical_day(row.get("day"))
+                if day and row.get("title"):
+                    items.append({"day": day, "title": row["title"], "url": row.get("url", "")})
+            return items
+        except Exception:
+            return []
+
+    script = site_lookup(_SITE_SCRIPTS, domain)
+    if not script: return []
+
     driver.get(url)
-    time.sleep(settle)          # both pages render server-side; a short settle is enough
+    time.sleep(settle)
     try:
         raw = driver.execute_script(script) or []
     except Exception:
@@ -247,9 +306,16 @@ def find_day(entry, items, season=None):
                 return item["day"]
 
     if strategy == "url":
-        # This site's schedule carries the very URLs search returns, so a miss above
-        # is a genuine "not airing" -- guessing by title here would tag every season.
-        return None
+        # When this site's own schedule WAS read, it carries the very URLs search
+        # returns, so a miss above is a genuine "not airing" -- guessing by title here
+        # would tag every season of the show.
+        if _site_schedule_read(url, items):
+            return None
+        # When it was NOT read, a miss means nothing: we simply don't know. That is
+        # every witanime entry now, since witanime.site refuses automated access to its
+        # schedule page. A weekday belongs to the show, not the site, so borrow it from
+        # another site's schedule -- see _cross_site_day for how cautiously.
+        return _cross_site_day(entry, items)
 
     target = normalize_title(entry.get("title"))
     if not target:
@@ -271,6 +337,34 @@ def find_day(entry, items, season=None):
                 continue
             if (target in other) or (other in target and len(other) >= 8):
                 return item["day"]
+    return None
+
+
+def _site_schedule_read(url, items):
+    """True if any scraped row came from the same site as this entry's URL."""
+    from core.site_health import site_key
+    key = site_key(url)
+    return bool(key) and any(site_key(i.get("url", "")) == key for i in items)
+
+
+def _cross_site_day(entry, items):
+    """The entry's weekday, taken from a schedule on a DIFFERENT site.
+
+    Deliberately stricter than the same-site title match: exact normalized title only
+    (no containment), and the season number must be identical on both sides -- stated
+    on neither, or the same on both. So "Grand Blue" cannot pick up "Grand Blue
+    Season 3". The reason for the strictness is asymmetric risk: an entry with no day
+    is checked every day, but one with the WRONG day is only checked on that day and
+    would miss its real release. No answer is always safer than a wrong one.
+    """
+    target = normalize_title(entry.get("title"))
+    if not target:
+        return None
+    season = season_number(entry.get("title"))
+    for item in items:
+        if (normalize_title(item.get("title")) == target
+                and season_number(item.get("title")) == season):
+            return item["day"]
     return None
 
 

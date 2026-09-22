@@ -168,6 +168,25 @@ if __name__ == "__main__":
     from utils.tools_manager import ensure_aria2c, ensure_unrar
     threading.Thread(target=ensure_aria2c, daemon=True).start()
     threading.Thread(target=ensure_unrar, daemon=True).start()
+
+    def _clear_orphaned_browsers():
+        """Drop headless browsers a previous run left behind.
+
+        The shared search browser is only shut down on a clean exit, so a crash
+        orphans a headless Chrome that nothing ever reaps. They accumulate across
+        crashes -- close to a gigabyte of dead Chrome was found on one machine -- and
+        a loaded machine is exactly when the UI starts stuttering. The cutoff is this
+        process's own start time, so only leftovers die, never a browser this run
+        opens a moment from now.
+        """
+        try:
+            import psutil
+            from core.selenium_engine import kill_stuck_chrome_processes
+            kill_stuck_chrome_processes(started_before=psutil.Process().create_time())
+        except Exception:
+            pass
+
+    threading.Thread(target=_clear_orphaned_browsers, daemon=True).start()
         
     # Force Native Fluent Dark Mode.
     # qfluentwidgets pulls in scipy.ndimage (~270ms) purely for an acrylic blur this
@@ -250,6 +269,19 @@ if __name__ == "__main__":
                 pass
             sys.exit(0)
 
+    # Fresh logs every session, so they never accumulate. Placed after the instance
+    # check -- a second launch that only focuses the running window must not wipe
+    # that window's logs -- and before anything below opens one (the watchdog's
+    # ui_stalls.log, the watcher's watcher.log).
+    try:
+        from utils.config import APP_DIR as _APP_DIR
+        from utils.log_cleanup import clear_logs
+        _cleared, _busy = clear_logs(_APP_DIR)
+        _startup_mark(f"logs cleared ({len(_cleared)})"
+                      + (f", in use: {', '.join(_busy)}" if _busy else ""))
+    except Exception as _log_err:
+        print(f"[logs] could not clear old logs: {type(_log_err).__name__}: {_log_err}")
+
     # Fetch any pending remote download commands from cloud
     from utils.config import cloud_fetch_commands, app_settings
     initial_commands = []
@@ -277,6 +309,24 @@ if __name__ == "__main__":
         except Exception:
             pass
     _startup_mark("window shown")
+
+    # Opt-in freeze recorder (AED_UI_WATCHDOG=1 or --watchdog). Does nothing otherwise.
+    #
+    # Asking for it and getting silence must never happen again: this whole block used
+    # to swallow every exception, so when utils/ui_watchdog.py was deleted the import
+    # failed, the watchdog quietly did nothing, and it looked armed while recording
+    # nothing at all. If it was asked for and cannot start, say so.
+    _wd_asked = ("--watchdog" in sys.argv) or bool(os.environ.get("AED_UI_WATCHDOG"))
+    try:
+        from utils.ui_watchdog import start as _start_ui_watchdog, log_path as _wd_log
+        if _start_ui_watchdog():
+            print(f"[watchdog] armed -> {_wd_log()}")
+        elif _wd_asked:
+            print("[watchdog] REQUESTED BUT NOT ARMED (PyQt timer unavailable)")
+    except Exception as _wd_err:
+        if _wd_asked:
+            print(f"[watchdog] REQUESTED BUT FAILED TO START: "
+                  f"{type(_wd_err).__name__}: {_wd_err}")
 
     # Check for updates in the background ONLY after the window is fully initialized and listening!
     from core.updater import check_for_updates_silently

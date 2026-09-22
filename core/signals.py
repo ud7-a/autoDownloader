@@ -15,6 +15,7 @@ class WorkerSignals(QObject):
     update_available = pyqtSignal(str, str)
     add_picked_step = pyqtSignal(object, str)
     concurrency_changed = pyqtSignal(str)   # human-readable auto-concurrency state
+    remote_commands_received = pyqtSignal(list)
 
 # We instantiate it here so it's a true global singleton
 signals = WorkerSignals()

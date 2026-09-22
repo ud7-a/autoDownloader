@@ -16,7 +16,7 @@ PROFILE_DIR = os.path.join(APP_DIR, "SeleniumProfile")
 DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
-APP_VERSION = "4.6.0"
+APP_VERSION = "4.8.0"
 DEFAULT_CLOUD_SERVICE_URL = "https://aed-notification-service.onrender.com"
 
 # --- GLOBAL LOCKS ---
@@ -75,6 +75,31 @@ def decrypt_webhook(obfuscated):
         # Fallback if cleartext is entered directly
         return obfuscated
 
+def migrate_witanime_url(url):
+    """Rewrite a pre-move witanime URL to the current site.
+
+    witanime moved from witanime.life/.net to witanime.site and changed its episode
+    URLs at the same time:
+        old  https://witanime.life/episode/<slug>-الحلقة-<n or {x}>/
+        new  https://witanime.site/watch/<slug>/<n or {x}>
+    Swapping the host alone is not enough: the old /episode/ path does not exist on
+    the new site, and the old host now fails its TLS handshake, so the engine never
+    even sees a "not found" page that would trigger its URL fallbacks. Profiles,
+    Watchlist templates and cloud commands saved before the move all carry the old
+    form. Anything else (movies, /anime/ pages) gets the host swap only.
+    """
+    import re
+    from urllib.parse import unquote
+    if not url or "witanime" not in url.lower():
+        return url
+    m = re.match(r"^https?://(?:www\.)?witanime\.[a-z]+/episode/(.+?)-الحلقة-(\{x\}|\d+)/?$",
+                 unquote(url).strip(), re.I)
+    if m:
+        return f"https://witanime.site/watch/{m.group(1)}/{m.group(2)}"
+    return re.sub(r"(https?://)(?:www\.)?witanime\.(?!site\b)[a-z]+", r"\1witanime.site",
+                  url, flags=re.I)
+
+
 def load_config():
     if not os.path.exists(APP_DIR):
         os.makedirs(APP_DIR, exist_ok=True)
@@ -86,18 +111,43 @@ def load_config():
                 sites_data.update(data.get("sites", {}))
 
                 needs_save = False
+                import re
+                for k in list(sites_data.keys()):
+                    if "witanime" in k.lower() and "witanime.site" not in k.lower():
+                        new_k = re.sub(r'witanime\.[a-z]+', 'witanime.site', k, flags=re.I)
+                        sites_data[new_k] = sites_data.pop(k)
+                        needs_save = True
+
                 for _, site_config in sites_data.items():
+                    old_url = site_config.get("url", "")
+                    new_url = migrate_witanime_url(old_url)
+                    if new_url != old_url:
+                        site_config["url"] = new_url
+                        needs_save = True
                     if "steps" in site_config and "step_paths" not in site_config:
                         site_config["step_paths"] = {"Path 1": site_config["steps"]}
                         del site_config["steps"]
                         needs_save = True
-                if needs_save: save_config()
 
                 saved_settings = data.get("settings", {})
                 for k in app_settings.keys():
                     if k in saved_settings:
                         app_settings[k] = saved_settings[k]
                         
+                for w in app_settings.get("watchlist", []):
+                    # url AND latest_template: the template is what a Watchlist or
+                    # Discord download actually opens, and migrating only the url
+                    # left it on the dead host until the anime was re-checked.
+                    for field in ("url", "latest_template"):
+                        old = w.get(field) or ""
+                        new = migrate_witanime_url(old)
+                        if new != old:
+                            w[field] = new
+                            needs_save = True
+                    if "witanime" in (w.get("url") or "").lower() and w.get("domain") != "witanime.site":
+                        w["domain"] = "witanime.site"
+                        needs_save = True
+
                 # Decrypt webhook and cloud token back to cleartext in-memory
                 if app_settings.get("discord_webhook"):
                     app_settings["discord_webhook"] = decrypt_webhook(app_settings["discord_webhook"])
@@ -110,8 +160,22 @@ def load_config():
                         app_settings["custom_sounds"].append(old_path)
                     if not app_settings.get("selected_sound"):
                         app_settings["selected_sound"] = old_path
-                        
-        except Exception as e: 
+
+                # Save LAST -- after settings are copied in AND the secrets are
+                # decrypted. save_config() writes whatever is in memory, encrypting the
+                # webhook and token on the way out, so saving any earlier writes a
+                # broken file:
+                #   * before the settings loop, it wrote factory defaults over the
+                #     user's watchlist, cloud credentials and download folder;
+                #   * before the decrypt, it encrypted values that were still
+                #     ciphertext, leaving E(E(x)) on disk -- the next launch decrypts
+                #     once, gets garbage, and cloud auth plus the webhook stay broken,
+                #     because the migration that triggered the save never fires again.
+                # Both happened here. One save, at the end, cannot do either.
+                if needs_save:
+                    save_config()
+
+        except Exception as e:
             print(f"Error loading config: {e}")
     else: 
         save_config()

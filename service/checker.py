@@ -60,12 +60,28 @@ def extract_episodes_from_html(html: str, base_url: str = "") -> list[int]:
 
     # 2. Direct href episode links
     # Match href="..." with /episode/, /episodes/, /watch/, /الحلقة/
-    href_pattern = re.compile(r'href=[\'"]([^\'"]*(?:episode|episodes|الحلقة)[^\'"]*)[\'"]', re.I)
+    href_pattern = re.compile(r'href=[\'"]([^\'"]*(?:episode|episodes|/watch/|الحلقة)[^\'"]*)[\'"]', re.I)
+    
+    slug = ""
+    if base_url:
+        parts = [p for p in base_url.split("?")[0].strip("/").split("/") if p]
+        if parts:
+            # Decoded, like the hrefs it is compared with below. Left encoded, an
+            # Arabic slug ("%d9%81%d9%8a%d9%84%d9%85-...") never appeared in any
+            # decoded link, so every episode was filtered out and the anime's
+            # notifications stopped without an error.
+            slug = unquote(parts[-1]).lower()
+            
     for match in href_pattern.finditer(html):
         href = unquote(match.group(1))
         # Exclude common non-episode links
         if any(x in href.lower() for x in ("anime-genre", "anime-type", "anime-season", "tag", "category")):
             continue
+        
+        # Restrict to current anime's episodes (ignore sidebar links to other shows)
+        if slug and slug not in href.lower():
+            continue
+            
         num_match = _TRAILING_DIGIT_RE.search(href) or _EP_NUMBER_RE.search(href)
         if num_match:
             episodes.add(int(num_match.group(1)))

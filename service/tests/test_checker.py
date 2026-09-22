@@ -41,6 +41,24 @@ class EpisodeHtmlExtractionTests(unittest.TestCase):
         episodes = checker.extract_episodes_from_html(html)
         self.assertEqual(episodes, [1, 12])
 
+    def test_encoded_arabic_slug_still_matches_its_episodes(self):
+        """The base URL keeps its percent-encoding; the links are compared decoded.
+        Comparing the two as-is filtered out every episode, silently."""
+        base = "https://det.animerco.org/movies/%d9%81%d9%8a%d9%84%d9%85-kimi-no-na-wa/"
+        html = """
+        <a href="https://det.animerco.org/episodes/%d9%81%d9%8a%d9%84%d9%85-kimi-no-na-wa-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-1/">1</a>
+        <a href="https://det.animerco.org/episodes/other-show-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-9/">other</a>
+        """
+        self.assertEqual(checker.extract_episodes_from_html(html, base), [1])
+
+    def test_plain_slug_still_filters_other_shows(self):
+        base = "https://eta.animerco.org/animes/jujutsu-kaisen/"
+        html = """
+        <a href="https://eta.animerco.org/episodes/jujutsu-kaisen-الحلقة-3/">3</a>
+        <a href="https://eta.animerco.org/episodes/one-piece-الحلقة-1100/">sidebar</a>
+        """
+        self.assertEqual(checker.extract_episodes_from_html(html, base), [3])
+
     def test_handles_empty_or_non_episode_html(self):
         html = "<html><body><h1>No episodes here</h1></body></html>"
         self.assertEqual(checker.extract_episodes_from_html(html), [])
