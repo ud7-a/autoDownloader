@@ -1109,6 +1109,143 @@ class WatchlistTodayFilterTests(unittest.TestCase):
         self.assertIn(_today_key(), DAY_ORDER)
 
 
+class FillerEpisodeTests(unittest.TestCase):
+    """Both sites mark filler in their episode lists, in different shapes. Markup
+    below is copied from the live pages (Naruto Shippuden / Bleach, Sep 2026)."""
+
+    WITANIME = (
+        '<a href="/watch/naruto-shippuden/56"><span class="text-xs text-white">الحلقة 56</span></a>'
+        '<a href="/watch/naruto-shippuden/57">'
+        '<span class="text-xs text-white">الحلقة 57</span> '
+        '<span class="rounded bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold uppercase text-black">فيلر</span>'
+        '</a>'
+        '<a href="/watch/naruto-shippuden/58">'
+        '<p class="text-xs text-white">الحلقة 58</p>'
+        '<span class="rounded bg-amber-500 px-1 py-0.5 text-[9px] font-bold text-black">فيلر</span></a>'
+    )
+    ANIMERCO = (
+        '<ul id="filter" class="episodes-list">'
+        '<li data-number="32"><a href="/episodes/anime-bleach-32/"><span>الحلقة 32</span></a></li>'
+        '<li data-number="33"><a href="/episodes/anime-bleach-33/" class="active">'
+        '<span>الحلقة 33 - فلر</span></a></li>'
+        '<li data-number="50"><a href="/episodes/anime-bleach-50/"><span>الحلقة 50 - فلر</span></a></li>'
+        '</ul>'
+    )
+
+    def test_witanime_badges_are_read(self):
+        from core.filler import parse_filler_episodes
+        self.assertEqual(parse_filler_episodes(self.WITANIME), [57, 58])
+
+    def test_animerco_list_items_are_read(self):
+        from core.filler import parse_filler_episodes
+        self.assertEqual(parse_filler_episodes(self.ANIMERCO), [33, 50])
+
+    def test_the_two_words_are_not_confused(self):
+        """فيلر contains no فلر: matching loosely would double-count."""
+        from core.filler import parse_filler_episodes
+        self.assertEqual(parse_filler_episodes(self.WITANIME + self.ANIMERCO),
+                         [33, 50, 57, 58])
+
+    def test_a_page_with_no_markers_yields_nothing(self):
+        from core.filler import parse_filler_episodes
+        self.assertEqual(parse_filler_episodes(
+            '<li data-number="1"><a><span>الحلقة 1</span></a></li>'), [])
+        self.assertEqual(parse_filler_episodes(""), [])
+        self.assertEqual(parse_filler_episodes(None), [])
+
+    def test_a_far_away_number_is_not_claimed(self):
+        """The word in a synopsis must not adopt an episode number from elsewhere."""
+        from core.filler import parse_filler_episodes
+        html = '<span>الحلقة 12</span>' + ("x" * 400) + '<p>القصة فيها فيلر كثير</p>'
+        self.assertEqual(parse_filler_episodes(html), [])
+
+    def test_strip_filler_keeps_order_and_ignores_unknown(self):
+        from core.filler import strip_filler
+        self.assertEqual(strip_filler([55, 56, 57, 58, 59], [57, 58, 999]), [55, 56, 59])
+        self.assertEqual(strip_filler([1, 2], []), [1, 2])
+        self.assertEqual(strip_filler([], [1]), [])
+        self.assertEqual(strip_filler(None, None), [])
+
+    def test_every_episode_being_filler_yields_an_empty_list(self):
+        """The UI must be able to tell this apart from "nothing marked"."""
+        from core.filler import strip_filler
+        self.assertEqual(strip_filler([57, 58], [57, 58]), [])
+
+
+class CrossSiteFillerTests(unittest.TestCase):
+    """When a site marks nothing, the other site's list is used -- filler numbering
+    belongs to the anime. The match must be certain: skipping episodes the user
+    wanted is worse than skipping none."""
+
+    def pick(self, title, names):
+        from core.filler import pick_cross_site_match
+        hit = pick_cross_site_match(title, [{"title": n, "link": f"/a/{n}"} for n in names])
+        return hit["title"] if hit else None
+
+    def test_same_show_matches_across_spelling(self):
+        self.assertEqual(self.pick("Bleach", ["One Piece", "Bleach"]), "Bleach")
+
+    def test_romanized_long_vowels_are_the_same_show(self):
+        """animerco writes "Naruto: Shippuuden", witanime "Naruto Shippuden"."""
+        self.assertEqual(self.pick("Naruto: Shippuuden", ["Naruto Shippuden"]),
+                         "Naruto Shippuden")
+        self.assertEqual(self.pick("Yuusha Party", ["Yusha Party"]), "Yusha Party")
+
+    def test_different_shows_do_not_collide_through_that_rule(self):
+        self.assertIsNone(self.pick("Naruto", ["Boruto"]))
+        self.assertIsNone(self.pick("One Piece", ["One Punch Man"]))
+
+    def test_a_different_season_is_never_matched(self):
+        self.assertIsNone(self.pick("Grand Blue", ["Grand Blue Season 3"]))
+        self.assertIsNone(self.pick("Slime 4th Season", ["Slime"]))
+
+    def test_the_same_season_written_differently_matches(self):
+        self.assertEqual(self.pick("Mushoku Tensei III", ["Mushoku Tensei Season 3"]),
+                         "Mushoku Tensei Season 3")
+
+    def test_a_longer_name_is_not_a_match(self):
+        """Containment would let "Bleach" adopt a spin-off's filler list."""
+        self.assertIsNone(self.pick("Bleach", ["Bleach: Sennen Kessen-hen"]))
+
+    def test_no_candidates_or_no_title(self):
+        from core.filler import pick_cross_site_match
+        self.assertIsNone(pick_cross_site_match("Bleach", []))
+        self.assertIsNone(pick_cross_site_match("", [{"title": "Bleach"}]))
+        self.assertIsNone(pick_cross_site_match(None, None))
+
+    def test_plain_strings_are_accepted_as_candidates(self):
+        from core.filler import pick_cross_site_match
+        self.assertEqual(pick_cross_site_match("Bleach", ["Naruto", "Bleach"]), "Bleach")
+
+    def test_animerco_always_asks_witanime(self):
+        """Measured: animerco marks 2 of Bleach's 366 episodes, witanime 163. A
+        non-empty animerco answer is not a complete one."""
+        from core.filler import wants_other_site
+        animerco = "https://det.animerco.org/episodes/anime-bleach-1/"
+        self.assertTrue(wants_other_site(animerco, []))
+        self.assertTrue(wants_other_site(animerco, [33, 50]))
+
+    def test_witanime_only_falls_back_when_empty(self):
+        """Querying animerco needs a browser (~5 s) and rarely adds anything."""
+        from core.filler import wants_other_site
+        wit = "https://witanime.site/watch/bleach/1"
+        self.assertTrue(wants_other_site(wit, []))
+        self.assertFalse(wants_other_site(wit, [33, 50, 64]))
+
+    def test_witanime_search_results_parse(self):
+        """The fallback reads witanime's search page with the Search tab's parser."""
+        from ui.search_tab import parse_witanime_results
+        html = ('<a href="https://witanime.site/anime/bleach">'
+                '<img src="https://witanime.site/c/bleach.jpg" alt="Bleach"></a>'
+                '<a href="https://witanime.site/movie/summer-wars">'
+                '<img src="https://witanime.site/c/sw.jpg" alt="Summer Wars"></a>'
+                '<a href="/about">no image here</a>')
+        found = parse_witanime_results(html)
+        self.assertEqual([f["title"] for f in found], ["Bleach", "Summer Wars"])
+        self.assertEqual(found[0]["link"], "https://witanime.site/anime/bleach")
+        self.assertEqual(parse_witanime_results(""), [])
+
+
 class LogCleanupTests(unittest.TestCase):
     """Logs are cleared at every start so they cannot grow for months. The app
     folder also holds the user's data, so only log files may ever match."""

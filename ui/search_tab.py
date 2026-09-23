@@ -117,6 +117,36 @@ def site_display_name(domain):
     return site_key(domain)
 
 
+def parse_witanime_results(html):
+    """Anime/movie cards on a witanime search page: [{"link","title","img"}].
+
+    Shared by the Search tab and the filler lookup's cross-site fallback, so both
+    read the page the same way and a layout change is fixed in one place.
+    """
+    out = []
+    cards = re.findall(r'''<a[^>]+href=['"]([^'"]+/(?:anime|movie)/[^'"]+)['"][^>]*>(.*?)</a>''',
+                       html or "", re.DOTALL | re.IGNORECASE)
+    for url, inner in cards:
+        img = re.search(r'''<img[^>]+src=['"]([^'"]+)['"][^>]*alt=['"]([^'"]+)['"]''',
+                        inner, re.IGNORECASE)
+        if img:
+            cover_url, title = img.groups()
+            out.append({"link": url, "title": title.strip(), "img": cover_url})
+    return out
+
+
+def fetch_anime_page(url, timeout=10):
+    """The HTML of a witanime page, fetched the way detection already fetches it.
+
+    Factored out of AnimeDetailsThread.detect_entries so a second reader (the filler
+    list) uses the same single request rather than a copy of it.
+    """
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read().decode("utf-8", "replace")
+
+
 def clean_title(title):
     """A result title as a person would write it: HTML entities decoded, spaces tidied.
 
@@ -813,7 +843,7 @@ class AnimeSearchThread(QThread):
                 search_url = search_url.replace("/?s=", f"/page/{self.page}/?s=")
         
         if "witanime.site" in search_url:
-            import urllib.request, re, os, hashlib
+            import urllib.request, os, hashlib
             from PyQt6.QtGui import QImage
             from PyQt6.QtCore import Qt
             try:
@@ -827,16 +857,13 @@ class AnimeSearchThread(QThread):
                     else:
                         raise
                         
-                cards = re.findall(r'''<a[^>]+href=['"]([^'"]+/(?:anime|movie)/[^'"]+)['"][^>]*>(.*?)</a>''', html, re.DOTALL | re.IGNORECASE)
-                for url, inner in cards:
-                    if url in seen: continue
-                    img = re.search(r'''<img[^>]+src=['"]([^'"]+)['"][^>]*alt=['"]([^'"]+)['"]''', inner, re.IGNORECASE)
-                    if img:
-                        cover_url, title = img.groups()
-                        # cover starts empty (a path, once fetched); img holds the URL.
-                        entries.append({"link": url, "title": title.strip(),
-                                        "cover": "", "img": cover_url})
-                        seen.add(url)
+                for found in parse_witanime_results(html):
+                    if found["link"] in seen:
+                        continue
+                    # cover starts empty (a path, once fetched); img holds the URL.
+                    entries.append({"link": found["link"], "title": found["title"],
+                                    "cover": "", "img": found["img"]})
+                    seen.add(found["link"])
                 
                 cache_dir = _covers_cache_dir()
                 _prune_cover_cache(cache_dir)
@@ -1093,10 +1120,8 @@ class AnimeDetailsThread(QThread):
         # --- FAST PATH FOR WITANIME.SITE (Bypasses Cloudflare headless block) ---
         if "witanime.site" in anime_url:
             try:
-                import urllib.request, re
-                req = urllib.request.Request(anime_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    html = response.read().decode("utf-8")
+                import re
+                html = fetch_anime_page(anime_url)
                 hrefs = re.findall(r'''href=['"]([^'"]+)['"]''', html, re.IGNORECASE)
                 template, max_ep = self._derive_from_hrefs(hrefs)
                 if template:

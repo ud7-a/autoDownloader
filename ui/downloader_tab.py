@@ -23,6 +23,122 @@ from ui.styles import apply_danger_style
 SOUND_NONE = "__none__"
 
 
+class FillerLookupThread(QThread):
+    """Read a profile's filler episode numbers off its site, once.
+
+    Both sites list every episode of the show on any single episode page -- witanime
+    badges them "فيلر", animerco writes "- فلر" into the list item -- so one page is
+    enough, whichever episode it is. Runs off the GUI thread because witanime's page
+    is ~900 KB.
+    """
+    done = pyqtSignal(list, str, str)   # (episode numbers, error message, source site)
+
+    def __init__(self, url_template, title="", parent=None):
+        super().__init__(parent)
+        self.url_template = url_template or ""
+        self.title = title or ""
+
+    def run(self):
+        from core.filler import parse_filler_episodes
+        from ui.search_tab import site_display_name, extract_domain
+        url = self.url_template.replace("{x}", "1")
+        here = site_display_name(extract_domain(url))
+        try:
+            episodes = parse_filler_episodes(self._page(url))
+        except Exception as err:
+            self.done.emit([], f"{type(err).__name__}: {err}", "")
+            return
+        # Ask the other site as well, and merge -- filler numbering belongs to the
+        # anime, so both lists describe the same episodes.
+        #
+        # "Only when this site found nothing" was the obvious rule and it is wrong:
+        # animerco marks 2 of Bleach's 366 episodes where witanime marks 163, so a
+        # non-empty answer there is not a complete one. An animerco profile
+        # therefore always asks witanime (one fetch, about a second, far better
+        # data), while a witanime profile only bothers when it came up empty --
+        # animerco needs a browser, takes ~5 s, and rarely adds anything.
+        from core.filler import wants_other_site
+        want_other = wants_other_site(url, episodes)
+        other, source = [], ""
+        if want_other and not self.isInterruptionRequested():
+            try:
+                other, source = self._from_other_site(url)
+            except Exception:
+                other, source = [], ""      # a failed fallback is just "none found"
+
+        merged = sorted(set(episodes) | set(other))
+        if episodes and other:
+            label = f"{here} + {source}"
+        elif other:
+            label = source
+        else:
+            label = here
+        self.done.emit(merged, "", label if merged else here)
+
+    def _page(self, url):
+        """The page's HTML, fetched the way the app already reaches that site."""
+        if "witanime" in url:
+            from ui.search_tab import fetch_anime_page
+            return fetch_anime_page(url)
+        # animerco serves this list to a normal headless browser.
+        from ui.search_tab import _make_headless_driver
+        driver = _make_headless_driver()
+        try:
+            driver.get(url)
+            return driver.page_source
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    def _from_other_site(self, url):
+        """(episodes, site name) for the same anime on the other supported site."""
+        from urllib.parse import quote
+        from core.filler import parse_filler_episodes, pick_cross_site_match
+        from ui.search_tab import (SUPPORTED_SITES, fetch_anime_page,
+                                   parse_witanime_results, site_display_name,
+                                   page_anchors, _make_headless_driver)
+        if not self.title or self.isInterruptionRequested():
+            return [], ""
+
+        if "witanime" in url:               # witanime profile -> ask animerco
+            domain = "eta.animerco.org"
+            search = SUPPORTED_SITES[domain].replace("{query}", quote(self.title))
+            driver = _make_headless_driver()
+            try:
+                driver.get(search)
+                rows = [{"title": (r.get("title") or r.get("text") or "").strip(),
+                         "link": r.get("href", "")}
+                        for r in page_anchors(driver) if "/animes/" in (r.get("href") or "")]
+                hit = pick_cross_site_match(self.title, rows)
+                if not hit:
+                    return [], ""
+                driver.get(hit["link"])
+                page = driver.page_source
+            finally:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            # animerco marks filler on EPISODE pages, so follow the first episode.
+            first = self._first_animerco_episode(page)
+            return (parse_filler_episodes(self._page(first)) if first else []), "animerco"
+
+        domain = "witanime.site"            # animerco profile -> ask witanime
+        search = SUPPORTED_SITES[domain].replace("{query}", quote(self.title))
+        hit = pick_cross_site_match(self.title, parse_witanime_results(fetch_anime_page(search)))
+        if not hit:
+            return [], ""
+        return parse_filler_episodes(fetch_anime_page(hit["link"])), site_display_name(domain)
+
+    @staticmethod
+    def _first_animerco_episode(html):
+        import re
+        found = re.search(r'''href=['"]([^'"]*/episodes/[^'"]+)['"]''', html or "", re.I)
+        return found.group(1) if found else ""
+
+
 def builtin_sound_path():
     """Absolute path to the app's bundled default finish sound (frozen or source)."""
     base = getattr(sys, "_MEIPASS", None)
@@ -467,6 +583,15 @@ class DownloaderWidget(QWidget):
         self.ep_picker.changed.connect(self._update_episode_feedback)
         main_layout.addWidget(self.ep_picker)
 
+        # Leave out the episodes the site itself marks as filler.
+        self._filler_thread = None
+        self.chk_skip_filler = CheckBox("Skip filler episodes")
+        self.chk_skip_filler.setToolTip(
+            "Leave out episodes this site marks as filler. The list comes from the "
+            "site, so it is only as complete as the site's own tagging.")
+        self.chk_skip_filler.toggled.connect(self.on_skip_filler_toggled)
+        main_layout.addWidget(self.chk_skip_filler)
+
         # Live total: friendly count + normalized form, red hint if a range is invalid.
         self.lbl_ep_feedback = QLabel("")
         self.lbl_ep_feedback.setWordWrap(True)
@@ -680,18 +805,105 @@ class DownloaderWidget(QWidget):
             deletable = selected in app_settings.get("custom_sounds", [])
             self.btn_delete_sound.setVisible(not is_none)
             self.btn_delete_sound.setEnabled(deletable)
+    def _profile_filler(self):
+        """(cached filler numbers, whether they have ever been looked up) for the
+        selected profile."""
+        with config_lock:
+            data = sites_data.get(self.combo_site.currentText(), {}) or {}
+            return list(data.get("filler_episodes") or []), "filler_episodes" in data
+
+    def selected_episodes(self):
+        """The episodes a download would actually fetch: the picker's list, minus
+        filler when that box is ticked. Returns (episodes, error, skipped count)."""
+        from core.filler import strip_filler
+        eps, err = self.ep_picker.episodes()
+        if err or not self.chk_skip_filler.isChecked():
+            return eps, err, 0
+        filler, _ = self._profile_filler()
+        kept = strip_filler(eps, filler)
+        return kept, err, len(eps) - len(kept)
+
+    def on_skip_filler_toggled(self, checked):
+        with config_lock:
+            site = self.combo_site.currentText()
+            if site in sites_data:
+                sites_data[site]["skip_filler"] = bool(checked)
+        save_config()
+
+        _, looked_up = self._profile_filler()
+        if checked and not looked_up:
+            self._start_filler_lookup()
+        else:
+            self._update_episode_feedback()
+
+    def _start_filler_lookup(self):
+        """Fetch this anime's filler list once, then keep it on the profile."""
+        if self._filler_thread is not None and self._filler_thread.isRunning():
+            return
+        with config_lock:
+            template = (sites_data.get(self.combo_site.currentText(), {}) or {}).get("url", "")
+        if not template:
+            return
+        self.chk_skip_filler.setEnabled(False)
+        self.lbl_ep_feedback.setText("⏳  Looking up which episodes are filler…")
+        self.lbl_ep_feedback.setStyleSheet("color:#aaaaaa; font-size:12px; background:transparent;")
+        self._filler_thread = FillerLookupThread(template, self.combo_site.currentText(), self)
+        self._filler_thread.done.connect(self._on_filler_ready)
+        self._filler_thread.start()
+
+    def _on_filler_ready(self, episodes, error, source):
+        self.chk_skip_filler.setEnabled(True)
+        if error:
+            # Nothing is cached on failure, so ticking the box again retries.
+            self.chk_skip_filler.setChecked(False)
+            InfoBar.warning(
+                title="Couldn't read the filler list",
+                content=f"{error}. The episode list was left unchanged.",
+                orient=Qt.Orientation.Horizontal, isClosable=True,
+                position=InfoBarPosition.TOP, duration=5000, parent=self)
+            self._update_episode_feedback()
+            return
+        with config_lock:
+            site = self.combo_site.currentText()
+            if site in sites_data:
+                sites_data[site]["filler_episodes"] = list(episodes)
+                sites_data[site]["filler_source"] = source
+        save_config()
+        if not episodes:
+            InfoBar.info(
+                title="No filler episodes marked",
+                content="Neither site marks any episode of this anime as filler, "
+                        "so nothing will be skipped.",
+                orient=Qt.Orientation.Horizontal, isClosable=True,
+                position=InfoBarPosition.TOP, duration=5000, parent=self)
+        else:
+            InfoBar.success(
+                title=f"{len(episodes)} filler episodes found",
+                content=f"Taken from {source}." if source else "",
+                orient=Qt.Orientation.Horizontal, isClosable=True,
+                position=InfoBarPosition.TOP, duration=4000, parent=self)
+        self._update_episode_feedback()
+
     def _update_episode_feedback(self):
         """Live total under the picker: friendly count + normalized spec when valid,
         or a red hint when a range is backwards. Also gates the Start button while idle."""
-        eps, err = self.ep_picker.episodes()
+        eps, err, skipped = self.selected_episodes()
         if err:
             self._episodes_valid = False
             self.lbl_ep_feedback.setText(f"⚠  {err}")
             self.lbl_ep_feedback.setStyleSheet("color:#ff6b6b; font-size:12px; background:transparent;")
         else:
-            self._episodes_valid = True
+            self._episodes_valid = bool(eps)
             noun = "episode" if len(eps) == 1 else "episodes"
-            self.lbl_ep_feedback.setText(f"✓  {len(eps)} {noun}   →   {compact_episode_spec(eps)}")
+            extra = f"   ·   {skipped} filler skipped" if skipped else ""
+            if not eps:
+                self.lbl_ep_feedback.setText("⚠  Every episode in this range is filler — nothing to download.")
+                self.lbl_ep_feedback.setStyleSheet("color:#ff6b6b; font-size:12px; background:transparent;")
+                if self.ep_picker.isEnabled() and not self._checking:
+                    self.btn_start.setEnabled(False)
+                return
+            self.lbl_ep_feedback.setText(
+                f"✓  {len(eps)} {noun}   →   {compact_episode_spec(eps)}{extra}")
             self.lbl_ep_feedback.setStyleSheet("color:#51cf66; font-size:12px; background:transparent;")
         # Only touch the button while idle -- during a task the picker is disabled,
         # and during a connection check we must not re-enable Start under the checker.
@@ -768,6 +980,14 @@ class DownloaderWidget(QWidget):
                     self.ep_picker.blockSignals(True)
                     self.ep_picker.set_spec(spec)
                     self.ep_picker.blockSignals(False)
+                # Filler is per anime, so the setting and the cached list both
+                # belong to the profile, not to the app.
+                if hasattr(self, 'chk_skip_filler'):
+                    self.chk_skip_filler.blockSignals(True)
+                    self.chk_skip_filler.setChecked(bool(sites_data[text].get("skip_filler")))
+                    self.chk_skip_filler.setEnabled(True)
+                    self.chk_skip_filler.blockSignals(False)
+                if hasattr(self, 'ep_picker'):
                     self._update_episode_feedback()
                 save_config()
             else: 
@@ -954,7 +1174,17 @@ class DownloaderWidget(QWidget):
 
         # Read the episode ranges up front so we can both validate them and use the
         # first episode for the reachability check below.
-        episodes_list, ep_err = self.ep_picker.episodes()
+        # Filtered, so "Skip filler episodes" applies to the download itself and not
+        # only to the preview under the picker.
+        episodes_list, ep_err, _skipped = self.selected_episodes()
+        if not ep_err and not episodes_list:
+            InfoBar.warning(
+                title="Nothing to download",
+                content="Every episode in this range is marked as filler. Untick "
+                        "\"Skip filler episodes\" or pick a different range.",
+                orient=Qt.Orientation.Horizontal, isClosable=True,
+                position=InfoBarPosition.TOP, duration=5000, parent=self)
+            return
         if ep_err:
             InfoBar.warning(
                 title="Invalid Episodes",
