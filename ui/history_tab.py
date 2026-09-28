@@ -20,9 +20,15 @@ class HistoryWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
 
-        # Fluent Subtitle Label
-        header_lbl = SubtitleLabel("Download History")
-        layout.addWidget(header_lbl)
+        # Title on the left, Clear History small on the right. It used to be a
+        # full-width red bar under the title -- the most prominent thing on the page
+        # was the one action nobody comes here to take.
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(SubtitleLabel("Download History"))
+        header.addStretch(1)
+        self._header = header
+        layout.addLayout(header)
 
         # Fluent TableWidget (Natively supports Dark Mode and rounded corners!)
         self.table = TableWidget(self)
@@ -46,15 +52,14 @@ class HistoryWidget(QWidget):
         self._row_meta = []
         self.table.verticalScrollBar().valueChanged.connect(self._sync_action_widgets)
 
-        # Fluent PushButton with styled danger design
+        # Still asks before deleting (see clear_history).
         self.btn_clear_history = PushButton(FIF.DELETE, "Clear History")
         self.btn_clear_history.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear_history.setObjectName("Danger")
         apply_danger_style(self.btn_clear_history)
-        self.btn_clear_history.setMinimumHeight(40)
         self.btn_clear_history.clicked.connect(self.clear_history)
-        
-        layout.addWidget(self.btn_clear_history)
+        self._header.addWidget(self.btn_clear_history)
+
         layout.addWidget(self.table)
         
         signals.history_updated.connect(self.refresh_data)

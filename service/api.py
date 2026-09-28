@@ -99,14 +99,31 @@ def trigger_check():
 
 @app.get("/v1/test_scrape")
 def test_scrape(url: str):
-    """Debug endpoint to inspect scraper results directly from Render."""
-    max_ep = checker.fetch_latest_episode(url)
+    """Debug endpoint to inspect scraper results directly from Render.
+
+    Returns every fetcher's outcome (status, size, Cloudflare challenge, episodes,
+    error) and a verdict, because a bare 0 could mean a wrong address, a page with
+    no episode links, or a block -- three problems with three different fixes.
+    """
+    trace = []
+    max_ep = checker.fetch_latest_episode(url, trace=trace)
     scraper_key_present = bool(os.environ.get("SCRAPER_API_KEY", "").strip())
+    steps = [t for t in trace if "fetcher" in t]
+    if max_ep > 0:
+        verdict = "success"
+    elif any(t.get("status") == 404 and t["fetcher"] in checker._TRUSTED_404 for t in steps):
+        verdict = "not_found"
+    elif any(t.get("status") == 200 and not t.get("challenge") and t.get("bytes") for t in steps):
+        verdict = "page_read_but_no_episodes"
+    else:
+        verdict = "blocked_or_unreachable"
     return {
         "url": url,
         "scraper_api_key_configured": scraper_key_present,
         "max_episode": max_ep,
-        "status": "success" if max_ep > 0 else "no_episodes_or_blocked"
+        "status": "success" if max_ep > 0 else "no_episodes_or_blocked",   # unchanged, for old callers
+        "verdict": verdict,
+        "trace": trace,
     }
 
 

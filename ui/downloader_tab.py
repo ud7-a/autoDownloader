@@ -8,7 +8,7 @@ from PyQt6.QtGui import QIntValidator
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog)
 
 # THE UPGRADE: We are using Fluent Widgets for everything!
-from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, CheckBox,
+from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, PasswordLineEdit, CheckBox,
                             ComboBox, Slider, SmoothScrollArea, SpinBox, FluentIcon as FIF, ToolButton,
                             InfoBar, InfoBarPosition)
 
@@ -571,7 +571,9 @@ class DownloaderWidget(QWidget):
         self.on_volume_change(self.slider_vol.value())
 
         main_layout.addWidget(QLabel("Discord Webhook:", styleSheet="font-weight: bold; margin-top: 5px;"))
-        self.txt_webhook = LineEdit()
+        # Masked, with an eye button to reveal it: anyone holding this URL can post
+        # to the channel, and it used to sit in plain text in every screenshot.
+        self.txt_webhook = PasswordLineEdit()
         self.txt_webhook.setText(app_settings.get("discord_webhook", ""))
         self.txt_webhook.setPlaceholderText("https://discord.com/api/webhooks/...")
         self.txt_webhook.textChanged.connect(self.save_settings)
@@ -615,22 +617,38 @@ class DownloaderWidget(QWidget):
         self.refresh_dropdown()
         self._update_episode_feedback()   # populate the live preview for the initial value
         self.on_auto_concurrency_toggled()   # sync the spin box + hint to the saved mode
+
+        # The session to offer is the one left over from the LAST run, captured now,
+        # before anything in this run can start a download. Reading it a second
+        # later offered to "resume" the very download a Discord command had just
+        # started: that command runs 600 ms after launch and records itself as the
+        # unfinished session, and the prompt read that record at 1000 ms.
+        import copy
+        with config_lock:
+            self._session_at_launch = copy.deepcopy(app_settings.get("unfinished_session"))
+        self._download_started_this_launch = False
+        signals.task_started.connect(self._note_download_started)
         QTimer.singleShot(1000, self.check_and_prompt_resume)
 
+    def _note_download_started(self):
+        self._download_started_this_launch = True
+
     def check_and_prompt_resume(self):
-        with config_lock:
-            session = app_settings.get("unfinished_session")
-            if not session or not session.get("episodes"):
-                return
-            
-            site = session.get("site")
-            episodes = session.get("episodes", [])
-            target_dir = session.get("target_dir")
-            headless = session.get("headless", True)
-            webhook = session.get("webhook", "")
-            selected_sound = session.get("selected_sound", "")
-            volume = session.get("volume", 100)
-            concurrency = session.get("concurrency", 3)
+        # A download already under way (typically one queued from Discord) replaces
+        # the old session; offering to resume would start the same episodes twice.
+        if self._download_started_this_launch:
+            return
+        session = self._session_at_launch
+        if not session or not session.get("episodes"):
+            return
+        site = session.get("site")
+        episodes = session.get("episodes", [])
+        target_dir = session.get("target_dir")
+        headless = session.get("headless", True)
+        webhook = session.get("webhook", "")
+        selected_sound = session.get("selected_sound", "")
+        volume = session.get("volume", 100)
+        concurrency = session.get("concurrency", 3)
 
         from qfluentwidgets import MessageBox
         title = "🔄 Resume Unfinished Session?"
@@ -638,8 +656,13 @@ class DownloaderWidget(QWidget):
         w = MessageBox(title, content, self.window())
         w.yesButton.setText("Resume")
         w.cancelButton.setText("Discard")
-        
-        if w.exec():
+
+        answered_yes = w.exec()
+        # The dialog is modal but other code keeps running: a Discord command can
+        # start a download while it is on screen. Then neither answer applies.
+        if self._download_started_this_launch:
+            return
+        if answered_yes:
             # Restore UI values to match the resumed session
             if site in [self.combo_site.itemText(i) for i in range(self.combo_site.count())]:
                 self.combo_site.setCurrentText(site)

@@ -48,9 +48,14 @@ DEFAULT_SITE_FLOWS = {
                 {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]", "delay": 3.0},
                 {"xpath": "Download anyway", "delay": 2.0},
             ],
+            # An episode can offer wtsrv twice. The page is right-to-left and XPath
+            # counts in source order, so [last()] is the button furthest LEFT on
+            # screen -- checked on Yuusha Party ep 1: wtsrv, mp4upload, wtsrv laid
+            # out right to left, and [last()] picked the left one. With a single
+            # wtsrv button [last()] is simply that button.
             "FHD - wtsrv": [
                 {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 1.0},
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wtsrv')]", "delay": 5.0},
+                {"xpath": "(//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wtsrv')])[last()]", "delay": 5.0},
                 {"xpath": '//*[@id="downloadButton"]', "delay": 2.0},
             ],
             "FHD - Workupload": [
@@ -156,8 +161,9 @@ def clean_title(title):
     which compares plain titles. Applied to every site's results.
     """
     import html
-    text = html.unescape(title or "")
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", html.unescape(title or "")).strip()
+    # A stray trailing separator ("... Kashin-tan -") is page noise, not the name.
+    return re.sub(r"[\s\-–—:|·,]+$", "", text) or text
 
 
 def is_movie_link(url):

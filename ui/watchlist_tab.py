@@ -11,11 +11,11 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from qfluentwidgets import (PushButton, PrimaryPushButton, SimpleCardWidget, SmoothScrollArea,
                             ToolButton, FluentIcon as FIF, InfoBar, InfoBarPosition,
                             IndeterminateProgressRing, MessageBoxBase, SubtitleLabel,
-                            BodyLabel, CheckBox, SwitchButton, LineEdit)
+                            BodyLabel, CheckBox, SwitchButton)
 
 from utils.config import (get_watchlist, remove_watch, update_watch, app_settings, APP_DIR,
                           cloud_register_and_sync, cloud_unsubscribe, save_config)
-from ui.styles import apply_danger_style, apply_tinted_style, rounded_pixmap
+from ui.styles import apply_danger_style, apply_tinted_style, rounded_pixmap, show_undo
 from ui.search_tab import extract_domain, site_display_name, site_icon, is_movie_link
 
 
@@ -29,6 +29,29 @@ def _today_key():
     from core.schedule import DAY_ORDER
     # DAY_ORDER starts on Saturday; Python's weekday() has Monday as 0.
     return DAY_ORDER[(time.localtime().tm_wday + 2) % 7]
+
+
+def days_from_today(today):
+    """The week's day keys starting at today: today, tomorrow, ... yesterday.
+
+    The Watchlist used to list days in fixed schedule order (Saturday first), so on
+    a Wednesday today's show sat third, under two days that had already passed.
+    """
+    from core.schedule import DAY_ORDER
+    if today not in DAY_ORDER:
+        return list(DAY_ORDER)
+    i = DAY_ORDER.index(today)
+    return list(DAY_ORDER[i:]) + list(DAY_ORDER[:i])
+
+
+def display_title(title):
+    """A title without the stray separator some sites leave on the end.
+
+    witanime's search alt text for Bleach is "BLEACH: Sennen Kessen-hen -
+    Kashin-tan -"; the trailing " -" is noise, not part of the name.
+    """
+    import re
+    return re.sub(r"[\s\-–—:|·,]+$", "", (title or "").strip()) or (title or "")
 
 
 def entries_airing_today(entries, today):
@@ -343,7 +366,9 @@ class CloudSettingsDialog(MessageBoxBase):
         self.descLabel.setStyleSheet("color: #888888; font-size: 12px;")
 
         self.wh_label = BodyLabel("Discord Webhook URL:", self)
-        self.wh_input = LineEdit(self)
+        # Masked like the Downloader's copy: the URL alone is enough to post there.
+        from qfluentwidgets import PasswordLineEdit
+        self.wh_input = PasswordLineEdit(self)
         self.wh_input.setPlaceholderText("https://discord.com/api/webhooks/...")
         self.wh_input.setText(app_settings.get("discord_webhook", ""))
 
@@ -405,7 +430,7 @@ class WatchCard(SimpleCardWidget):
 
         info = QVBoxLayout()
         info.setSpacing(2)
-        title = QLabel(entry.get("title", "Anime"))
+        title = QLabel(display_title(entry.get("title", "Anime")))
         title.setFont(QFont("Segoe UI Variable", 11, QFont.Weight.Bold))
         title.setStyleSheet("color: #ffffff; background: transparent;")
         info.addWidget(title)
@@ -472,6 +497,7 @@ class WatchCard(SimpleCardWidget):
             self.lbl_status.setStyleSheet("color: #51cf66; background: transparent; "
                                           "font-size: 12px; font-weight: bold;")
             self.btn_download.setEnabled(True)
+            self.btn_download.setVisible(True)
         else:
             self.lbl_status.setStyleSheet("color: #999999; background: transparent; font-size: 12px;")
             if seen is None:
@@ -480,7 +506,11 @@ class WatchCard(SimpleCardWidget):
                 self.lbl_status.setText("✓ No episodes yet — watching for the first one")
             else:
                 self.lbl_status.setText(f"✓ Up to date  (ep {seen})")
+            # Hidden rather than greyed out: a disabled button on every up-to-date
+            # card was noise, and made the one card that DID have something new
+            # harder to spot.
             self.btn_download.setEnabled(False)
+            self.btn_download.setVisible(False)
         # With a single new episode there is nothing to choose between.
         self.btn_select.setVisible(new_count > 1)
 
@@ -615,16 +645,17 @@ class WatchlistWidget(QWidget):
             h.deleteLater()
         self._day_headers.clear()
 
-        # Group by release day, in week order, with unscheduled titles last.
-        from core.schedule import DAY_ORDER, DAY_LABELS
+        # Group by release day: today first, then the days coming up, with
+        # unscheduled titles last.
+        from core.schedule import DAY_LABELS
         buckets = {}
         for e in entries:
             buckets.setdefault(e.get("release_day") or "", []).append(e)
-        ordered = [(d, buckets[d]) for d in DAY_ORDER if d in buckets]
+        today = _today_key()
+        ordered = [(d, buckets[d]) for d in days_from_today(today) if d in buckets]
         if "" in buckets:
             ordered.append(("", buckets[""]))
 
-        today = _today_key()
         for day, group in ordered:
             label = DAY_LABELS.get(day, "Day not known yet")
             if day and day == today:
@@ -678,8 +709,21 @@ class WatchlistWidget(QWidget):
                          position=InfoBarPosition.TOP, duration=3000, parent=self.window())
 
     def remove_one(self, url):
+        """Stop following, with an Undo that brings the entry back intact."""
+        entries = get_watchlist()
+        index = next((i for i, w in enumerate(entries) if w.get("url") == url), None)
+        if index is None:
+            return
+        entry = dict(entries[index])
         remove_watch(url)
         self.refresh_cards()
+        show_undo(self.window(), f"Stopped following '{entry.get('title', 'anime')}'.",
+                  lambda: self._undo_remove(entry, index))
+
+    def _undo_remove(self, entry, index):
+        from utils.config import restore_watch
+        if restore_watch(entry, index):
+            self.refresh_cards()
 
     # ---- checking ----
     def check_all(self):
@@ -954,8 +998,10 @@ class WatchlistWidget(QWidget):
 
     def _on_reg_success(self, msg):
         self._update_cloud_ui()
-        from utils.config import set_windows_autostart
-        set_windows_autostart(True)
+        # Startup entry AND a watcher right now -- registering alone left nothing
+        # to react to a Discord click until the next launch or login.
+        from utils.config import start_background_watcher
+        start_background_watcher()
         InfoBar.success("Cloud Notifications & Remote Queue Active", msg,
                         position=InfoBarPosition.TOP, duration=4000, parent=self.window())
 

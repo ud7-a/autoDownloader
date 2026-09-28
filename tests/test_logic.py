@@ -1109,6 +1109,171 @@ class WatchlistTodayFilterTests(unittest.TestCase):
         self.assertIn(_today_key(), DAY_ORDER)
 
 
+class WatcherDetectionTests(unittest.TestCase):
+    """The watcher must recognise the installed app and the installed app's own
+    watcher, not only the Python versions of each."""
+
+    class P:
+        def __init__(self, pid, name, cmdline):
+            self.info = {"pid": pid, "name": name, "cmdline": cmdline}
+
+    def run_with(self, procs, fn):
+        from unittest import mock
+        import core.watcher as w
+        with mock.patch.object(w.psutil, "process_iter", return_value=procs):
+            return fn()
+
+    def test_installed_app_counts_as_running_for_a_source_watcher(self):
+        import core.watcher as w
+        procs = [self.P(111, "AutoDownloader.exe", [r"C:\App\AutoDownloader.exe"])]
+        self.assertTrue(self.run_with(procs, w.is_main_app_running))
+
+    def test_installed_watcher_is_not_mistaken_for_the_app(self):
+        import core.watcher as w
+        procs = [self.P(111, "AutoDownloader.exe", [r"C:\App\AutoDownloader.exe", "--watcher"])]
+        self.assertFalse(self.run_with(procs, w.is_main_app_running))
+
+    def test_installed_watcher_is_seen_as_another_watcher(self):
+        import core.watcher as w
+        procs = [self.P(111, "AutoDownloader.exe", [r"C:\App\AutoDownloader.exe", "--watcher"])]
+        self.assertTrue(self.run_with(procs, w.is_other_watcher_running))
+
+    def test_source_watcher_still_detected(self):
+        import core.watcher as w
+        procs = [self.P(111, "pythonw.exe", ["pythonw.exe", r"C:\x\aed_watcher.pyw"])]
+        self.assertTrue(self.run_with(procs, w.is_other_watcher_running))
+
+    def test_nothing_running(self):
+        import core.watcher as w
+        procs = [self.P(111, "chrome.exe", ["chrome.exe"])]
+        self.assertFalse(self.run_with(procs, w.is_main_app_running))
+        self.assertFalse(self.run_with(procs, w.is_other_watcher_running))
+
+    def test_polls_fast_but_heartbeats_inside_the_online_window(self):
+        import core.watcher as w
+        self.assertLessEqual(w.POLL_SECONDS, 5)
+        self.assertLess(w.POLL_SECONDS * w.HEARTBEAT_EVERY, 180)   # service window
+
+
+class ResumePromptTests(unittest.TestCase):
+    """A download started this launch (e.g. from Discord 600 ms after start) must
+    never be offered back as an 'unfinished session'."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import copy
+        import utils.config as cfg
+        self.cfg = cfg
+        self._saved = copy.deepcopy(cfg.app_settings.get("unfinished_session"))
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._saved is None:
+            self.cfg.app_settings.pop("unfinished_session", None)
+        else:
+            self.cfg.app_settings["unfinished_session"] = self._saved
+
+    def make(self, session):
+        from unittest import mock
+        import ui.downloader_tab as dt
+        if session is None:
+            self.cfg.app_settings.pop("unfinished_session", None)
+        else:
+            self.cfg.app_settings["unfinished_session"] = session
+        shown = []
+
+        class FakeBox:
+            def __init__(self, *a, **k):
+                shown.append(a[1] if len(a) > 1 else "")
+                self.yesButton = mock.Mock(); self.cancelButton = mock.Mock()
+            def exec(self):
+                return False
+
+        p1 = mock.patch("qfluentwidgets.MessageBox", FakeBox)
+        p2 = mock.patch.object(dt, "save_config", lambda: None)
+        p1.start(); p2.start()
+        self.addCleanup(p1.stop); self.addCleanup(p2.stop)
+        w = dt.DownloaderWidget() if hasattr(dt, "DownloaderWidget") else None
+        if w is None:
+            self.skipTest("downloader widget class not found")
+        return w, shown
+
+    OLD = {"site": "Old Show", "episodes": [3, 4], "target_dir": "C:\\x"}
+
+    def test_leftover_session_is_offered(self):
+        w, shown = self.make(dict(self.OLD))
+        w.check_and_prompt_resume()
+        self.assertEqual(len(shown), 1)
+
+    def test_not_offered_once_a_download_started_this_launch(self):
+        from core.signals import signals
+        w, shown = self.make(dict(self.OLD))
+        signals.task_started.emit()          # what the Discord command's download does
+        w.check_and_prompt_resume()
+        self.assertEqual(shown, [])
+
+    def test_a_session_recorded_after_launch_is_not_the_one_offered(self):
+        """The bug exactly: nothing was left over, a remote download then recorded
+        itself, and the prompt read that record."""
+        w, shown = self.make(None)
+        self.cfg.app_settings["unfinished_session"] = {"site": "Mushoku", "episodes": [14]}
+        w.check_and_prompt_resume()
+        self.assertEqual(shown, [])
+
+
+class WatchlistPolishTests(unittest.TestCase):
+    def test_days_start_today_and_wrap(self):
+        from ui.watchlist_tab import days_from_today
+        from core.schedule import DAY_ORDER
+        order = days_from_today("wednesday")
+        self.assertEqual(order[0], "wednesday")
+        self.assertEqual(sorted(order), sorted(DAY_ORDER))
+        self.assertEqual(len(order), 7)
+        # the day before today comes last
+        self.assertEqual(order[-1], DAY_ORDER[DAY_ORDER.index("wednesday") - 1])
+
+    def test_unknown_today_falls_back_to_schedule_order(self):
+        from ui.watchlist_tab import days_from_today
+        from core.schedule import DAY_ORDER
+        self.assertEqual(days_from_today("someday"), list(DAY_ORDER))
+
+    def test_trailing_separator_is_dropped_from_titles(self):
+        from ui.watchlist_tab import display_title
+        self.assertEqual(display_title("BLEACH: Sennen Kessen-hen - Kashin-tan -"),
+                         "BLEACH: Sennen Kessen-hen - Kashin-tan")
+        self.assertEqual(display_title("Re:Zero kara Hajimeru Isekai Seikatsu"),
+                         "Re:Zero kara Hajimeru Isekai Seikatsu")
+        self.assertEqual(display_title("Show —  "), "Show")
+        self.assertEqual(display_title(""), "")
+
+    def test_search_titles_get_the_same_cleanup(self):
+        from ui.search_tab import clean_title
+        self.assertEqual(clean_title("BLEACH: Sennen Kessen-hen - Kashin-tan -"),
+                         "BLEACH: Sennen Kessen-hen - Kashin-tan")
+        self.assertEqual(clean_title("Steins;Gate 0"), "Steins;Gate 0")
+
+    def test_restore_watch_puts_the_entry_back_where_it_was(self):
+        import copy
+        import utils.config as cfg
+        saved = copy.deepcopy(cfg.app_settings.get("watchlist", []))
+        self.addCleanup(lambda: cfg.app_settings.__setitem__("watchlist", saved))
+        cfg._trigger_bg_cloud_sync, real = (lambda: None), cfg._trigger_bg_cloud_sync
+        self.addCleanup(lambda: setattr(cfg, "_trigger_bg_cloud_sync", real))
+        a, b, c = ({"url": f"https://x/{n}", "title": n, "seen_max": 7} for n in "abc")
+        cfg.app_settings["watchlist"] = [a, b, c]
+        cfg.remove_watch("https://x/b")
+        self.assertEqual([w["title"] for w in cfg.get_watchlist()], ["a", "c"])
+        self.assertTrue(cfg.restore_watch(b, 1))
+        self.assertEqual([w["title"] for w in cfg.get_watchlist()], ["a", "b", "c"])
+        self.assertEqual(cfg.find_watch("https://x/b")["seen_max"], 7)   # state kept
+        self.assertFalse(cfg.restore_watch(b, 1))                         # no duplicate
+
+
 class FillerEpisodeTests(unittest.TestCase):
     """Both sites mark filler in their episode lists, in different shapes. Markup
     below is copied from the live pages (Naruto Shippuden / Bleach, Sep 2026)."""
@@ -1948,6 +2113,17 @@ class SiteConfigTests(unittest.TestCase):
         paths = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
         self.assertEqual(list(paths), ["FHD - Mediafire", "FHD - Google Drive",
                                        "FHD - wtsrv", "FHD - Workupload", "FHD - gofile"])
+
+    def test_wtsrv_takes_the_leftmost_button(self):
+        """RTL page: [last()] in source order is the button furthest left. Wrapped in
+        parentheses so [last()] applies to all matches, not to each parent's."""
+        from core.selenium_engine import parse_smart_xpath, path_probes
+        paths = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
+        xp = paths["FHD - wtsrv"][1]["xpath"]
+        self.assertTrue(xp.startswith("(//h2"))
+        self.assertTrue(xp.endswith("'wtsrv')])[last()]"))
+        self.assertEqual(parse_smart_xpath(xp), xp)          # used verbatim by the engine
+        self.assertEqual(path_probes(paths)["FHD - wtsrv"], xp)   # and by the link check
 
     def test_gofile_ends_on_its_download_button(self):
         """Checked live: the gofile folder page's only [data-action=download]."""

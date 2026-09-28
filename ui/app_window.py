@@ -220,9 +220,12 @@ class AppWindow(FluentWindow):
         if app_settings.get("cloud_notify_enabled"):
             from utils.config import _trigger_bg_cloud_sync
             QTimer.singleShot(2000, _trigger_bg_cloud_sync)
+            # Commands every 5 s, so a click on Discord's download button starts the
+            # download within seconds; the heartbeat rides along every third poll.
+            self._cloud_poll_count = 0
             self._cloud_poll_timer = QTimer(self)
             self._cloud_poll_timer.timeout.connect(self._poll_cloud_commands)
-            self._cloud_poll_timer.start(20 * 1000)  # Heartbeat & command poll every 20s
+            self._cloud_poll_timer.start(5 * 1000)
 
         if autostart_commands:
             QTimer.singleShot(600, lambda: self._execute_remote_commands(autostart_commands))
@@ -254,12 +257,24 @@ class AppWindow(FluentWindow):
     def _poll_cloud_commands(self):
         """Background poller that sends heartbeat and checks for incoming remote download commands."""
         import threading
+        # One poll at a time: a slow or cold-starting service must not let 5 s ticks
+        # pile up threads behind it.
+        if getattr(self, "_cloud_poll_busy", False):
+            return
+        self._cloud_poll_busy = True
+        beat = self._cloud_poll_count % 3 == 0          # every 15 s at a 5 s tick
+        self._cloud_poll_count += 1
+
         def _bg():
-            from utils.config import cloud_send_heartbeat, cloud_fetch_commands
-            cloud_send_heartbeat()
-            cmds = cloud_fetch_commands()
-            if cmds:
-                signals.remote_commands_received.emit(cmds)
+            try:
+                from utils.config import cloud_send_heartbeat, cloud_fetch_commands
+                if beat:
+                    cloud_send_heartbeat()
+                cmds = cloud_fetch_commands()
+                if cmds:
+                    signals.remote_commands_received.emit(cmds)
+            finally:
+                self._cloud_poll_busy = False
         threading.Thread(target=_bg, daemon=True).start()
 
     def _execute_remote_commands(self, commands: list[dict]):

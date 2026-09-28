@@ -16,7 +16,7 @@ PROFILE_DIR = os.path.join(APP_DIR, "SeleniumProfile")
 DB_FILE = os.path.join(APP_DIR, "download_history.db")
 UNRAR_PATH = os.path.join(APP_DIR, "unrar.exe")
 ARIA2C_PATH = os.path.join(APP_DIR, "aria2c.exe")
-APP_VERSION = "4.8.1"
+APP_VERSION = "4.8.2"
 DEFAULT_CLOUD_SERVICE_URL = "https://aed-notification-service.onrender.com"
 
 # --- GLOBAL LOCKS ---
@@ -199,6 +199,22 @@ def add_watch(entry):
         if any(w.get("url") == entry.get("url") for w in wl):
             return False
         wl.append(entry)
+    save_config()
+    _trigger_bg_cloud_sync()
+    return True
+
+def restore_watch(entry, index):
+    """Put a just-removed entry back where it was (the Undo after "Stop following").
+
+    Keeps everything the entry had -- seen episode, release day, cover -- which is
+    exactly what re-following from Search would lose. Returns False if the anime is
+    already back in the list.
+    """
+    with config_lock:
+        wl = app_settings.setdefault("watchlist", [])
+        if any(w.get("url") == entry.get("url") for w in wl):
+            return False
+        wl.insert(max(0, min(int(index), len(wl))), entry)
     save_config()
     _trigger_bg_cloud_sync()
     return True
@@ -484,6 +500,54 @@ def set_windows_autostart(enabled: bool) -> bool:
         return True
     except Exception as e:
         print(f"Failed to set Windows autostart: {e}")
+        return False
+
+
+def start_background_watcher() -> bool:
+    """Make sure the background watcher runs now AND after every login.
+
+    The watcher is what keeps this PC "online" to the cloud while the app is closed,
+    and what opens the app when Discord's download button is pressed. Two things
+    used to leave it missing on a PC that was on:
+
+      * the Windows startup entry was written once, when cloud notifications were
+        first enabled, and never again -- a later install, a move, or enabling it
+        from the source version left it pointing somewhere stale, so after a reboot
+        no watcher started and every notification read "Offline" until the app was
+        opened by hand;
+      * enabling cloud notifications registered the startup entry but did not start
+        a watcher, so nothing reacted to a click until the next launch or login.
+
+    So this rewrites the startup entry to point at whatever is running right now,
+    and starts a watcher (which exits at once if one is already running).
+    Returns True if a watcher was launched. Never raises.
+    """
+    if not app_settings.get("cloud_notify_enabled"):
+        return False
+    set_windows_autostart(True)
+    try:
+        import subprocess
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--watcher"]
+            cwd = os.path.dirname(sys.executable)
+        else:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            watcher_pyw = os.path.join(root, "aed_watcher.pyw")
+            if not os.path.exists(watcher_pyw):
+                return False
+            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            if not os.path.exists(pythonw):
+                pythonw = sys.executable
+            cmd = [pythonw, watcher_pyw]
+            cwd = root
+        # No console window, and no inherited stdio: a child whose stdout is None
+        # raises on its first print.
+        subprocess.Popen(cmd, cwd=cwd,
+                         creationflags=(0x08000000 if sys.platform == "win32" else 0),
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
         return False
 
 

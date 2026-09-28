@@ -28,6 +28,14 @@ DEFAULT_USER_AGENT = (
 # Extract episode number from url or anchor text
 _EP_NUMBER_RE = re.compile(r"(?:الحلقة|episode|ep|hd)[\s\-_]*(\d+)", re.I)
 _TRAILING_DIGIT_RE = re.compile(r"[-_/](\d+)/?$")
+# "الحلقة-14" is unambiguous. It goes first for links, because the trailing number
+# is not always the episode: animerco writes "...-الحلقة-14-الموسم-1/", where the
+# trailing 1 is the season.
+_ARABIC_EP_RE = re.compile(r"الحلقة[\s\-_]*(\d+)")
+# animerco season pages are ".../seasons/<show>-season-N/" but their episode links
+# are ".../episodes/<show>-الحلقة-X/" -- without "season-N" (season 1 especially).
+_SEASON_SUFFIX_RE = re.compile(r"-season-\d+$", re.I)
+_SEASON_LINK_RE = re.compile(r'''href=['"]([^'"]*/seasons/[^'"]+)['"]''', re.I)
 
 
 def extract_episodes_from_html(html: str, base_url: str = "") -> list[int]:
@@ -69,8 +77,9 @@ def extract_episodes_from_html(html: str, base_url: str = "") -> list[int]:
             # Decoded, like the hrefs it is compared with below. Left encoded, an
             # Arabic slug ("%d9%81%d9%8a%d9%84%d9%85-...") never appeared in any
             # decoded link, so every episode was filtered out and the anime's
-            # notifications stopped without an error.
-            slug = unquote(parts[-1]).lower()
+            # notifications stopped without an error. The "-season-N" of a season
+            # page is dropped for the same reason: its episode links don't carry it.
+            slug = _SEASON_SUFFIX_RE.sub("", unquote(parts[-1]).lower())
             
     for match in href_pattern.finditer(html):
         href = unquote(match.group(1))
@@ -82,18 +91,54 @@ def extract_episodes_from_html(html: str, base_url: str = "") -> list[int]:
         if slug and slug not in href.lower():
             continue
             
-        num_match = _TRAILING_DIGIT_RE.search(href) or _EP_NUMBER_RE.search(href)
+        num_match = (_ARABIC_EP_RE.search(href) or _TRAILING_DIGIT_RE.search(href)
+                     or _EP_NUMBER_RE.search(href))
         if num_match:
             episodes.add(int(num_match.group(1)))
 
     return sorted(episodes)
 
 
-def fetch_with_playwright(anime_url: str, timeout_seconds: float = 30.0) -> tuple[int, dict]:
+def latest_season_url(html: str, base_url: str) -> str:
+    """On an animerco anime page, the URL of its newest season page, else "".
+
+    animerco lists episodes on season pages only; the anime page -- which is what a
+    Watchlist follow stores -- links seasons and no episodes, so it always read as
+    0. Only this show's seasons count (the slug must appear in the link), so a
+    sidebar link to some other show can never be picked up. The highest
+    "season-N" wins; with no numbered season (an OVA-only show) the last one listed.
+    """
+    from urllib.parse import urljoin, urlparse
+    if not html:
+        return ""
+    parts = [p for p in (base_url or "").split("?")[0].strip("/").split("/") if p]
+    show = _SEASON_SUFFIX_RE.sub("", unquote(parts[-1]).lower()) if parts else ""
+    links = []
+    for m in _SEASON_LINK_RE.finditer(html):
+        url = urljoin(base_url, m.group(1))
+        path = unquote(urlparse(url).path).lower().rstrip("/")
+        if path.endswith("/seasons") or (show and show not in path):
+            continue
+        if url not in links:
+            links.append(url)
+    if not links:
+        return ""
+
+    def number(u):
+        m = re.search(r"season-(\d+)/?$", u, re.I)
+        return int(m.group(1)) if m else -1
+
+    numbered = [u for u in links if number(u) >= 0]
+    return max(numbered, key=number) if numbered else links[-1]
+
+
+def fetch_with_playwright(anime_url: str, timeout_seconds: float = 30.0,
+                          seen: dict | None = None) -> tuple[int, dict]:
     """Uses headless Playwright Chromium to execute JavaScript, solve Cloudflare Turnstile challenges,
-    and extract episode counts.
+    and extract episode counts. `seen`, if given, records the status and page for diagnostics.
     """
     debug_info = {}
+    seen = {} if seen is None else seen
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -118,8 +163,10 @@ def fetch_with_playwright(anime_url: str, timeout_seconds: float = 30.0) -> tupl
             except Exception:
                 page = context.new_page()
 
-            page.goto(anime_url, timeout=int(timeout_seconds * 1000), wait_until="domcontentloaded")
-            
+            response = page.goto(anime_url, timeout=int(timeout_seconds * 1000), wait_until="domcontentloaded")
+            if response is not None:
+                seen["status"] = response.status
+
             # Wait up to 8 seconds for Cloudflare challenge redirect or episode container to appear
             for _ in range(8):
                 page.wait_for_timeout(1000)
@@ -127,6 +174,7 @@ def fetch_with_playwright(anime_url: str, timeout_seconds: float = 30.0) -> tupl
                     break
 
             html = page.content()
+            seen["html"] = html
             debug_info["title"] = page.title()
             debug_info["html_len"] = len(html)
             debug_info["preview"] = html[:200]
@@ -138,6 +186,7 @@ def fetch_with_playwright(anime_url: str, timeout_seconds: float = 30.0) -> tupl
     except Exception as e:
         logger.warning(f"Playwright fetch failed for {anime_url}: {e}")
         debug_info["error"] = str(e)
+        seen["error"] = f"{type(e).__name__}: {str(e)[:160]}"
         return 0, debug_info
 
 
@@ -176,9 +225,13 @@ def get_fresh_proxies() -> list[str]:
     return _PROXY_CACHE
 
 
-def fetch_with_proxy_rotation(anime_url: str, max_attempts: int = 6) -> int:
-    """Tries fetching through rotating anonymous proxies to bypass Cloudflare datacenter IP blocks."""
+def fetch_with_proxy_rotation(anime_url: str, max_attempts: int = 6,
+                              seen: dict | None = None) -> int:
+    """Tries fetching through rotating anonymous proxies to bypass Cloudflare datacenter IP blocks.
+    `seen`, if given, records attempts and outcomes for diagnostics."""
+    seen = {} if seen is None else seen
     proxies = get_fresh_proxies()
+    seen["proxies_available"] = len(proxies)
     if not proxies:
         return 0
 
@@ -190,22 +243,29 @@ def fetch_with_proxy_rotation(anime_url: str, max_attempts: int = 6) -> int:
     import random
     selected = random.sample(proxies, min(len(proxies), max_attempts * 2))
 
+    outcomes = seen.setdefault("attempts", {})
     for p in selected:
         try:
             proxy_url = f"http://{p}"
             with httpx.Client(proxy=proxy_url, follow_redirects=True, timeout=7.0, verify=False) as client:
                 r = client.get(anime_url, headers=headers)
+                outcomes[str(r.status_code)] = outcomes.get(str(r.status_code), 0) + 1
                 if r.status_code == 200 and "just a moment" not in r.text.lower():
+                    seen["status"], seen["html"] = 200, r.text
                     eps = extract_episodes_from_html(r.text, anime_url)
                     if eps:
                         return max(eps)
-        except Exception:
+        except Exception as e:
+            key = type(e).__name__
+            outcomes[key] = outcomes.get(key, 0) + 1
             continue
     return 0
 
 
-def fetch_with_scraperapi(anime_url: str, api_key: str) -> int:
-    """Fetches anime page via ScraperAPI residential proxy to bypass Cloudflare Turnstile."""
+def fetch_with_scraperapi(anime_url: str, api_key: str, seen: dict | None = None) -> int:
+    """Fetches anime page via ScraperAPI residential proxy to bypass Cloudflare Turnstile.
+    `seen`, if given, records the status and page for diagnostics -- never the key."""
+    seen = {} if seen is None else seen
     try:
         endpoint = "http://api.scraperapi.com"
         params = {
@@ -214,67 +274,132 @@ def fetch_with_scraperapi(anime_url: str, api_key: str) -> int:
         }
         with httpx.Client(timeout=25.0) as client:
             r = client.get(endpoint, params=params)
+            seen["status"], seen["html"] = r.status_code, r.text
             if r.status_code == 200 and "just a moment" not in r.text.lower():
                 eps = extract_episodes_from_html(r.text, anime_url)
                 if eps:
                     return max(eps)
+            elif r.status_code != 200:
+                # ScraperAPI explains its own refusals (credits used up, bad key,
+                # rate limit) in a short plain-text body. Kept short; it never
+                # contains the key.
+                seen["error"] = r.text[:160].replace(api_key, "***")
     except Exception as e:
-        logger.warning(f"ScraperAPI fetch failed for {anime_url}: {e}")
+        # Type only, in the log too: an httpx error can quote the request URL, and
+        # that URL carries the API key -- the full message put it in Render's logs.
+        logger.warning(f"ScraperAPI fetch failed for {anime_url}: {type(e).__name__}")
+        seen["error"] = type(e).__name__
     return 0
 
 
-def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None) -> int:
-    """Fetches anime page and returns the highest episode number detected (0 if none found)."""
+def _fetch_curl_cffi(anime_url: str, headers: dict, seen: dict) -> int:
+    from curl_cffi import requests as cffi_requests
+    r = cffi_requests.get(anime_url, headers=headers, impersonate="chrome124", timeout=15.0)
+    seen["status"], seen["html"] = r.status_code, r.text
+    if r.status_code == 200:
+        eps = extract_episodes_from_html(r.text, anime_url)
+        if eps:
+            return max(eps)
+    return 0
+
+
+def _fetch_httpx(anime_url: str, headers: dict, client: httpx.Client | None, seen: dict) -> int:
+    close_client = client is None
+    if close_client:
+        client = httpx.Client(follow_redirects=True, timeout=15.0, verify=False)
+    try:
+        r = client.get(anime_url, headers=headers)
+        seen["status"], seen["html"] = r.status_code, r.text
+        if r.status_code == 200:
+            eps = extract_episodes_from_html(r.text, anime_url)
+            if eps:
+                return max(eps)
+        return 0
+    finally:
+        if close_client:
+            client.close()
+
+
+# Fetchers whose 404 can be believed. A random open proxy answering 404 says nothing
+# about the site, so the proxy pool's answers never end the search.
+_TRUSTED_404 = {"scraperapi", "curl_cffi", "httpx", "playwright"}
+
+
+def fetch_latest_episode(anime_url: str, client: httpx.Client | None = None,
+                         trace: list | None = None, _depth: int = 0) -> int:
+    """Fetches anime page and returns the highest episode number detected (0 if none found).
+
+    The fetchers are tried in order until one finds episodes. Before, a page that
+    downloaded fine but held no episode links counted as a failure, so the search
+    ran through every fetcher -- about a minute per anime per cycle, delaying every
+    notification behind it -- and still returned 0. Two cases now end it early:
+
+      * a trusted 404: the address is wrong, and asking again elsewhere won't help;
+      * a genuine page listing this show's seasons (animerco's anime page): the
+        episodes are on the newest season page, which is read next, once.
+
+    `trace`, if given, receives one entry per step (fetcher, status, size, whether
+    it was a Cloudflare challenge, episodes found, error) -- what /v1/test_scrape
+    reports, so a zero can be told apart from a block.
+    """
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
     }
 
+    steps = []
     # 0. Try ScraperAPI if SCRAPER_API_KEY is configured (100% residential Cloudflare bypass)
     scraper_key = os.environ.get("SCRAPER_API_KEY", "").strip()
     if scraper_key:
-        max_ep = fetch_with_scraperapi(anime_url, scraper_key)
+        steps.append(("scraperapi", lambda seen: fetch_with_scraperapi(anime_url, scraper_key, seen=seen)))
+    # 1. curl_cffi first (fastest)   2. standard httpx
+    steps.append(("curl_cffi", lambda seen: _fetch_curl_cffi(anime_url, headers, seen)))
+    steps.append(("httpx", lambda seen: _fetch_httpx(anime_url, headers, client, seen)))
+    # 3. rotating proxy pool   4. headless Playwright Chromium
+    steps.append(("proxy_rotation", lambda seen: fetch_with_proxy_rotation(anime_url, seen=seen)))
+    steps.append(("playwright", lambda seen: fetch_with_playwright(anime_url, seen=seen)[0]))
+
+    genuine_page = ""
+    not_found = False
+    for name, run in steps:
+        seen = {}
+        started = time.time()
+        try:
+            max_ep = run(seen)
+        except Exception as e:
+            logger.debug(f"{name} fetch failed: {e}")
+            max_ep = 0
+            seen.setdefault("error", type(e).__name__)
+
+        status, html = seen.get("status"), seen.get("html") or ""
+        challenge = "just a moment" in html.lower()
+        if status == 200 and html and not challenge:
+            genuine_page = html
+        if status == 404 and name in _TRUSTED_404:
+            not_found = True
+        if trace is not None:
+            entry = {"url": anime_url, "fetcher": name, "seconds": round(time.time() - started, 1),
+                     "status": status, "bytes": len(html), "challenge": challenge,
+                     "max_episode": max_ep}
+            for key in ("error", "attempts", "proxies_available"):
+                if key in seen:
+                    entry[key] = seen[key]
+            trace.append(entry)
+
         if max_ep > 0:
             return max_ep
+        if not_found or latest_season_url(genuine_page, anime_url):
+            break
 
-    # 1. Try curl_cffi first (fastest)
-    try:
-        from curl_cffi import requests as cffi_requests
-        r = cffi_requests.get(anime_url, headers=headers, impersonate="chrome124", timeout=15.0)
-        if r.status_code == 200:
-            eps = extract_episodes_from_html(r.text, anime_url)
-            if eps:
-                return max(eps)
-    except Exception as e:
-        logger.debug(f"curl_cffi fetch attempt failed: {e}")
-
-    # 2. Try standard httpx
-    close_client = False
-    if client is None:
-        client = httpx.Client(follow_redirects=True, timeout=15.0, verify=False)
-        close_client = True
-
-    try:
-        r = client.get(anime_url, headers=headers)
-        if r.status_code == 200:
-            eps = extract_episodes_from_html(r.text, anime_url)
-            if eps:
-                return max(eps)
-    except Exception as e:
-        logger.debug(f"httpx fetch failed: {e}")
-    finally:
-        if close_client:
-            client.close()
-
-    # 3. Try rotating proxy pool (bypasses Cloudflare datacenter IP block on Render)
-    max_ep = fetch_with_proxy_rotation(anime_url)
-    if max_ep > 0:
-        return max_ep
-
-    # 4. Fallback to Headless Playwright Chromium to solve Cloudflare Turnstile JS challenges
-    max_ep, _ = fetch_with_playwright(anime_url)
-    return max_ep
+    if not_found:
+        return 0
+    season = latest_season_url(genuine_page, anime_url) if _depth == 0 else ""
+    if season:
+        if trace is not None:
+            trace.append({"url": anime_url, "following_season": season})
+        return fetch_latest_episode(season, client=client, trace=trace, _depth=1)
+    return 0
 
 
 def create_discord_embed(

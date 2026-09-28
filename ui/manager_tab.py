@@ -722,18 +722,30 @@ class SiteManagerWidget(QWidget):
         name = self.name_entry.text().strip()
         if not name:
             return
-        w = MessageBox("Delete Profile",
-                       f"Permanently delete the profile '{name}'?\n\nThis cannot be undone.",
-                       self.window())
+        w = MessageBox("Delete Profile", f"Delete the profile '{name}'?", self.window())
         w.yesButton.setText("Delete")
         w.cancelButton.setText("Cancel")
         if not w.exec():
             return
         with config_lock:
-            if name in sites_data:
-                del sites_data[name]
+            removed = sites_data.pop(name, None)
         save_config()
         self.refresh_combo()
+        self.profile_saved_signal.emit()
+        if removed is not None:
+            # Profiles went missing several times before this existed; a few
+            # seconds to change your mind costs nothing.
+            from ui.styles import show_undo
+            show_undo(self.window(), f"Deleted profile '{name}'.",
+                      lambda: self._undo_delete(name, removed))
+
+    def _undo_delete(self, name, data):
+        with config_lock:
+            if name in sites_data:          # a new profile took the name meanwhile
+                return
+            sites_data[name] = data
+        save_config()
+        self.refresh_combo(name)
         self.profile_saved_signal.emit()
             
     def refresh_combo(self, target_name=None):

@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -59,9 +60,124 @@ class EpisodeHtmlExtractionTests(unittest.TestCase):
         """
         self.assertEqual(checker.extract_episodes_from_html(html, base), [3])
 
+    def test_season_page_without_season_in_episode_links(self):
+        """animerco season 1: page is ...-season-1/, links are ...-الحلقة-N/. The
+        slug filter used to drop them all (live: Slime season 1 read as 0)."""
+        base = "https://det.animerco.org/seasons/tensei-shitara-slime-datta-ken-season-1/"
+        html = """
+        <a href="https://det.animerco.org/episodes/tensei-shitara-slime-datta-ken-الحلقة-1/">1</a>
+        <a href="https://det.animerco.org/episodes/tensei-shitara-slime-datta-ken-الحلقة-24/">24</a>
+        <a href="https://det.animerco.org/episodes/one-piece-الحلقة-1100/">sidebar</a>
+        """
+        self.assertEqual(checker.extract_episodes_from_html(html, base), [1, 24])
+
+    def test_episode_number_is_not_the_trailing_season(self):
+        """Boruto-style links end in the season: ...-الحلقة-14-الموسم-1/."""
+        base = "https://det.animerco.org/seasons/boruto-naruto-next-generations-season-1/"
+        html = '<a href="https://det.animerco.org/episodes/boruto-naruto-next-generations-الحلقة-14-الموسم-1/">x</a>'
+        self.assertEqual(checker.extract_episodes_from_html(html, base), [14])
+
     def test_handles_empty_or_non_episode_html(self):
         html = "<html><body><h1>No episodes here</h1></body></html>"
         self.assertEqual(checker.extract_episodes_from_html(html), [])
+
+
+class SeasonAndFallbackTests(unittest.TestCase):
+    ANIME = "https://det.animerco.org/animes/tensei-shitara-slime-datta-ken/"
+    ANIME_PAGE = """
+    <a href="https://det.animerco.org/seasons/">all seasons</a>
+    <a href="https://det.animerco.org/seasons/tensei-shitara-slime-datta-ken-ova/">OVA</a>
+    <a href="https://det.animerco.org/seasons/tensei-shitara-slime-datta-ken-season-1/">S1</a>
+    <a href="https://det.animerco.org/seasons/tensei-shitara-slime-datta-ken-season-3/">S3</a>
+    <a href="https://det.animerco.org/seasons/tensei-shitara-slime-datta-ken-season-2/">S2</a>
+    <a href="https://det.animerco.org/seasons/one-piece-season-20/">sidebar: other show</a>
+    """
+
+    def test_newest_season_of_this_show_is_picked(self):
+        self.assertEqual(checker.latest_season_url(self.ANIME_PAGE, self.ANIME),
+                         "https://det.animerco.org/seasons/tensei-shitara-slime-datta-ken-season-3/")
+
+    def test_ova_only_show_takes_the_last_listed(self):
+        page = '<a href="/seasons/kimi-no-na-wa-ova/">OVA</a>'
+        self.assertEqual(checker.latest_season_url(page, "https://det.animerco.org/animes/kimi-no-na-wa/"),
+                         "https://det.animerco.org/seasons/kimi-no-na-wa-ova/")
+
+    def test_no_seasons_or_other_shows_only(self):
+        self.assertEqual(checker.latest_season_url("", self.ANIME), "")
+        self.assertEqual(checker.latest_season_url(
+            '<a href="https://det.animerco.org/seasons/one-piece-season-20/">x</a>', self.ANIME), "")
+
+    def _only_httpx(self, pages):
+        """Run fetch_latest_episode with every fetcher but httpx failing, and httpx
+        answering from `pages` {url: (status, html)}."""
+        def fake_httpx(url, headers, client, seen):
+            status, html = pages[url]
+            seen["status"], seen["html"] = status, html
+            eps = checker.extract_episodes_from_html(html, url) if status == 200 else []
+            return max(eps) if eps else 0
+        calls = []
+
+        def fail(name):
+            def f(*a, **k):
+                calls.append(name)
+                seen = k.get("seen")
+                if seen is not None:
+                    seen["error"] = "blocked"
+                return (0, {}) if name == "playwright" else 0
+            return f
+        return fake_httpx, fail, calls
+
+    def test_anime_page_follows_its_newest_season_and_stops_early(self):
+        season3 = "https://det.animerco.org/seasons/tensei-shitara-slime-datta-ken-season-3/"
+        pages = {self.ANIME: (200, self.ANIME_PAGE),
+                 season3: (200, '<a href="https://det.animerco.org/episodes/tensei-shitara-slime-datta-ken-season-3-الحلقة-7/">7</a>')}
+        fake_httpx, fail, calls = self._only_httpx(pages)
+        trace = []
+        with patch.dict(os.environ, {"SCRAPER_API_KEY": ""}), \
+             patch("service.checker._fetch_curl_cffi", fail("curl_cffi")), \
+             patch("service.checker._fetch_httpx", fake_httpx), \
+             patch("service.checker.fetch_with_proxy_rotation", fail("proxy")), \
+             patch("service.checker.fetch_with_playwright", fail("playwright")):
+            self.assertEqual(checker.fetch_latest_episode(self.ANIME, trace=trace), 7)
+        # The anime page was genuine, so the slow proxy/playwright steps never ran for it.
+        self.assertNotIn("proxy", calls)
+        self.assertNotIn("playwright", calls)
+        self.assertTrue(any(t.get("following_season") == season3 for t in trace))
+
+    def test_a_404_ends_the_search_immediately(self):
+        bad = "https://det.animerco.org/animes/no-such-show/"
+        fake_httpx, fail, calls = self._only_httpx({bad: (404, "<html>not found</html>")})
+        with patch.dict(os.environ, {"SCRAPER_API_KEY": ""}), \
+             patch("service.checker._fetch_curl_cffi", fail("curl_cffi")), \
+             patch("service.checker._fetch_httpx", fake_httpx), \
+             patch("service.checker.fetch_with_proxy_rotation", fail("proxy")), \
+             patch("service.checker.fetch_with_playwright", fail("playwright")):
+            self.assertEqual(checker.fetch_latest_episode(bad), 0)
+        self.assertEqual(calls, ["curl_cffi"])       # httpx 404 -> stop; no proxies, no browser
+
+    def test_a_blocked_page_still_tries_every_fetcher(self):
+        """Unchanged behaviour when nothing genuine came back."""
+        url = "https://witanime.site/anime/x"
+        fake_httpx, fail, calls = self._only_httpx({url: (403, "<title>Just a moment...</title>")})
+        with patch.dict(os.environ, {"SCRAPER_API_KEY": ""}), \
+             patch("service.checker._fetch_curl_cffi", fail("curl_cffi")), \
+             patch("service.checker._fetch_httpx", fake_httpx), \
+             patch("service.checker.fetch_with_proxy_rotation", fail("proxy")), \
+             patch("service.checker.fetch_with_playwright", fail("playwright")):
+            self.assertEqual(checker.fetch_latest_episode(url), 0)
+        self.assertEqual(calls, ["curl_cffi", "proxy", "playwright"])
+
+    def test_scraperapi_errors_never_carry_the_key(self):
+        seen = {}
+
+        class Boom(Exception):
+            pass
+
+        with patch("service.checker.httpx.Client", side_effect=Boom("http://api.scraperapi.com?api_key=SECRET123")), \
+             self.assertLogs("aed_checker", level="WARNING") as logs:
+            checker.fetch_with_scraperapi("https://x/", "SECRET123", seen=seen)
+        self.assertNotIn("SECRET123", json.dumps(seen))
+        self.assertNotIn("SECRET123", "\n".join(logs.output))     # nor in Render's logs
 
 
 class DiscordEmbedTests(unittest.TestCase):

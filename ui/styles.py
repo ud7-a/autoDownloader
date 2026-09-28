@@ -169,6 +169,34 @@ def apply_danger_style(btn):
     setCustomStyleSheet(btn, qss, qss)
 
 
+def show_undo(parent, text, on_undo, seconds=8):
+    """A notice with an Undo button, for deletions that are easy to regret.
+
+    Undo runs at most once, and the notice closes the moment it is used. After
+    `seconds` it goes away and the deletion simply stands.
+    """
+    from qfluentwidgets import InfoBar, InfoBarPosition, PushButton
+    bar = InfoBar.info(title="", content=text, isClosable=True,
+                       position=InfoBarPosition.BOTTOM, duration=seconds * 1000,
+                       parent=parent)
+    btn = PushButton("Undo")
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    used = {"done": False}
+
+    def undo():
+        if used["done"]:
+            return
+        used["done"] = True
+        try:
+            on_undo()
+        finally:
+            bar.close()
+
+    btn.clicked.connect(undo)
+    bar.addWidget(btn)
+    return bar
+
+
 def apply_tinted_style(btn, base, hover, pressed, text="#ffffff"):
     """Give a qfluentwidgets button a solid coloured background.
 

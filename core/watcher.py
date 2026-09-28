@@ -6,7 +6,7 @@ CPU usage: 0.0%.
 Functions:
 - Runs silently in the background (zero window / console).
 - Sends heartbeat to Cloud Notification Service every 15s so your PC is marked ONLINE 🟢 24/7.
-- Checks for pending remote download commands triggered from Discord.
+- Checks every 5s for pending remote download commands triggered from Discord.
 - When a command arrives, automatically launches the main AED app window to download it!
 - If the main AED app is already open, steps aside and lets the main app handle it.
 """
@@ -48,7 +48,10 @@ def is_main_app_running() -> bool:
             cmdline = ' '.join(p.info.get('cmdline') or [])
             if 'main.py' in cmdline and '--watcher' not in cmdline:
                 return True
-            if getattr(sys, 'frozen', False) and 'AutoDownloader' in name and '--watcher' not in cmdline:
+            # The installed app, whichever kind of watcher is asking. This used to
+            # require the watcher itself to be frozen, so a source watcher never saw
+            # a running AutoDownloader.exe and kept polling alongside it.
+            if 'autodownloader' in name and '--watcher' not in cmdline:
                 return True
         except Exception:
             pass
@@ -63,9 +66,14 @@ def is_other_watcher_running() -> bool:
             if p.info['pid'] == curr_pid:
                 continue
             name = (p.info.get('name') or '').lower()
+            args = [str(a).lower() for a in (p.info.get('cmdline') or [])]
+            # The installed app's watcher is `AutoDownloader.exe --watcher`. Only the
+            # Python one was recognised before, so every launch of the installed app
+            # could start another watcher that never noticed the others.
+            if 'autodownloader' in name and '--watcher' in args:
+                return True
             if 'python' not in name and 'py' not in name:
                 continue
-            args = [str(a).lower() for a in (p.info.get('cmdline') or [])]
             if "-c" in args:
                 continue  # Ignore inline python commands
             if any(a.endswith("aed_watcher.pyw") or a.endswith("aed_watcher") for a in args):
@@ -160,6 +168,14 @@ def launch_main_app():
     log("Main app subprocess spawned!")
 
 
+# How quickly a click on Discord's download button reaches this PC while the app is
+# closed. Commands are checked every POLL_SECONDS; the heartbeat that keeps the PC
+# "online" only needs sending every HEARTBEAT_EVERY polls (15 s), well inside the
+# service's 180 s window -- so the faster reaction adds one light GET, not two.
+POLL_SECONDS = 5
+HEARTBEAT_EVERY = 3
+
+
 def run_watcher(single_pass: bool = False):
     """Main watcher loop."""
     log(f"Watcher started (PID: {os.getpid()}, single_pass={single_pass})")
@@ -168,7 +184,7 @@ def run_watcher(single_pass: bool = False):
         return
 
     loop_count = 0
-    # Transitions are logged, not iterations: this loop runs every 15 seconds, so
+    # Transitions are logged, not iterations: this loop runs every few seconds, so
     # logging each pass would bury the events that matter. Without any line at all,
     # "standing down because the GUI is up" looked identical to "hung" in the log.
     paused_for_gui = False
@@ -189,16 +205,17 @@ def run_watcher(single_pass: bool = False):
                     paused_for_gui = True
                 if single_pass:
                     break
-                time.sleep(15)
+                time.sleep(POLL_SECONDS)
                 continue
 
             if paused_for_gui:
                 log("Main app closed -> resuming heartbeats and command polling.")
                 paused_for_gui = False
+                loop_count = 0          # heartbeat straight away after taking over
 
             # Send heartbeat so PC is ONLINE 🟢
-            if send_heartbeat(s_url, sub_id, token):
-                if loop_count % 4 == 0:
+            if loop_count % HEARTBEAT_EVERY == 0 and send_heartbeat(s_url, sub_id, token):
+                if loop_count % (HEARTBEAT_EVERY * 12) == 0:
                     log(f"Heartbeat sent successfully (Loop #{loop_count}). PC is ONLINE 🟢")
             loop_count += 1
 
@@ -216,7 +233,7 @@ def run_watcher(single_pass: bool = False):
 
         if single_pass:
             break
-        time.sleep(15)
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":

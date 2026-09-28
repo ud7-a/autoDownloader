@@ -95,32 +95,12 @@ def launch_watcher():
     the only thing that ever did, which is why this PC kept being reported offline.
 
     Safe to call more than once: the watcher exits immediately if another one is
-    already running.
+    already running. Also refreshes the Windows startup entry -- see
+    utils.config.start_background_watcher for why that must happen on every start.
     """
-    from utils.config import app_settings
-    if not app_settings.get("cloud_notify_enabled"):
-        return
     try:
-        import subprocess
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "--watcher"]
-            cwd = os.path.dirname(sys.executable)
-        else:
-            watcher_pyw = os.path.abspath(
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), "aed_watcher.pyw"))
-            if not os.path.exists(watcher_pyw):
-                return
-            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            if not os.path.exists(pythonw):
-                pythonw = sys.executable
-            cmd = [pythonw, watcher_pyw]
-            cwd = os.path.dirname(os.path.abspath(__file__))
-        # No console window, and no inherited stdio: a child whose stdout is None
-        # raises on its first print, which is the same trap that killed this process.
-        subprocess.Popen(cmd, cwd=cwd,
-                         creationflags=(0x08000000 if sys.platform == "win32" else 0),
-                         stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from utils.config import start_background_watcher
+        start_background_watcher()
     except Exception:
         pass
 
