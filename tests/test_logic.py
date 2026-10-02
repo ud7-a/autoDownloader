@@ -1109,6 +1109,502 @@ class WatchlistTodayFilterTests(unittest.TestCase):
         self.assertIn(_today_key(), DAY_ORDER)
 
 
+class PausedAdjustmentTests(unittest.TestCase):
+    """While a download is paused: concurrency, headless, and skipping episodes
+    that have not started."""
+
+    def setUp(self):
+        import core.selenium_engine as eng
+        from core.concurrency import ConcurrencyController
+        self.eng = eng
+        self.controller = ConcurrencyController(start=3, enabled=True)
+        self.episodes = [1, 2, 3, 4, 5]
+        with eng._run_lock:
+            eng.RUN_STATE.clear()
+            eng.RUN_STATE.update(task_id=42, episodes=self.episodes, started={1, 2},
+                                 headless=True, controller=self.controller)
+            eng._PENDING_ADJUST.clear()
+        self.addCleanup(lambda: (eng.RUN_STATE.clear(), eng._PENDING_ADJUST.clear()))
+
+    def test_snapshot_lists_only_episodes_not_started(self):
+        snap = self.eng.run_snapshot()
+        self.assertEqual(snap["not_started"], [3, 4, 5])
+        self.assertEqual((snap["total"], snap["limit"], snap["auto"], snap["headless"]),
+                         (5, 3, True, True))
+
+    def test_concurrency_applies_at_once(self):
+        self.assertTrue(self.eng.request_adjustments(42, limit=5, auto=False))
+        self.assertEqual((self.controller.limit, self.controller.enabled), (5, False))
+
+    def test_concurrency_is_kept_in_range(self):
+        self.eng.request_adjustments(42, limit=99, auto=False)
+        self.assertEqual(self.controller.limit, self.controller.MAX_LIMIT)
+
+    def test_started_episodes_cannot_be_skipped(self):
+        self.eng.request_adjustments(42, skip=[2, 4])
+        self.assertEqual(self.eng._take_adjustments().get("skip"), {4})
+
+    def test_headless_change_waits_for_the_engine(self):
+        self.eng.request_adjustments(42, headless=False)
+        self.assertEqual(self.eng._take_adjustments(), {"headless": False})
+        self.eng.request_adjustments(42, headless=True)          # unchanged -> nothing
+        self.assertEqual(self.eng._take_adjustments(), {})
+
+    def test_pausing_again_shows_what_is_still_pending(self):
+        # Changed on one pause, paused again before the engine reached the next
+        # episode: the screen must show the new choices, not the old state.
+        self.eng.request_adjustments(42, headless=False, skip=[4, 5])
+        snap = self.eng.run_snapshot()
+        self.assertFalse(snap["headless"])
+        self.assertEqual([4, 5], snap["pending_skip"])
+        self.assertEqual([3, 4, 5], snap["not_started"])   # still listed, unticked
+
+    def test_skip_request_replaces_the_previous_one(self):
+        self.eng.request_adjustments(42, skip=[4, 5])
+        self.eng.request_adjustments(42, skip=[5])            # 4 re-ticked
+        self.assertEqual({5}, self.eng._PENDING_ADJUST["skip"])
+        self.eng.request_adjustments(42, skip=[])             # everything re-ticked
+        self.assertNotIn("skip", self.eng._PENDING_ADJUST)
+
+    def test_headless_back_to_current_cancels_the_pending_change(self):
+        self.eng.request_adjustments(42, headless=False)
+        self.eng.request_adjustments(42, headless=True)        # changed mind
+        self.assertEqual({}, self.eng._take_adjustments())
+
+    def test_describe_changes(self):
+        from ui.progress_tab import describe_changes
+        before = {"auto": True, "limit": 3, "headless": True, "pending_skip": []}
+        self.assertEqual("", describe_changes(before, limit=3, auto=True, headless=True, skip=[]))
+        self.assertEqual(
+            "2 downloads at once · browser visible from the next episode · skipping 3 episodes",
+            describe_changes(before, limit=2, auto=False, headless=False, skip=[7, 8, 9]))
+        self.assertEqual("No episodes skipped",
+                         describe_changes(dict(before, pending_skip=[4]), limit=3, auto=True,
+                                          headless=True, skip=[]))
+
+    def test_compact_spec(self):
+        self.assertEqual("1-3, 5, 7-8", self.eng.compact_spec([8, 1, 2, 3, 5, 7]))
+
+    def test_a_finished_run_ignores_late_changes(self):
+        self.assertFalse(self.eng.request_adjustments(41, limit=1))
+        self.assertEqual(self.controller.limit, 3)
+
+    def test_skips_remove_episodes_and_totals_follow(self):
+        eps = [1, 2, 3, 4, 5]
+        self.assertEqual(self.eng.apply_skips(eps, [4, 5, 9]), [4, 5])
+        self.assertEqual(eps, [1, 2, 3])
+
+    def test_skipping_everything_is_refused(self):
+        eps = [3, 4]
+        self.assertEqual(self.eng.apply_skips(eps, [3, 4]), [])
+        self.assertEqual(eps, [3, 4])
+
+    def test_set_mode_restarts_the_auto_window(self):
+        from core.concurrency import ConcurrencyController
+        c = ConcurrencyController(start=2, enabled=False)
+        c.record_progress(1, 100, 1)        # ignored while manual
+        c.set_mode(True, 4)
+        self.assertEqual((c.enabled, c.limit, c._samples), (True, 4, {}))
+
+
+class EpisodePickerTests(unittest.TestCase):
+    """The paused screen's episode grid: one painted widget, not a checkbox per
+    episode (that froze the UI on long runs)."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from ui.episode_grid import EpisodePicker
+        self.picker = EpisodePicker()
+        self.picker.resize(900, 300)
+        self.picker.set_episodes([30, 4, 5, 6, 7, 8, 9, 10, 20])
+        self.grid = self.picker.grid
+
+    def click(self, ep, shift=False):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        cols, cw = self.grid._layout()
+        pos = self.grid._rect(self.grid.episodes().index(ep), cols, cw).center().toPoint()
+        mod = Qt.KeyboardModifier.ShiftModifier if shift else Qt.KeyboardModifier.NoModifier
+        QTest.mouseClick(self.grid, Qt.MouseButton.LeftButton, mod, pos)
+
+    def test_sorted_all_kept_and_no_child_widgets(self):
+        self.assertEqual([4, 5, 6, 7, 8, 9, 10, 20, 30], self.grid.episodes())
+        self.assertEqual([], self.picker.skipped())
+        self.assertEqual("4-10, 20, 30", self.picker.edit_spec.text())
+        self.assertEqual([], self.grid.children())
+
+    def test_click_and_shift_click(self):
+        self.click(5)
+        self.assertEqual([5], self.picker.skipped())
+        self.click(8, shift=True)          # 5..8 take the state of the anchor (skipped)
+        self.assertEqual([5, 6, 7, 8], self.picker.skipped())
+        self.assertEqual("4, 9-10, 20, 30", self.picker.edit_spec.text())
+
+    def test_range_box_drives_grid(self):
+        self.picker.edit_spec.setText("6-9, 30, 99")
+        self.picker._on_spec_edited()
+        self.assertEqual([4, 5, 10, 20], self.picker.skipped())
+        self.picker.edit_spec.setText("abc")
+        self.picker._on_spec_edited()      # unparseable -> reverts, grid untouched
+        self.assertEqual("6-9, 30", self.picker.edit_spec.text())
+        self.picker.btn_none.click()
+        self.assertEqual(9, len(self.picker.skipped()))
+        self.picker.btn_all.click()
+        self.assertEqual([], self.picker.skipped())
+
+    def test_grid_scrolls_inside_available_height(self):
+        # A long run: the scroll area may shrink to a couple of rows and scrolls
+        # the rest; it never forces the panel taller than the window.
+        self.picker.set_episodes(range(1, 1101))
+        self.assertLessEqual(self.picker.scroll.minimumHeight(), self.picker.MIN_GRID_HEIGHT)
+        self.assertGreater(self.grid.minimumHeight(), self.picker.MIN_GRID_HEIGHT)
+        # A short run: no empty scroll space below the last row.
+        self.picker.set_episodes([1, 2, 3])
+        self.assertEqual(self.grid.minimumHeight() + 2, self.picker.scroll.maximumHeight())
+
+
+class ActiveCardOrderTests(unittest.TestCase):
+    """Cards re-added after a resume land in episode order, not at the bottom."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_order(self):
+        from ui.progress_tab import ProgressTab
+        tab = ProgressTab()
+        for ep in (7, 3, 5):
+            tab.add_active_card(ep)
+        tab.remove_active_card(3)
+        tab.add_active_card(3)
+        layout = tab.active_tasks_layout
+        by_widget = {id(v["widget"]): k for k, v in tab.active_cards.items()}
+        order = [by_widget[id(layout.itemAt(i).widget())] for i in range(layout.count())]
+        self.assertEqual([3, 5, 7], order)
+
+
+class DownloaderSaveSettingsTests(unittest.TestCase):
+    """save_settings had its second half inside on_webhook_updated: concurrency,
+    auto mode and the episode range were never written to disk."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_concurrency_is_saved_and_written(self):
+        import copy
+        from unittest import mock
+        import ui.downloader_tab as dt
+        import utils.config as cfg
+        saved = copy.deepcopy(cfg.app_settings)
+        self.addCleanup(lambda: (cfg.app_settings.clear(), cfg.app_settings.update(saved)))
+        with mock.patch.object(dt, "save_config", lambda: None):
+            w = dt.DownloaderWidget()
+        w._save_timer.stop()
+        w.chk_auto_concurrency.setChecked(False)
+        w.spin_concurrency.setValue(5)
+        w.save_settings()
+        self.assertEqual(cfg.app_settings["concurrency"], 5)
+        self.assertFalse(cfg.app_settings["concurrency_auto"])
+        self.assertTrue(w._save_timer.isActive(), "the disk write must be scheduled")
+
+    def test_paused_screen_choices_reach_the_downloader(self):
+        import copy
+        from unittest import mock
+        import ui.downloader_tab as dt
+        import utils.config as cfg
+        saved = copy.deepcopy(cfg.app_settings)
+        self.addCleanup(lambda: (cfg.app_settings.clear(), cfg.app_settings.update(saved)))
+        with mock.patch.object(dt, "save_config", lambda: None):
+            w = dt.DownloaderWidget()
+        w.on_paused_settings_changed({"limit": 2, "auto": False, "headless": False})
+        self.assertEqual((w.spin_concurrency.value(), w.chk_auto_concurrency.isChecked(),
+                          w.chk_headless.isChecked()), (2, False, False))
+        self.assertEqual((cfg.app_settings["concurrency"], cfg.app_settings["headless"]), (2, False))
+
+    def test_paused_choices_carry_into_resume_and_retry(self):
+        import copy
+        from unittest import mock
+        import ui.downloader_tab as dt
+        import utils.config as cfg
+        saved = copy.deepcopy(cfg.app_settings)
+        self.addCleanup(lambda: (cfg.app_settings.clear(), cfg.app_settings.update(saved)))
+        with mock.patch.object(dt, "save_config", lambda: None):
+            w = dt.DownloaderWidget()
+        cfg.app_settings["unfinished_session"] = {"episodes": [1, 2], "headless": True,
+                                                  "concurrency": 3}
+        w.last_download_params = {"headless": True, "concurrency": 3}
+        w.on_paused_settings_changed({"limit": 1, "auto": False, "headless": False})
+        session = cfg.app_settings["unfinished_session"]
+        self.assertEqual((session["headless"], session["concurrency"]), (False, 1))
+        self.assertEqual(w.last_download_params, {"headless": False, "concurrency": 1})
+
+
+class ShippedImportTests(unittest.TestCase):
+    """The installed app only has what requirements.txt installs. Importing anything
+    else -- the cloud service's code pulled in httpx and the Postgres driver -- works
+    from source on a developer machine and kills the shipped app."""
+
+    CLIENT = ["main.py", "aed_watcher.pyw", "ui", "core", "utils"]
+    # requirements.txt distribution name -> the module name it is imported as
+    DIST_TO_MODULE = {"pyqt6": "PyQt6", "pyqt6-fluent-widgets": "qfluentwidgets",
+                      "selenium": "selenium", "websocket-client": "websocket",
+                      "py7zr": "py7zr", "rarfile": "rarfile", "pillow": "PIL",
+                      "scipy": "scipy", "psutil": "psutil"}
+
+    def client_files(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for entry in self.CLIENT:
+            path = os.path.join(root, entry)
+            if os.path.isfile(path):
+                yield path
+            else:
+                for dirpath, _dirs, files in os.walk(path):
+                    for name in files:
+                        if name.endswith(".py"):
+                            yield os.path.join(dirpath, name)
+
+    def imports(self, path):
+        import ast
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=path)
+        for node in ast.walk(tree):                 # inside functions too
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    yield node.lineno, alias.name.split(".")[0]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                yield node.lineno, node.module.split(".")[0]
+
+    def test_desktop_app_never_imports_the_cloud_service(self):
+        offenders = [f"{os.path.basename(p)}:{line}" for p in self.client_files()
+                     for line, mod in self.imports(p) if mod == "service"]
+        self.assertEqual(offenders, [])
+
+    def test_every_import_is_stdlib_local_or_a_declared_requirement(self):
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        declared = set()
+        with open(os.path.join(root, "requirements.txt"), encoding="utf-8") as f:
+            for line in f:
+                name = re.split(r"[=<>\[ #;]", line.strip(), maxsplit=1)[0].lower()
+                if name in self.DIST_TO_MODULE:
+                    declared.add(self.DIST_TO_MODULE[name])
+        local = {"ui", "core", "utils", "main", "tools"}
+        missing = []
+        for p in self.client_files():
+            for line, mod in self.imports(p):
+                if mod in sys.stdlib_module_names or mod in local or mod in declared:
+                    continue
+                missing.append(f"{os.path.relpath(p, root)}:{line} imports {mod!r}")
+        self.assertEqual(missing, [], "not installed in the release build")
+
+
+class NewEpisodeNotifyTests(unittest.TestCase):
+    def test_new_episode_callback_survives_without_server_packages(self):
+        """The crash, exactly: httpx is absent in the installed app."""
+        from unittest import mock
+        from types import SimpleNamespace
+        import ui.watchlist_tab as wt
+        sent = []
+        entry = {"url": "https://witanime.site/anime/x", "title": "X", "seen_max": 13}
+        fake = SimpleNamespace(_cards={})
+        blocked = {"httpx": None, "service.checker": None, "service.store": None}
+        with mock.patch.dict(sys.modules, blocked), \
+             mock.patch.object(wt, "update_watch", lambda *a, **k: None), \
+             mock.patch.object(wt, "get_watchlist", lambda: [entry]), \
+             mock.patch.dict(wt.app_settings, {"discord_webhook": "https://discord.com/api/webhooks/1/x"}), \
+             mock.patch("utils.discord_notify.send", lambda wh, payload: sent.append(payload) or True), \
+             mock.patch("ui.watchlist_tab.time.sleep", lambda s: None):
+            wt.WatchlistWidget._on_entry_done(fake, entry["url"], 14, 1, "t/{x}", False)
+            for t in __import__("threading").enumerate():
+                if t.name != "MainThread" and t.daemon:
+                    t.join(timeout=2)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Episode 14", sent[0]["embeds"][0]["description"])
+
+    def test_send_success_rate_limit_and_failure(self):
+        import io
+        import urllib.error
+        from unittest import mock
+        from utils import discord_notify as dn
+
+        class Resp:
+            status = 204
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def http_error(code, retry="1"):
+            return urllib.error.HTTPError("u", code, "x", {"Retry-After": retry}, io.BytesIO(b""))
+
+        with mock.patch("urllib.request.urlopen", return_value=Resp()):
+            self.assertTrue(dn.send("https://discord.com/api/webhooks/1/x", {"content": "hi"}))
+        with mock.patch("urllib.request.urlopen", side_effect=[http_error(429), Resp()]), \
+             mock.patch("utils.discord_notify.time.sleep", lambda s: None):
+            self.assertTrue(dn.send("https://discord.com/api/webhooks/1/x", {"content": "hi"}))
+        with mock.patch("urllib.request.urlopen", side_effect=http_error(404)):
+            self.assertFalse(dn.send("https://discord.com/api/webhooks/1/x", {"content": "hi"}))
+        self.assertFalse(dn.send("", {"content": "hi"}))
+
+
+class RemoteDownloadQueueTests(unittest.TestCase):
+    """A Discord click must never interrupt a running download. It used to start on
+    top of it, cancelling the first; repeated clicks is how the app got into the
+    state it crashed in."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def fake_window(self, running=False, current=None, queue=None):
+        from types import SimpleNamespace
+        from ui.app_window import AppWindow
+        started = []
+        w = SimpleNamespace(_download_running=running, _current_download_key=current,
+                            _download_queue=list(queue or []),
+                            _download_key=AppWindow._download_key,
+                            on_watch_download_all=lambda items: started.append(list(items)))
+        return w, started
+
+    def item(self, ep="14", show="mushoku"):
+        return (show, f"https://witanime.site/watch/{show}/{{x}}", "witanime.site", 0, ep)
+
+    def run_guard(self, w, items):
+        from unittest import mock
+        from ui.app_window import AppWindow
+        with mock.patch("qfluentwidgets.InfoBar.info"), mock.patch("qfluentwidgets.InfoBar.success"):
+            AppWindow._queue_remote_downloads(w, items)
+
+    def test_idle_app_starts_the_download(self):
+        w, started = self.fake_window()
+        self.run_guard(w, [self.item()])
+        self.assertEqual(len(started), 1)
+
+    def test_same_episode_while_it_downloads_is_ignored(self):
+        from ui.app_window import AppWindow
+        w, started = self.fake_window(running=True, current=AppWindow._download_key(self.item()))
+        self.run_guard(w, [self.item()])
+        self.assertEqual(started, [])                  # the running download is left alone
+        self.assertEqual(w._download_queue, [])
+
+    def test_a_different_download_waits_its_turn(self):
+        from ui.app_window import AppWindow
+        w, started = self.fake_window(running=True, current=AppWindow._download_key(self.item("14")))
+        self.run_guard(w, [self.item("15")])
+        self.assertEqual(started, [])                  # not started on top of the other
+        self.assertEqual([i[4] for i in w._download_queue], ["15"])
+
+    def test_already_queued_is_not_queued_twice(self):
+        from ui.app_window import AppWindow
+        w, _ = self.fake_window(running=True, current=AppWindow._download_key(self.item("14")),
+                                queue=[self.item("15")])
+        self.run_guard(w, [self.item("15"), self.item("15")])
+        self.assertEqual(len(w._download_queue), 1)
+
+    def test_trailing_slash_does_not_make_a_different_download(self):
+        from ui.app_window import AppWindow
+        a = ("t", "https://x/watch/s/{x}/", "d", 0, "3")
+        b = ("t", "https://x/watch/s/{x}", "d", 0, " 3 ")
+        self.assertEqual(AppWindow._download_key(a), AppWindow._download_key(b))
+
+
+class ErrorReportTests(unittest.TestCase):
+    """An error inside a Qt callback used to abort the installed app (0xC0000409 in
+    Qt6Core.dll) and leave no trace. These run a real Qt event loop in a child
+    process, because the failure is the process dying."""
+
+    SCRIPT = r'''
+import os, sys
+sys.path.insert(0, {repo!r})
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+if {install}:
+    from utils.error_report import install
+    install({folder!r})
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QApplication
+app = QApplication([])
+def boom():
+    raise ValueError("error inside a Qt callback")
+QTimer.singleShot(50, boom)
+QTimer.singleShot(400, app.quit)          # only reached if the process survived
+sys.exit(app.exec())
+'''
+
+    def run_child(self, install):
+        import subprocess
+        folder = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, ignore_errors=True))
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = self.SCRIPT.format(repo=repo, install=install, folder=folder)
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        return p.returncode, folder
+
+    def test_without_the_handler_pyqt_kills_the_process(self):
+        """The crash, reproduced: this is the default behaviour."""
+        code, _ = self.run_child(install=False)
+        self.assertNotEqual(code, 0)
+
+    def test_with_the_handler_the_app_survives_and_records_the_error(self):
+        code, folder = self.run_child(install=True)
+        self.assertEqual(code, 0, "the app should keep running after a callback error")
+        with open(os.path.join(folder, "last_errors.txt"), encoding="utf-8") as f:
+            report = f.read()
+        self.assertIn("error inside a Qt callback", report)
+        self.assertIn("in boom", report)                    # the traceback, not just the message
+
+    def test_thread_errors_are_recorded(self):
+        import threading
+        from utils import error_report
+        folder = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, ignore_errors=True))
+        old_hooks = (sys.excepthook, threading.excepthook)
+        self.addCleanup(lambda: (setattr(sys, "excepthook", old_hooks[0]),
+                                 setattr(threading, "excepthook", old_hooks[1])))
+        error_report.install(folder)
+        t = threading.Thread(target=lambda: 1 / 0, name="worker")
+        t.start(); t.join()
+        with open(os.path.join(folder, "last_errors.txt"), encoding="utf-8") as f:
+            report = f.read()
+        self.assertIn("thread 'worker'", report)
+        self.assertIn("ZeroDivisionError", report)
+
+    def test_report_is_bounded(self):
+        from utils import error_report
+        folder = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, ignore_errors=True))
+        old = error_report._path
+        self.addCleanup(lambda: setattr(error_report, "_path", old))
+        error_report._path = os.path.join(folder, "last_errors.txt")
+        for i in range(400):
+            error_report.record("test", f"error {i}\n" + "x" * 1500)
+        self.assertLessEqual(os.path.getsize(error_report._path), error_report.MAX_BYTES + 4096)
+        with open(error_report._path, encoding="utf-8") as f:
+            self.assertIn("error 399", f.read())               # newest kept
+
+    def test_the_report_survives_the_clear_on_start(self):
+        from utils.log_cleanup import clear_logs
+        from utils import error_report
+        folder = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, ignore_errors=True))
+        for name in (error_report.REPORT_NAME, error_report.NATIVE_NAME, "watcher.log"):
+            open(os.path.join(folder, name), "w").close()
+        clear_logs(folder)
+        left = sorted(os.listdir(folder))
+        self.assertIn(error_report.REPORT_NAME, left)
+        self.assertIn(error_report.NATIVE_NAME, left)
+        self.assertNotIn("watcher.log", left)
+
+
 class WatcherDetectionTests(unittest.TestCase):
     """The watcher must recognise the installed app and the installed app's own
     watcher, not only the Python versions of each."""
@@ -2229,8 +2725,95 @@ class CloudSyncHelperTests(unittest.TestCase):
             self.assertEqual(config.app_settings["cloud_token"], "")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+class MpvnetTests(unittest.TestCase):
+    """The Video Player tab's mpv.net helpers (utils/mpvnet.py)."""
+
+    def setUp(self):
+        from utils import mpvnet
+        self.mpvnet = mpvnet
+        self.cfg = tempfile.mkdtemp(prefix="aed_mpvcfg_")
+
+    def test_bundle_is_complete(self):
+        base = self.mpvnet.bundle_dir()
+        for name in self.mpvnet.BUNDLE_FILES:
+            self.assertTrue(os.path.isfile(os.path.join(base, name)), name)
+        shaders = self.mpvnet.bundled_shaders()
+        self.assertIn("Anime4K_Upscale_CNN_x2_L.glsl", shaders)
+        # Every shader the bundled mpv.conf loads is actually shipped.
+        with open(os.path.join(base, "mpv.conf"), encoding="utf-8") as f:
+            conf = f.read()
+        import re
+        for ref in re.findall(r"~~/shaders/([^;\"]+\.glsl)", conf):
+            self.assertIn(ref.lower(), [s.lower() for s in shaders], ref)
+        self.assertNotIn(r"C:\Users", conf)
+
+    def test_anime_folder_name(self):
+        name = self.mpvnet.anime_folder_name
+        self.assertEqual("animes", name(r"C:\Users\x\Desktop\animes"))
+        self.assertEqual("my anime", name("C:\\Users\\x\\My Anime\\"))
+        self.assertEqual("animes", name("D:\\"))
+        self.assertEqual("animes", name(""))
+        self.assertEqual("أنمي", name(r"C:\أنمي"))
+
+    def test_render_points_profiles_at_download_folder(self):
+        with open(os.path.join(self.mpvnet.bundle_dir(), "mpv.conf"), encoding="utf-8") as f:
+            conf = f.read()
+        self.assertEqual(conf, self.mpvnet.render_mpv_conf(conf, r"C:\x\animes"))
+        out = self.mpvnet.render_mpv_conf(conf, r"C:\x\Anime-Downloads (1)")
+        conds = [l for l in out.splitlines() if l.startswith("profile-cond=")]
+        self.assertEqual(2, len(conds))
+        for line in conds:
+            # Lua pattern magic characters are escaped with %.
+            self.assertIn(r'"[\\/]anime%-downloads %(1%)[\\/]"', line)
+        self.assertNotIn("[\\\\/]animes[\\\\/]", out)
+
+    def test_clean_winget_line(self):
+        clean = self.mpvnet.clean_winget_line
+        self.assertEqual("", clean("   -\r   \\\r   |"))
+        self.assertEqual("Successfully installed", clean("  -\r  Successfully installed  "))
+        self.assertEqual("██ 10 MB / 30 MB", clean("█ 5 MB / 30 MB\r██ 10 MB / 30 MB"))
+
+    def test_apply_backs_up_only_what_changes(self):
+        os.makedirs(os.path.join(self.cfg, "Shaders"))
+        with open(os.path.join(self.cfg, "mpv.conf"), "w") as f:
+            f.write("vo=gpu\n")
+        with open(os.path.join(self.cfg, "Shaders", "mine.glsl"), "w") as f:
+            f.write("// mine\n")
+        self.assertFalse(self.mpvnet.shaders_applied(self.cfg))
+
+        backup = self.mpvnet.apply_config(self.cfg, r"C:\x\animes")
+        self.assertEqual(["mpv.conf"], os.listdir(backup))
+        with open(os.path.join(backup, "mpv.conf")) as f:
+            self.assertEqual("vo=gpu\n", f.read())
+        # The user's own shader is left alone, the bundled ones and script-opts land.
+        self.assertTrue(os.path.isfile(os.path.join(self.cfg, "Shaders", "mine.glsl")))
+        self.assertTrue(os.path.isdir(os.path.join(self.cfg, "script-opts")))
+        self.assertTrue(os.path.isfile(os.path.join(self.cfg, "scripts", "shader-toggle.lua")))
+        self.assertTrue(self.mpvnet.shaders_applied(self.cfg))
+
+        # Re-applying the same thing has nothing to back up.
+        self.assertIsNone(self.mpvnet.apply_config(self.cfg, r"C:\x\animes"))
+
+    def test_shaders_applied_needs_conf_to_load_them(self):
+        self.mpvnet.apply_config(self.cfg)
+        with open(os.path.join(self.cfg, "mpv.conf"), "w") as f:
+            f.write("vo=gpu-next\n")
+        self.assertFalse(self.mpvnet.shaders_applied(self.cfg))
+
+    def test_profiles_parsed_and_described(self):
+        from ui.player_tab import SHADER_INFO, PROFILE_TITLES
+        profiles = dict(self.mpvnet.bundled_profiles())
+        self.assertEqual(["anime", "series"], list(profiles))
+        self.assertEqual("Anime4K_Clamp_Highlights", profiles["anime"][0])
+        for name, stems in profiles.items():
+            self.assertIn(name, PROFILE_TITLES)
+            for stem in stems:
+                self.assertIn(stem, SHADER_INFO, f"{stem} has no friendly name in the tab")
+
+    def test_winget_command(self):
+        cmd = self.mpvnet.winget_install_command("winget")
+        self.assertEqual(["winget", "install", "--id", "mpv.net", "--exact"], cmd[:5])
+        self.assertIn("--accept-source-agreements", cmd)
 
 
 class LoadConfigSaveTests(unittest.TestCase):
@@ -2397,3 +2980,7 @@ class ConfigMigrationTests(unittest.TestCase):
         self.assertEqual("https://witanime.site/anime/one-piece/", w["url"])
         self.assertEqual("https://witanime.site/watch/one-piece-الحلقة-{x}/", w["latest_template"])
 
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

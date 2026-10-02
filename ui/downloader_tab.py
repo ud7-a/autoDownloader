@@ -614,6 +614,7 @@ class DownloaderWidget(QWidget):
 
         signals.update_buttons.connect(self.set_buttons)
         signals.concurrency_changed.connect(self.on_concurrency_changed)
+        signals.paused_settings_changed.connect(self.on_paused_settings_changed)
         self.refresh_dropdown()
         self._update_episode_feedback()   # populate the live preview for the initial value
         self.on_auto_concurrency_toggled()   # sync the spin box + hint to the saved mode
@@ -771,12 +772,10 @@ class DownloaderWidget(QWidget):
         if hasattr(self, 'slider_vol'):
             app_settings["volume"] = self.slider_vol.value()
 
-    def on_webhook_updated(self, webhook_url: str):
-        if hasattr(self, 'txt_webhook') and self.txt_webhook.text().strip() != (webhook_url or "").strip():
-            self.txt_webhook.blockSignals(True)
-            self.txt_webhook.setText(webhook_url or "")
-            self.txt_webhook.blockSignals(False)
-
+        # Everything below used to sit inside on_webhook_updated (a method had been
+        # pasted into the middle of this one), so the concurrency number, auto mode
+        # and the episode range were only kept in memory -- and nothing here ever
+        # wrote to disk -- unless the webhook happened to change in the same session.
         site = self.combo_site.currentText()
         app_settings["concurrency"] = self.spin_concurrency.value()
         if hasattr(self, 'chk_auto_concurrency'):
@@ -789,6 +788,14 @@ class DownloaderWidget(QWidget):
         # Debounce the disk write: rapid edits (e.g. holding a spinbox arrow) update
         # memory instantly but coalesce into a single save ~400ms after the last change.
         self._save_timer.start(400)
+
+    def on_webhook_updated(self, webhook_url: str):
+        """The webhook was changed elsewhere (the Watchlist's cloud dialog): show it here."""
+        if hasattr(self, 'txt_webhook') and self.txt_webhook.text().strip() != (webhook_url or "").strip():
+            self.txt_webhook.blockSignals(True)
+            self.txt_webhook.setText(webhook_url or "")
+            self.txt_webhook.blockSignals(False)
+
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", app_settings["download_dir"])
         if folder:
@@ -934,6 +941,37 @@ class DownloaderWidget(QWidget):
             site = self.combo_site.currentText()
             valid_site = site not in ("No Profiles", "No profile selected", "")
             self.btn_start.setEnabled(self._episodes_valid and valid_site)
+
+    def on_paused_settings_changed(self, values):
+        """Mirror what was changed on the paused screen, so these controls -- and the
+        next download -- agree with what the running one now uses."""
+        for widget, value in ((self.spin_concurrency, values.get("limit")),
+                              (self.chk_auto_concurrency, values.get("auto")),
+                              (self.chk_headless, values.get("headless"))):
+            if value is None:
+                continue
+            widget.blockSignals(True)
+            if hasattr(widget, "setChecked"):
+                widget.setChecked(bool(value))
+            else:
+                widget.setValue(int(value))
+            widget.blockSignals(False)
+        # Signals were blocked above, so refresh what the auto toggle normally drives.
+        self.spin_concurrency.setEnabled(not self.chk_auto_concurrency.isChecked()
+                                         and not self._inputs_locked)
+
+        # The resume-after-restart record and "retry failed episodes" re-run with
+        # the launch settings -- carry the new ones into both.
+        updates = {k: values[src] for k, src in (("headless", "headless"),
+                                                 ("concurrency", "limit"))
+                   if values.get(src) is not None}
+        with config_lock:
+            session = app_settings.get("unfinished_session")
+            if session:
+                session.update(updates)
+        if getattr(self, "last_download_params", None):
+            self.last_download_params.update(updates)
+        self.save_settings()
 
     def on_auto_concurrency_toggled(self, _state=None):
         """Auto mode owns the value, so the spin box becomes a starting point only."""

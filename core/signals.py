@@ -16,6 +16,9 @@ class WorkerSignals(QObject):
     add_picked_step = pyqtSignal(object, str)
     concurrency_changed = pyqtSignal(str)   # human-readable auto-concurrency state
     remote_commands_received = pyqtSignal(list)
+    # Settings changed on the paused download screen: {"limit", "auto", "headless"}.
+    # The Downloader tab mirrors them so its controls and saved settings agree.
+    paused_settings_changed = pyqtSignal(dict)
 
 # We instantiate it here so it's a true global singleton
 signals = WorkerSignals()

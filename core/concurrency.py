@@ -112,6 +112,23 @@ class ConcurrencyController:
             self.last_reason = f"~{projection:.0f}s per episode -- on target"
         return self.limit
 
+    def set_mode(self, enabled, limit=None):
+        """Change auto/manual and the number mid-run (from the paused screen).
+
+        In manual mode `limit` is the fixed value; in auto mode it is the starting
+        point the controller tunes from. Measurements taken before the change say
+        nothing about the new setting, so they are dropped and a fresh window starts.
+        """
+        self.enabled = bool(enabled)
+        if limit is not None:
+            self.limit = self._clamp(limit)
+            self.manual_limit = self.limit
+        self._samples.clear()
+        self._settle = 0
+        self._next_eval = self._clock() + self.WINDOW
+        self.last_reason = "changed while paused"
+        return self.limit
+
     # ---- helpers ------------------------------------------------------------
     def describe(self):
         """Short human-readable state for the progress screen."""

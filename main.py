@@ -25,6 +25,16 @@ def _startup_mark(label):
 
 _startup_mark("python reached main.py")
 
+# Before anything else can fail: without this, an error inside any Qt callback made
+# PyQt abort the installed app (0xC0000409 in Qt6Core.dll) with no record of why.
+# See utils/error_report.py. Covers the background watcher as well.
+try:
+    from utils.config import APP_DIR as _REPORT_DIR
+    from utils.error_report import install as _install_error_report
+    _install_error_report(_REPORT_DIR)
+except Exception:
+    pass
+
 if "--watcher" in sys.argv:
     from core.watcher import run_watcher
     run_watcher()
@@ -77,10 +87,21 @@ def suppress_qt_warnings(msg_type, _context, message):
         _qt_write(sys.stderr, f"Warning: {message}\n")
     elif msg_type == QtMsgType.QtCriticalMsg:
         _qt_write(sys.stderr, f"Critical: {message}\n")
+        _record_qt("Qt critical", message)
     elif msg_type == QtMsgType.QtFatalMsg:
         # Qt tears the process down itself after this returns. Raising SystemExit
         # here would be one more unhandled exception inside a C++ callback.
         _qt_write(sys.stderr, f"Fatal: {message}\n")
+        _record_qt("Qt fatal (the app is about to close)", message)
+
+
+def _record_qt(kind, message):
+    """The windowed app has no console: keep serious Qt messages in the report."""
+    try:
+        from utils.error_report import record
+        record(kind, message)
+    except Exception:
+        pass
 
 # Silently suppress visual parsing warnings to keep the console clean
 qInstallMessageHandler(suppress_qt_warnings)

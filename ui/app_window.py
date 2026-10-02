@@ -9,6 +9,7 @@ from ui.manager_tab import SiteManagerWidget
 from ui.history_tab import HistoryWidget
 from ui.progress_tab import ProgressTab
 from ui.watchlist_tab import WatchlistWidget
+from ui.player_tab import PlayerWidget
 from core.signals import signals
 from utils.config import APP_VERSION, app_settings, get_watchlist
 
@@ -148,6 +149,7 @@ class AppWindow(FluentWindow):
         self.manager_interface = SiteManagerWidget()
         self.history_interface = HistoryWidget()
         self.watchlist_interface = WatchlistWidget()
+        self.player_interface = PlayerWidget()
 
         self.downloader_interface.setObjectName("downloader_interface")
         self.search_interface.setObjectName("search_interface")
@@ -155,6 +157,7 @@ class AppWindow(FluentWindow):
         self.manager_interface.setObjectName("manager_interface")
         self.history_interface.setObjectName("history_interface")
         self.watchlist_interface.setObjectName("watchlist_interface")
+        self.player_interface.setObjectName("player_interface")
 
         # Track if the progress tab has been added yet
         self.progress_added = False
@@ -171,6 +174,18 @@ class AppWindow(FluentWindow):
         
         # --- THE FIX: Wiring up our signals ---
         self._await_finish_dismiss = False   # finished tab is waiting to be dismissed
+
+        # Whether a download is running right now. progress_added can't say: the
+        # Active Tasks tab deliberately stays open after a download finishes.
+        # Connected FIRST, so that when a finished download hands over to the next
+        # queued one (_start_next_queued, connected further down) the flag is
+        # cleared before the next one sets it again.
+        self._download_running = False
+        self._current_download_key = None
+        signals.task_started.connect(lambda: setattr(self, "_download_running", True))
+        signals.task_finished.connect(lambda *_: setattr(self, "_download_running", False))
+        signals.task_cancelled.connect(lambda *_: setattr(self, "_download_running", False))
+
         signals.task_started.connect(self.show_active_tasks)
         signals.task_cancelled.connect(lambda: self.hide_active_tasks())
 
@@ -360,14 +375,56 @@ class AppWindow(FluentWindow):
                 items_to_download.append((title or url, template, domain, 0, ep_spec))
 
         if items_to_download:
-            InfoBar.success(
-                "Remote Download Started",
-                f"Auto-downloading {len(items_to_download)} anime release(s) triggered from Discord!",
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=4000
-            )
-            self.on_watch_download_all(items_to_download)
+            self._queue_remote_downloads(items_to_download)
+
+    @staticmethod
+    def _download_key(item):
+        """What makes two downloads the same one: the episode page and the episodes."""
+        _title, template, _domain, _max, episodes = item
+        return ((template or "").rstrip("/"), str(episodes).strip())
+
+    def _queue_remote_downloads(self, items):
+        """Start Discord-requested downloads without ever interrupting a running one.
+
+        These used to go straight to on_watch_download_all, which starts at once --
+        on top of a download already in progress. Pressing the Discord button again
+        while one ran (natural when nothing seems to happen yet) cancelled it and
+        started over, and two tasks then fed progress for the same episode into one
+        screen. A Python error in one of those UI callbacks is what the installed app
+        aborted on (0xC0000409), three times in a minute on 2026-09-30.
+
+        Now a request for what is already running or queued is ignored, and anything
+        else waits its turn behind the current download.
+        """
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        running = self._current_download_key if self._download_running else None
+        queued = {self._download_key(i) for i in self._download_queue}
+        fresh, seen = [], set()
+        for item in items:
+            key = self._download_key(item)
+            if key == running or key in queued or key in seen:
+                continue
+            seen.add(key)
+            fresh.append(item)
+
+        if not fresh:
+            InfoBar.info("Already Downloading",
+                         "That episode is already downloading or waiting its turn.",
+                         parent=self, position=InfoBarPosition.TOP, duration=4000)
+            return
+
+        if self._download_running:
+            self._download_queue.extend(fresh)
+            InfoBar.info("Queued from Discord",
+                         f"{len(fresh)} download(s) will start when the current one finishes.",
+                         parent=self, position=InfoBarPosition.TOP, duration=4000)
+            return
+
+        InfoBar.success(
+            "Remote Download Started",
+            f"Auto-downloading {len(fresh)} anime release(s) triggered from Discord!",
+            parent=self, position=InfoBarPosition.TOP, duration=4000)
+        self.on_watch_download_all(fresh)
 
     def prompt_update(self, latest_version, download_url):
         print(f"[UI] prompt_update TRIGGERED for version {latest_version}")
@@ -431,8 +488,11 @@ class AppWindow(FluentWindow):
 
     def _start_next_queued(self, _results=None):
         if not self._download_queue:
+            self._current_download_key = None
             return
-        title, template, domain, _max_ep, episodes_str = self._download_queue.pop(0)
+        item = self._download_queue.pop(0)
+        self._current_download_key = self._download_key(item)
+        title, template, domain, _max_ep, episodes_str = item
         self.switchTo(self.downloader_interface)
         self.downloader_interface.start_watch_download(title, template, domain, episodes_str)
 
@@ -473,6 +533,7 @@ class AppWindow(FluentWindow):
         self.addSubInterface(self.watchlist_interface, FIF.HEART, "Watchlist")
         self.addSubInterface(self.manager_interface, FIF.SETTING, "Profile Manager")
         self.addSubInterface(self.history_interface, FIF.HISTORY, "History")
+        self.addSubInterface(self.player_interface, FIF.VIDEO, "Video Player")
 
     def hide_active_tasks(self, switch_away=True):
         """Hides the Active Tasks tab completely"""

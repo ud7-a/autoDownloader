@@ -1,0 +1,13 @@
+Shaders bundled in Shaders/ keep their original license headers.
+
+  Anime4K_*.glsl            MIT License, (c) 2019-2021 bloc97
+                            https://github.com/bloc97/Anime4K
+  FSRCNNX_x2_16-0-4-1.glsl  LGPL-3.0-or-later, (c) 2017-2021 igv
+  KrigBilateral.glsl        LGPL-3.0-or-later, igv
+  SSimDownscaler-PK.glsl    LGPL-3.0-or-later, igv
+                            https://github.com/igv/FSRCNN-TensorFlow
+                            https://gist.github.com/igv
+  adaptive-sharpen.glsl     BSD-2-Clause, (c) 2015-2021 bacondither
+
+The LGPL shaders are shipped unmodified as separate files; the full license
+text is at https://www.gnu.org/licenses/lgpl-3.0.txt.

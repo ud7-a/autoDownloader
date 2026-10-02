@@ -122,13 +122,48 @@ jobs:
         shell: bash
         # The asset name matters: core/updater.py looks for an asset containing
         # "Setup" that ends in .exe, downloads it, and runs it with --silent.
+        #
+        # Safe to run twice for one tag. GitHub delivered the v4.8.2 tag push twice
+        # (two runs, one second apart, same commit): the first published, the second
+        # failed on "a release with the same tag name already exists" and turned the
+        # whole release red although nothing was wrong. A release that already has
+        # both files is left exactly as it is -- users may be downloading it -- and
+        # one missing a file gets that file uploaded.
         run: |
-          gh release create "${{ steps.v.outputs.tag }}" \
-            dist/AutoDownloader_Setup.exe \
-            dist/AutoDownloader_Portable.zip \
-            --title "Auto Episodes Downloader ${{ steps.v.outputs.version }}" \
-            --generate-notes \
-            ${{ inputs.prerelease && '--prerelease' || '' }}
+          tag="${{ steps.v.outputs.tag }}"
+          files=(dist/AutoDownloader_Setup.exe dist/AutoDownloader_Portable.zip)
+
+          has_both_files() {
+            local names
+            names=$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null) || return 1
+            grep -qx 'AutoDownloader_Setup.exe' <<<"$names" &&
+              grep -qx 'AutoDownloader_Portable.zip' <<<"$names"
+          }
+
+          if has_both_files; then
+            echo "::notice::$tag is already published with both files (a second run for the same tag). Leaving it unchanged."
+            exit 0
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::warning::$tag exists but is missing a file -- uploading the build's files."
+            gh release upload "$tag" "${files[@]}" --clobber
+            exit 0
+          fi
+
+          if ! gh release create "$tag" "${files[@]}" \
+                 --title "Auto Episodes Downloader ${{ steps.v.outputs.version }}" \
+                 --generate-notes \
+                 ${{ inputs.prerelease && '--prerelease' || '' }}; then
+            # A parallel run for the same tag may have published it a moment ago.
+            sleep 20
+            if has_both_files; then
+              echo "::notice::$tag was published by a parallel run for the same tag."
+              exit 0
+            fi
+            echo "::error::Could not publish $tag."
+            exit 1
+          fi
 
       - name: Verify the updater can see the release
         env:

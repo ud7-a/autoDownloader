@@ -782,11 +782,12 @@ class WatchlistWidget(QWidget):
                 anime_title = entry.get("title") or url
                 seen = entry.get("seen_max") or 0
                 import threading
-                from service.checker import create_discord_embed, send_discord_notification
+                # The app's own sender, never the cloud service's: importing
+                # service.checker here killed the installed app (see utils/discord_notify).
+                from utils.discord_notify import release_embed, send
                 def _bg_notify(title, a_url, s_max, l_max, wh):
                     for ep in range(s_max + 1, l_max + 1):
-                        payload = create_discord_embed(title, a_url, ep)
-                        send_discord_notification(wh, payload)
+                        send(wh, release_embed(title, a_url, ep))
                         time.sleep(0.2)
                 threading.Thread(target=_bg_notify, args=(anime_title, url, seen, latest_max, webhook), daemon=True).start()
 

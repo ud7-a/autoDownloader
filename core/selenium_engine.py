@@ -30,6 +30,114 @@ active_engine_threads = []
 manual_driver = None
 active_aria2_processes = []
 
+# --- Changing settings while a download is paused ---
+# The paused screen reads RUN_STATE (via run_snapshot) to show what can still change,
+# and request_adjustments() records the user's choices. Concurrency takes effect at
+# once -- the throttle re-reads the controller every second. A browser mode change
+# and skipped episodes are applied by the engine itself between episodes, where no
+# browser tab is mid-use and no skipped episode has begun.
+_run_lock = threading.Lock()
+RUN_STATE = {}
+_PENDING_ADJUST = {}
+
+
+def run_snapshot():
+    """What the paused screen needs: the episodes not yet begun, and current modes.
+
+    Values the engine has not picked up yet are reported as they WILL be, so
+    pausing again before the next episode shows what the user chose last time
+    rather than snapping back to the old state.
+    """
+    with _run_lock:
+        if not RUN_STATE:
+            return {}
+        controller = RUN_STATE.get("controller")
+        started = RUN_STATE.get("started", set())
+        return {
+            "task_id": RUN_STATE.get("task_id"),
+            "not_started": [e for e in RUN_STATE.get("episodes", []) if e not in started],
+            "pending_skip": sorted(_PENDING_ADJUST.get("skip", ())),
+            "total": len(RUN_STATE.get("episodes", [])),
+            "headless": _PENDING_ADJUST.get("headless", RUN_STATE.get("headless", True)),
+            "limit": controller.limit if controller else None,
+            "auto": controller.enabled if controller else None,
+        }
+
+
+def request_adjustments(task_id, *, limit=None, auto=None, headless=None, skip=()):
+    """Record changes made on the paused screen. False if that run is over.
+
+    `skip` is the full set the user wants skipped (the screen lists every episode
+    not started yet, including ones already pending a skip), so it replaces any
+    earlier request -- re-ticking an episode un-skips it.
+    """
+    with _run_lock:
+        if not RUN_STATE or RUN_STATE.get("task_id") != task_id:
+            return False
+        controller = RUN_STATE.get("controller")
+        if controller is not None and (limit is not None or auto is not None):
+            controller.set_mode(controller.enabled if auto is None else auto, limit)
+            signals.concurrency_changed.emit(controller.describe())
+        if headless is not None:
+            if bool(headless) != RUN_STATE.get("headless"):
+                _PENDING_ADJUST["headless"] = bool(headless)
+            else:
+                _PENDING_ADJUST.pop("headless", None)
+        started = RUN_STATE.get("started", set())
+        wanted = {e for e in skip if e not in started}
+        if wanted:
+            _PENDING_ADJUST["skip"] = wanted
+        else:
+            _PENDING_ADJUST.pop("skip", None)
+    return True
+
+
+def compact_spec(nums):
+    """'1-5, 8' -- a 1000-episode skip list must not become a 4000-character status."""
+    nums = sorted(set(nums))
+    out, i = [], 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        out.append(str(nums[i]) if i == j else f"{nums[i]}-{nums[j]}")
+        i = j + 1
+    return ", ".join(out)
+
+
+def apply_skips(episodes_list, requested):
+    """Remove the requested episodes from the run, in place; return those removed.
+
+    Refuses to empty the run -- skipping every remaining episode is what Cancel is
+    for, and an empty run would end reported as a failure of zero episodes.
+    """
+    skipped = [e for e in dict.fromkeys(requested or ()) if e in episodes_list]
+    if not skipped or len(skipped) >= len(episodes_list):
+        return []
+    with _run_lock:
+        for e in skipped:
+            episodes_list.remove(e)
+    return skipped
+
+
+def _take_adjustments():
+    with _run_lock:
+        adj = dict(_PENDING_ADJUST)
+        _PENDING_ADJUST.clear()
+        return adj
+
+
+def _drop_from_session(episodes):
+    """Skipped episodes must not come back as an "unfinished session" after a crash."""
+    from utils.config import save_config
+    with config_lock:
+        session = app_settings.get("unfinished_session")
+        if session and "episodes" in session:
+            session["episodes"] = [e for e in session["episodes"] if e not in episodes]
+            if not session["episodes"]:
+                app_settings.pop("unfinished_session", None)
+            save_config()
+
 # Per-host download throttle: never run more than PER_HOST_MAX aria2c downloads
 # against the same host at once, so a single host isn't hammered into a rate-limit.
 host_active = {}
@@ -1045,6 +1153,9 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
     global CURRENT_TASK_ID
     CURRENT_TASK_ID += 1
     my_task_id = CURRENT_TASK_ID
+    # Owned copy: episodes skipped while paused are removed from it, and every total
+    # below (progress, history, the final status) then counts only what is kept.
+    episodes_list = list(episodes_list)
 
     cancel_event.clear()
     pause_event.clear()
@@ -1062,6 +1173,11 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
         auto_concurrency = bool(app_settings.get("concurrency_auto", True))
     controller = ConcurrencyController(start=concurrency, enabled=auto_concurrency)
     signals.concurrency_changed.emit(controller.describe())
+    with _run_lock:
+        RUN_STATE.clear()
+        RUN_STATE.update(task_id=my_task_id, episodes=episodes_list, started=set(),
+                         headless=bool(headless), controller=controller)
+        _PENDING_ADJUST.clear()
     active_engine_threads = []
     episodes_completed_count = 0
 
@@ -1203,17 +1319,56 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
         driver = create_browser(download_dir, headless)
         wait = WebDriverWait(driver, 10)
 
+        def apply_pending_adjustments():
+            """Pick up skips and a browser-mode change from the paused screen.
+
+            Only called where no browser tab is in use: before an episode's page
+            is opened, and while waiting for a free download slot (the episode's
+            tab is already closed then). The second spot matters -- on a long run
+            the engine spends most of its time there, and a mode change used to
+            wait for a slot to free up.
+            """
+            nonlocal driver, wait, headless
+            adj = _take_adjustments()
+            skipped = apply_skips(episodes_list, adj.get("skip", ()))
+            if skipped:
+                _drop_from_session(skipped)
+                signals.update_progress.emit(episodes_completed_count, len(episodes_list))
+                signals.update_status.emit(
+                    f"Status: Skipping episode{'s' if len(skipped) > 1 else ''} "
+                    f"{compact_spec(skipped)}.", "#f39c12")
+            if "headless" in adj and adj["headless"] != headless:
+                headless = adj["headless"]
+                with _run_lock:
+                    RUN_STATE["headless"] = headless
+                signals.update_status.emit(
+                    f"Status: Restarting the browser ({'hidden' if headless else 'visible'})...",
+                    "#f39c12")
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                driver = create_browser(download_dir, headless)
+                wait = WebDriverWait(driver, 10)
+
         total_episodes = len(episodes_list)
         signals.update_progress.emit(0, total_episodes)
 
-        for x in episodes_list:
+        for x in list(episodes_list):
             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
-            
+
             while pause_event.is_set() and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
                 time.sleep(1)
-            
+
             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
-            
+
+            # Apply what was changed on the paused screen, between episodes.
+            apply_pending_adjustments()
+            if x not in episodes_list:
+                continue                     # skipped while paused
+            with _run_lock:
+                RUN_STATE["started"].add(x)
+
             if len([t for t in active_engine_threads if t.is_alive()]) > 0:
                 time.sleep(random.uniform(2.0, 4.0))
 
@@ -1564,6 +1719,8 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                         host_n = host_active.get(dl_host, 0)
                                     if alive < limit and host_n < PER_HOST_MAX:
                                         break
+                                    if not pause_event.is_set():
+                                        apply_pending_adjustments()
                                     time.sleep(1)
 
                                 if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
@@ -1664,7 +1821,11 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
         if driver:
             try: driver.quit()
             except: pass
-            
+        with _run_lock:
+            if RUN_STATE.get("task_id") == my_task_id:
+                RUN_STATE.clear()
+                _PENDING_ADJUST.clear()
+
         if task_started:
             cancelled_count = sum(1 for ep in episodes_list if ep_cancel_events.get(ep) and ep_cancel_events[ep].is_set())
             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
