@@ -8,7 +8,7 @@ from PyQt6.QtGui import QIntValidator
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog)
 
 # THE UPGRADE: We are using Fluent Widgets for everything!
-from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, PasswordLineEdit, CheckBox,
+from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, CheckBox,
                             ComboBox, Slider, SmoothScrollArea, SpinBox, FluentIcon as FIF, ToolButton,
                             InfoBar, InfoBarPosition)
 
@@ -16,6 +16,7 @@ from utils.config import app_settings, sites_data, save_config, config_lock
 from core.signals import signals
 from core.selenium_engine import run_selenium_task, launch_visible_browser
 from ui.styles import apply_danger_style
+from ui.secret_field import SecretLineEdit
 
 
 # Sentinel stored in selected_sound to mean "no finish sound". Distinct from ""
@@ -571,9 +572,9 @@ class DownloaderWidget(QWidget):
         self.on_volume_change(self.slider_vol.value())
 
         main_layout.addWidget(QLabel("Discord Webhook:", styleSheet="font-weight: bold; margin-top: 5px;"))
-        # Masked, with an eye button to reveal it: anyone holding this URL can post
-        # to the channel, and it used to sit in plain text in every screenshot.
-        self.txt_webhook = PasswordLineEdit()
+        # Masked, with an eye button that toggles it visible: anyone holding this URL
+        # can post to the channel, and it used to sit in plain text in every screenshot.
+        self.txt_webhook = SecretLineEdit()
         self.txt_webhook.setText(app_settings.get("discord_webhook", ""))
         self.txt_webhook.setPlaceholderText("https://discord.com/api/webhooks/...")
         self.txt_webhook.textChanged.connect(self.save_settings)

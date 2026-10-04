@@ -1207,6 +1207,169 @@ class PausedAdjustmentTests(unittest.TestCase):
         self.assertEqual((c.enabled, c.limit, c._samples), (True, 4, {}))
 
 
+class ResponsiveLayoutTests(unittest.TestCase):
+    """Tabs stay readable on wide windows and never block shrinking the window."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def make(self):
+        from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLineEdit
+        from ui.responsive import WidthCap
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(30, 20, 30, 20)
+        field = QLineEdit()
+        field.setMinimumWidth(400)
+        lay.addWidget(field)
+        cap = WidthCap(host, 1000)
+        host.show()                     # hidden widgets get no resize events
+        self._hosts = getattr(self, "_hosts", []) + [host]
+        self.addCleanup(host.close)
+        return host, lay, cap
+
+    def test_wide_window_centres_a_column(self):
+        host, lay, _ = self.make()
+        host.resize(2400, 900)
+        self._app.processEvents()
+        m = lay.contentsMargins()
+        self.assertEqual((m.left(), m.right()), (30 + 700, 30 + 700))
+        self.assertEqual(m.top(), 20)
+
+    def test_margins_never_raise_the_minimum(self):
+        # Maximized on a wide screen, then shrunk: the minimum must stay the
+        # content's own (400 + 2*30), not include the 700 px centring margins.
+        host, lay, _ = self.make()
+        host.resize(2400, 900)
+        self._app.processEvents()
+        self.assertEqual(host.minimumWidth(), 460)
+        host.resize(800, 600)
+        self._app.processEvents()
+        self.assertEqual(lay.contentsMargins().left(), 30)
+
+    def test_window_minimum_fits_small_laptops(self):
+        # 1080p at 150% scaling leaves 1280x720 logical, minus the taskbar.
+        import ast
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "ui", "app_window.py")
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call)
+                 and getattr(n.func, "attr", "") == "setMinimumSize"]
+        w, h = (calls[0].args[0].value, calls[0].args[1].value)
+        self.assertLessEqual(w, 1024)
+        self.assertLessEqual(h, 576)
+
+
+class SecretFieldTests(unittest.TestCase):
+    """The webhook fields' eye button toggles (it used to show only while held)."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_click_toggles_and_stays(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from ui.secret_field import SecretLineEdit
+        field = SecretLineEdit()
+        field.setText("https://discord.com/api/webhooks/1/abc")
+        field.resize(400, 33)
+        field.show()
+        self.addCleanup(field.close)
+        self._app.processEvents()
+        self.assertFalse(field.isPasswordVisible())
+        btn = field.viewButton
+        QTest.mousePress(btn, Qt.MouseButton.LeftButton)
+        self.assertFalse(field.isPasswordVisible())      # pressing alone shows nothing
+        QTest.mouseRelease(btn, Qt.MouseButton.LeftButton)
+        self.assertTrue(field.isPasswordVisible())       # click -> shown, and stays
+        self._app.processEvents()
+        self.assertTrue(field.isPasswordVisible())
+        QTest.mouseClick(btn, Qt.MouseButton.LeftButton)
+        self.assertFalse(field.isPasswordVisible())      # click again -> hidden
+        self.assertEqual("Show", btn.toolTip())
+
+
+class TouchTests(unittest.TestCase):
+    """Finger input: drags scroll, taps still click (ui/touch.py, ui/episode_grid.py).
+    The end-to-end check uses real Windows touch injection and lives outside the
+    suite; these cover the logic."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+        from PyQt6.QtGui import QInputDevice, QPointingDevice, QPointingDeviceUniqueId
+        cls.finger = QPointingDevice("test finger", 4242, QInputDevice.DeviceType.TouchScreen,
+                                     QPointingDevice.PointerType.Finger,
+                                     QInputDevice.Capability.Position, 10, 0, "",
+                                     QPointingDeviceUniqueId())
+
+    def mouse(self, etype, pos, touch=True):
+        from PyQt6.QtCore import QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent, QPointingDevice
+        p = QPointF(*pos) if isinstance(pos, tuple) else QPointF(pos)
+        buttons = Qt.MouseButton.NoButton if etype == 3 else Qt.MouseButton.LeftButton
+        from PyQt6.QtCore import QEvent
+        device = self.finger if touch else QPointingDevice.primaryPointingDevice()
+        return QMouseEvent(QEvent.Type(etype), p, p, p, Qt.MouseButton.LeftButton, buttons,
+                           Qt.KeyboardModifier.NoModifier, device)
+
+    def test_is_touch(self):
+        from ui.touch import is_touch
+        self.assertTrue(is_touch(self.mouse(2, (5, 5))))
+        self.assertFalse(is_touch(self.mouse(2, (5, 5), touch=False)))
+
+    def test_scroll_target_is_the_innermost_scrollable_area(self):
+        from PyQt6.QtWidgets import QScrollArea, QWidget, QLabel, QVBoxLayout
+        from ui.touch import _scroll_target
+        area = QScrollArea()
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        label = QLabel("x")
+        lay.addWidget(label)
+        page.setMinimumHeight(2000)
+        area.setWidget(page)
+        area.resize(300, 200)
+        area.show()
+        self._app.processEvents()
+        self.addCleanup(area.close)
+        self.assertIs(area.verticalScrollBar(), _scroll_target(label, vertical=True))
+        self.assertIsNone(_scroll_target(label, vertical=False))   # nothing to scroll sideways
+
+    def test_no_touch_screen_means_no_filter(self):
+        from unittest import mock
+        import ui.touch as touch
+        with mock.patch.object(touch, "has_touch_screen", return_value=False):
+            self.assertIsNone(touch.install(self._app))
+
+    def test_grid_finger_toggles_on_lift_on_the_same_episode(self):
+        from ui.episode_grid import EpisodeGrid
+        grid = EpisodeGrid()
+        grid.resize(600, 200)
+        grid.set_episodes(range(1, 21))
+        cols, cw = grid._layout()
+        first = grid._rect(0, cols, cw).center().toPoint()
+        third = grid._rect(2, cols, cw).center().toPoint()
+        grid.mousePressEvent(self.mouse(2, first))
+        self.assertEqual([], grid.skipped())               # nothing yet: may become a scroll
+        grid.mouseReleaseEvent(self.mouse(3, first))
+        self.assertEqual([1], grid.skipped())              # tap
+        grid.mousePressEvent(self.mouse(2, third))
+        grid.mouseReleaseEvent(self.mouse(3, (-10000, -10000)))   # scroll took over
+        self.assertEqual([1], grid.skipped())
+        # A real mouse still toggles on press (drag-to-paint keeps working).
+        grid.mousePressEvent(self.mouse(2, third, touch=False))
+        self.assertEqual([1, 3], grid.skipped())
+
+
 class EpisodePickerTests(unittest.TestCase):
     """The paused screen's episode grid: one painted widget, not a checkbox per
     episode (that froze the UI on long runs)."""
@@ -2809,6 +2972,94 @@ class MpvnetTests(unittest.TestCase):
             self.assertIn(name, PROFILE_TITLES)
             for stem in stems:
                 self.assertIn(stem, SHADER_INFO, f"{stem} has no friendly name in the tab")
+
+    def test_default_player_detection(self):
+        is_mpv = self.mpvnet.is_mpvnet_progid
+        self.assertTrue(is_mpv(r"Applications\mpvnet.exe"))      # picked via "Open with"
+        self.assertTrue(is_mpv("mpv.net.mkv"))
+        self.assertFalse(is_mpv("AppXqj98qxeaynz6dv4459ayz6bnqxbyaqcs"))
+        self.assertFalse(is_mpv(""))
+
+    def test_registration_must_point_at_the_installed_exe(self):
+        from unittest import mock
+        m = self.mpvnet
+        new = r"C:\Users\x\AppData\Local\Programs\mpv.net\mpvnet.exe"
+        with mock.patch("winreg.OpenKey"), mock.patch("winreg.QueryValueEx"), \
+                mock.patch.object(m, "_registered_command",
+                                  return_value=r'"C:\Program Files\mpv.net\mpvnet.exe" "%1"'):
+            self.assertTrue(m.is_registered())            # types are there
+            self.assertFalse(m.is_registered(new))        # but for an old install
+        with mock.patch("winreg.OpenKey"), mock.patch("winreg.QueryValueEx"), \
+                mock.patch.object(m, "_registered_command", return_value=f'"{new}" "%1"'):
+            self.assertTrue(m.is_registered(new))
+        with mock.patch("winreg.OpenKey", side_effect=OSError):   # the ".video"-only case
+            self.assertFalse(m.is_registered(new))
+
+    def test_open_videos_queues_the_session_in_mpvnet(self):
+        from unittest import mock
+        m = self.mpvnet
+        a = os.path.join(self.cfg, "Show Ep5.mp4")
+        b = os.path.join(self.cfg, "Show Ep6.mp4")
+        for p in (a, b):
+            open(p, "wb").close()
+        with mock.patch.object(m, "find_mpvnet", return_value=(r"C:\mpv\mpvnet.exe", "7")), \
+                mock.patch.object(m, "play_in_mpvnet_enabled", return_value=True), \
+                mock.patch.object(m.subprocess, "Popen") as popen, \
+                mock.patch.object(m.os, "startfile", create=True) as startfile:
+            self.assertEqual("mpvnet", m.open_videos([a, b]))
+            popen.assert_called_once()
+            self.assertEqual([r"C:\mpv\mpvnet.exe", a, b], popen.call_args[0][0])
+            startfile.assert_not_called()
+        # Switch off, or mpv.net missing -> Windows' default player gets the first.
+        for enabled, found in ((False, r"C:\mpv\mpvnet.exe"), (True, None)):
+            with mock.patch.object(m, "find_mpvnet", return_value=(found, None)), \
+                    mock.patch.object(m, "play_in_mpvnet_enabled", return_value=enabled), \
+                    mock.patch.object(m.subprocess, "Popen") as popen, \
+                    mock.patch.object(m.os, "startfile", create=True) as startfile:
+                self.assertEqual("default", m.open_videos([a, b]))
+                startfile.assert_called_once_with(a)
+                popen.assert_not_called()
+
+    def test_policy_cleanup_only_removes_ours(self):
+        m = self.mpvnet
+        script = m.build_disable_script()
+        self.assertIn(f"-eq '{m.policy_xml_path()}'", script)
+        self.assertNotIn("Remove-Item -Path $key", script)     # never the whole key
+        self.assertEqual("'O''Neil'", m._ps("O'Neil"))
+
+    def test_policy_xml(self):
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(self.mpvnet.build_policy_xml())
+        rows = {a.get("Identifier"): a.get("ProgId") for a in root.iter("Association")}
+        self.assertEqual({".mp4": "mpvnet.mp4", ".mkv": "mpvnet.mkv"}, rows)
+
+    def test_enable_script(self):
+        m = self.mpvnet
+        exe = r"C:\Users\O'Neil\mpv.net\mpvnet.exe"          # a quote in the path
+        with_reg = m.build_enable_script(exe, True)
+        without = m.build_enable_script(exe, False)
+        self.assertIn("--register-file-associations", with_reg)
+        self.assertNotIn("--register-file-associations", without)
+        self.assertIn("'C:\\Users\\O''Neil\\mpv.net\\mpvnet.exe'", with_reg)
+        # Never recreate an existing policy key (that would wipe its other values).
+        self.assertIn("if (-not (Test-Path $key)) { New-Item -Path $key", without)
+        self.assertNotIn("New-Item -Path $key -Force", without)
+        self.assertIn(m.POLICY_VALUE, without)
+
+    def test_register_args_list_the_extensions(self):
+        args = self.mpvnet.register_video_args().split()
+        self.assertEqual(["--register-file-associations", "video"], args[:2])
+        for ext in ("mp4", "mkv"):
+            self.assertIn(ext, args[2:])          # no leading dots; mpv.net adds them
+        self.assertFalse(any(a.startswith(".") for a in args))
+
+    def test_describe_default(self):
+        from ui.player_tab import describe_default
+        self.assertEqual("ok", describe_default({".mp4": True, ".mkv": True})[0])
+        state, text = describe_default({".mp4": False, ".mkv": True})
+        self.assertEqual("partial", state)
+        self.assertIn(".mp4", text)
+        self.assertEqual("no", describe_default({".mp4": False, ".mkv": False})[0])
 
     def test_winget_command(self):
         cmd = self.mpvnet.winget_install_command("winget")

@@ -3,11 +3,12 @@ import subprocess
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QLabel
+from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+                             QFrame, QLabel)
 from qfluentwidgets import (CardWidget, IconWidget, SubtitleLabel, StrongBodyLabel,
                             BodyLabel, CaptionLabel, PrimaryPushButton, PushButton,
                             IndeterminateProgressBar, InfoBar, InfoBarPosition,
-                            ScrollArea, FluentIcon as FIF)
+                            ScrollArea, SwitchButton, FluentIcon as FIF)
 
 from utils import mpvnet
 from utils.config import app_settings
@@ -47,6 +48,8 @@ KEYCAP_STYLE = ("background:rgba(255,255,255,0.06);color:#e8e8e8;"
 
 def muted(label):
     label.setTextColor(*MUTED)
+    # Secondary text wraps on narrow windows instead of forcing the page wider.
+    label.setWordWrap(True)
     return label
 
 
@@ -87,6 +90,34 @@ class WingetInstallThread(QThread):
         self.done.emit(code)
 
 
+class ElevatedThread(QThread):
+    """Runs an elevated step (UAC prompt + wait) off the UI thread."""
+    done = pyqtSignal(int)
+
+    def __init__(self, fn, *args, parent=None):
+        super().__init__(parent)
+        self._fn, self._args = fn, args
+
+    def run(self):
+        try:
+            code = self._fn(*self._args)
+        except Exception:
+            code = -1
+        self.done.emit(code)
+
+
+def describe_default(status):
+    """("ok"|"partial"|"no", text) for the default-player line."""
+    on = [ext for ext, yes in status.items() if yes]
+    if on and len(on) == len(status):
+        return "ok", f"Yes. {' and '.join(status)} files open in mpv.net."
+    if on:
+        off = [ext for ext in status if ext not in on]
+        return "partial", (f"Only {', '.join(on)} files open in mpv.net; "
+                           f"{', '.join(off)} still open in another player.")
+    return "no", "No. Your downloads open in another player, without the shaders."
+
+
 class PlayerWidget(QWidget):
     """Video Player tab: install mpv.net through winget and apply the bundled
     quality-shader config (Anime4K for anime, FSRCNNX for series)."""
@@ -98,9 +129,11 @@ class PlayerWidget(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = ScrollArea(self)
+        self.scroll = scroll = ScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.enableTransparentBackground()
+        # Text wraps instead; a sideways scrollbar only ever hid the right column.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         outer.addWidget(scroll)
         page = QWidget()
         page.setStyleSheet("background:transparent;")
@@ -185,7 +218,73 @@ class PlayerWidget(QWidget):
         self.btn_open_player.clicked.connect(self.open_player)
         self.btn_recheck.clicked.connect(self.refresh_status)
         body.addLayout(self._button_row(self.btn_recheck, self.btn_open_player, self.btn_install))
+
+        # Play the app's own downloads in mpv.net -- needs nothing from Windows.
+        self.default_divider = self._divider()
+        body.addWidget(self.default_divider)
+        play_info = QVBoxLayout()
+        play_info.setSpacing(0)
+        play_info.addWidget(BodyLabel("Play downloads in mpv.net"))
+        play_info.addWidget(muted(CaptionLabel(
+            "\"Start Watching\" and History open mpv.net directly, with the whole "
+            "session queued, whatever your Windows default is.")))
+        self.switch_play = SwitchButton()
+        self.switch_play.setOnText("On")
+        self.switch_play.setOffText("Off")
+        self.switch_play.setChecked(mpvnet.play_in_mpvnet_enabled())
+        self.switch_play.checkedChanged.connect(self._on_play_switch)
+        self.play_row = QWidget()
+        self.play_row.setStyleSheet("background:transparent;")
+        prow = self._button_row(self.switch_play, leading=play_info)
+        prow.setContentsMargins(0, 0, 0, 0)
+        self.play_row.setLayout(prow)
+        body.addWidget(self.play_row)
+
+        # Default player for Explorer: register with Windows, then the user
+        # confirms in Settings (Windows allows no other way).
+        info = QVBoxLayout()
+        info.setSpacing(0)
+        info.addWidget(BodyLabel("Default player in Windows"))
+        self.lbl_default = muted(CaptionLabel())
+        self.lbl_default.setWordWrap(True)
+        info.addWidget(self.lbl_default)
+        self.btn_make_default = PushButton(FIF.PIN, "Make default player")
+        self.btn_make_default.setToolTip("One permission prompt; Windows switches .mp4 and .mkv "
+                                         "to mpv.net at your next sign-in.")
+        self.btn_make_default.clicked.connect(self.make_default_player)
+        self.btn_default_now = PushButton(FIF.SETTING, "Set it now in Settings")
+        self.btn_default_now.setToolTip("Don't want to wait for the next sign-in? Click .mp4 and "
+                                        ".mkv on mpv.net's page and choose \"Set default\".")
+        self.btn_default_now.clicked.connect(self._open_default_settings)
+        self.btn_stop_default = PushButton(FIF.CANCEL, "Stop managing")
+        self.btn_stop_default.setToolTip("Remove the setting that re-applies mpv.net at every "
+                                         "sign-in.")
+        self.btn_stop_default.clicked.connect(self.stop_managing_default)
+        self.default_row = QWidget()
+        self.default_row.setStyleSheet("background:transparent;")
+        row = self._button_row(self.btn_default_now, self.btn_stop_default,
+                               self.btn_make_default, leading=info)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.default_row.setLayout(row)
+        body.addWidget(self.default_row)
+
+        self._register_thread = None
+        # Coming back from Settings: show the new state straight away.
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_app_state)
         return card
+
+    def _on_app_state(self, state):
+        if (state == Qt.ApplicationState.ApplicationActive and self.isVisible()
+                and self._exe and self._register_thread is None):
+            self._refresh_default()
+
+    def _on_play_switch(self, on):
+        from utils.config import app_settings, config_lock, save_config
+        with config_lock:
+            app_settings[mpvnet.PLAY_SETTING] = bool(on)
+        save_config()
 
     def _build_shader_card(self):
         card, body, self.shader_pill, _ = self._card(
@@ -196,6 +295,7 @@ class PlayerWidget(QWidget):
         body.addWidget(section_label("Profiles"))
         panels = QHBoxLayout()
         panels.setSpacing(12)
+        self._panels = panels          # side by side; stacked on narrow windows
         self._profile_when = {}
         for name, stems in mpvnet.bundled_profiles():
             panels.addWidget(self._profile_panel(name, stems), 1)
@@ -263,10 +363,21 @@ class PlayerWidget(QWidget):
             label.setToolTip(f"{stem}.glsl")
             row.addWidget(label)
             row.addStretch(1)
-            row.addWidget(muted(CaptionLabel(purpose)))
+            purpose_label = muted(CaptionLabel(purpose))
+            purpose_label.setWordWrap(False)   # a few words; wrapping split them needlessly
+            row.addWidget(purpose_label)
             box.addLayout(row)
         box.addStretch(1)
         return panel
+
+    STACK_PANELS_BELOW = 860   # px of tab width: under this the two profiles stack
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        direction = (QHBoxLayout.Direction.TopToBottom if self.width() < self.STACK_PANELS_BELOW
+                     else QHBoxLayout.Direction.LeftToRight)
+        if self._panels.direction() != direction:
+            self._panels.setDirection(direction)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -298,6 +409,7 @@ class PlayerWidget(QWidget):
         self.btn_install.setVisible(not exe)
         self.btn_install.setEnabled(not installing and has_winget)
         self.btn_open_player.setVisible(bool(exe))
+        self._refresh_default()
 
         folder = mpvnet.anime_folder_name(app_settings.get("download_dir"))
         for name, label in self._profile_when.items():
@@ -312,6 +424,106 @@ class PlayerWidget(QWidget):
         self.btn_apply.setEnabled(bool(exe))
         self.btn_apply.setToolTip("" if exe else "Install mpv.net first")
         self.btn_open_config.setEnabled(os.path.isdir(cfg))
+
+    # ---------------------------------------------------- default player
+
+    def _refresh_default(self):
+        """Returns True when mpv.net opens every file type the app downloads."""
+        for w in (self.default_divider, self.play_row, self.default_row):
+            w.setVisible(bool(self._exe))
+        if not self._exe:
+            return False
+        state, text = describe_default(mpvnet.default_player_status())
+        busy = self._register_thread is not None
+        managed = mpvnet.policy_active()
+        if busy:
+            text = getattr(self, "_busy_text", "") or "Waiting for Windows…"
+        elif managed and state == "ok":
+            text += " Kept that way at every sign-in."
+        elif managed:
+            text = ("Policy active. Awaiting sign-in or restart to apply fully.")
+        self.lbl_default.setText(text)
+        self.btn_make_default.setVisible(state != "ok" and not managed)
+        self.btn_make_default.setEnabled(not busy)
+        self.btn_default_now.setVisible(state != "ok" and managed and not busy)
+        self.btn_stop_default.setVisible(managed)
+        self.btn_stop_default.setEnabled(not busy)
+        return state == "ok"
+
+    def _run_elevated(self, fn, *args, then, busy_text="Waiting for Windows to grant permission…"):
+        self._busy_text = busy_text
+        if self._register_thread is not None:
+            return
+        self._register_thread = ElevatedThread(fn, *args, parent=self)
+        self._register_thread.done.connect(then)
+        self._register_thread.start()
+        self._refresh_default()
+
+    def _finish_elevated(self, code):
+        """Common end of an elevated step; False when it was declined."""
+        thread, self._register_thread = self._register_thread, None
+        if thread is not None:
+            thread.deleteLater()
+        self._refresh_default()
+        if code == mpvnet.ERROR_CANCELLED:
+            InfoBar.warning("Not changed", "Windows' permission prompt was declined.",
+                            duration=4000, position=InfoBarPosition.TOP, parent=self)
+            return False
+        return True
+
+    def make_default_player(self):
+        """One admin prompt: repair mpv.net's registration if it is missing or from
+        an older install, and set Windows' default-associations policy, which
+        Windows applies itself at sign-in. (Windows 11 blocks every way for an app
+        to switch the default immediately -- see utils/mpvnet.py.)"""
+        if self._exe:
+            self._run_elevated(mpvnet.enable_default_policy, self._exe,
+                               then=self._on_policy_enabled)
+
+    def _on_policy_enabled(self, code):
+        if not self._finish_elevated(code):
+            return
+        if not (mpvnet.policy_active() and mpvnet.is_registered(self._exe)):
+            InfoBar.error("Couldn't set mpv.net as the default",
+                          f"The setup step exited with code {code}. \"Play downloads in "
+                          "mpv.net\" works without this.",
+                          duration=-1, position=InfoBarPosition.TOP, parent=self)
+            return
+        if all(mpvnet.default_player_status().values()):
+            InfoBar.success("mpv.net is now your default player",
+                            "All .mp4 and .mkv files will open in mpv.net automatically. "
+                            "This setting is protected and applied instantly.",
+                            duration=5000, position=InfoBarPosition.TOP, parent=self)
+        else:
+            InfoBar.warning("Partially applied",
+                            "The Group Policy is active but the instant application failed. "
+                            "It will take effect at your next sign-in.",
+                            duration=8000, position=InfoBarPosition.TOP, parent=self)
+
+    def _open_default_settings(self):
+        """Immediate alternative: mpv.net's page in Settings, where the user clicks
+        each type and "Set default"."""
+        try:
+            os.startfile(mpvnet.default_apps_uri())
+        except OSError:
+            os.startfile("ms-settings:defaultapps")
+        InfoBar.info("In Settings", "Click .mp4, choose mpv.net, \"Set default\"; then the same "
+                     "for .mkv. This tab updates when you come back.",
+                     duration=10000, position=InfoBarPosition.TOP, parent=self)
+
+    def stop_managing_default(self):
+        self._run_elevated(mpvnet.disable_default_policy, then=self._on_policy_disabled)
+
+    def _on_policy_disabled(self, code):
+        if not self._finish_elevated(code):
+            return
+        if mpvnet.policy_active():
+            InfoBar.error("Couldn't remove the setting", f"Exited with code {code}.",
+                          duration=-1, position=InfoBarPosition.TOP, parent=self)
+            return
+        InfoBar.success("No longer managed",
+                        "mpv.net stays the default until you pick another player.",
+                        duration=5000, position=InfoBarPosition.TOP, parent=self)
 
     # ----------------------------------------------------------- install
 

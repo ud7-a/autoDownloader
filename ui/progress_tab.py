@@ -78,7 +78,7 @@ class ProgressTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setContentsMargins(30, 20, 30, 20)
 
         self.stack = QStackedWidget()
         
@@ -215,31 +215,37 @@ class ProgressTab(QWidget):
         v.setContentsMargins(15, 12, 15, 12)
         v.setSpacing(8)
 
+        # Title and hint share a line, and all three settings share a row: the panel
+        # has to fit a 520 px-tall window with the progress bar and buttons below.
+        head_row = QHBoxLayout()
+        head_row.setSpacing(10)
         head = QLabel("While paused")
         head.setStyleSheet("font-size: 15px; font-weight: bold; color: #ffffff;")
         sub = QLabel("Changes take effect when you press Resume.")
         sub.setStyleSheet("color: #999999; font-size: 12px;")
-        v.addWidget(head)
-        v.addWidget(sub)
+        head_row.addWidget(head)
+        head_row.addWidget(sub, 1, Qt.AlignmentFlag.AlignVCenter)
+        v.addLayout(head_row)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Concurrent downloads"))
         self.spin_paused_limit = SpinBox()
         self.spin_paused_limit.setRange(1, 6)
-        self.chk_paused_auto = CheckBox("Choose automatically")
+        self.chk_paused_auto = CheckBox("Auto")
+        self.chk_paused_auto.setToolTip("Choose the number automatically from your connection speed.")
         self.chk_paused_auto.toggled.connect(
             lambda on: self.spin_paused_limit.setEnabled(not on))
         row.addWidget(self.spin_paused_limit)
         row.addSpacing(10)
         row.addWidget(self.chk_paused_auto)
+        row.addSpacing(24)
+        self.chk_paused_headless = CheckBox("Hidden browser")
+        self.chk_paused_headless.setToolTip(
+            "Run the browser invisibly (headless). It restarts before the next episode; "
+            "downloads already running are not affected.")
+        row.addWidget(self.chk_paused_headless)
         row.addStretch(1)
         v.addLayout(row)
-
-        self.chk_paused_headless = CheckBox("Run invisibly (headless)")
-        self.chk_paused_headless.setToolTip(
-            "The browser restarts before the next episode. Downloads already running "
-            "are not affected.")
-        v.addWidget(self.chk_paused_headless)
 
         self.lbl_paused_eps = QLabel("Episodes not started yet")
         self.lbl_paused_eps.setStyleSheet("color: #ffffff; font-weight: bold; margin-top: 4px;")

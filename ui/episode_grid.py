@@ -7,7 +7,7 @@ past the window. Painting costs the same at any size and only redraws what's vis
 import math
 
 from PyQt6.QtCore import Qt, QRectF, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QInputDevice, QPainter, QPen
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy
 from qfluentwidgets import (SmoothScrollArea, LineEdit, PushButton, FluentIcon as FIF,
                             themeColor, getFont)
@@ -37,6 +37,7 @@ class EpisodeGrid(QWidget):
         self._anchor = None
         self._drag_state = None
         self._drag_last = None
+        self._touch_pending = None       # episode a finger is on, toggled on lift
         # Same font as the Fluent widgets around it (CheckBox, buttons).
         self.setFont(getFont(13))
         self.setMouseTracking(True)
@@ -156,6 +157,11 @@ class EpisodeGrid(QWidget):
         i = self.index_at(event.position())
         if i is None:
             return
+        if self._from_touch(event):
+            # A finger toggles on lift, not on contact: the touch may still turn
+            # into a scroll (ui.touch), and then nothing should change.
+            self._touch_pending = i
+            return
         if event.modifiers() & Qt.KeyboardModifier.ShiftModifier and self._anchor is not None:
             changed = self._set_range(self._anchor, i, self._sel[self._anchor])
         else:
@@ -167,10 +173,17 @@ class EpisodeGrid(QWidget):
         if changed:
             self.changed.emit()
 
+    @staticmethod
+    def _from_touch(event):
+        """Clicks Qt made from a finger tap: there is no hover to show for those."""
+        device = event.device() if hasattr(event, "device") else None
+        return device is not None and device.type() == QInputDevice.DeviceType.TouchScreen
+
     def mouseMoveEvent(self, event):
         i = self.index_at(event.position())
-        if i != self._hover:
-            self._hover = i
+        hover = None if self._from_touch(event) else i
+        if hover != self._hover:
+            self._hover = hover
             self.update()
         if self._drag_state is None or i is None or i == self._drag_last:
             return
@@ -184,6 +197,16 @@ class EpisodeGrid(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_state = None
         self._drag_last = None
+        pending, self._touch_pending = self._touch_pending, None
+        if pending is not None and self.index_at(event.position()) == pending:
+            # A tap: lifted on the episode it started on (a scroll releases elsewhere).
+            self._anchor = pending
+            self._set_range(pending, pending, not self._sel[pending])
+            self.update()
+            self.changed.emit()
+        if self._from_touch(event) and self._hover is not None:
+            self._hover = None          # a finger leaves no pointer behind
+            self.update()
         super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event):
@@ -197,7 +220,7 @@ class EpisodePicker(QWidget):
     ("13-40, 45") that stays in sync with the grid."""
 
     changed = pyqtSignal()
-    MIN_GRID_HEIGHT = 2 * (CELL_H + GAP) + 18   # always room for ~2.5 rows
+    MIN_GRID_HEIGHT = CELL_H + GAP + 18         # at least ~1.5 rows on a short window
 
     def __init__(self, parent=None):
         super().__init__(parent)

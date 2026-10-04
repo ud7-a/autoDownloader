@@ -99,16 +99,22 @@ def _play_first_video(folder, parent=None, episodes=None):
     except Exception:
         videos = []
 
-    target = next((p for p in _episode_files(folder, episodes).values() if p), None)
+    # The session's episodes in order: the first is played, the rest are queued
+    # (mpv.net takes them as a playlist; another player just gets the first).
+    playlist = [p for p in _episode_files(folder, episodes).values() if p]
 
-    if target is None:
+    if not playlist:
         def natural_key(path):
             name = os.path.basename(path)
             return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)]
-        target = sorted(videos, key=natural_key)[0] if videos else folder
+        playlist = sorted(videos, key=natural_key)[:1]
 
     try:
-        os.startfile(target)
+        if playlist:
+            from utils.mpvnet import open_videos
+            open_videos(playlist)
+        else:
+            os.startfile(folder)
     except Exception as e:
         warn("Playback Error", f"Could not open it: {e}")
 
@@ -119,7 +125,9 @@ class AppWindow(FluentWindow):
 
         self.setWindowTitle(f"Auto Episodes Downloader | Version {APP_VERSION}")
 
-        self.setMinimumSize(1100, 700)
+        # Small enough for a 1080p laptop at 150% scaling (1280x720 usable) or
+        # 1280x720 at 125%; every tab is laid out to fit this (see ui/responsive.py).
+        self.setMinimumSize(860, 520)
 
         # Load saved window position/geometry
         desktop = QApplication.primaryScreen().availableGeometry()
@@ -158,6 +166,16 @@ class AppWindow(FluentWindow):
         self.history_interface.setObjectName("history_interface")
         self.watchlist_interface.setObjectName("watchlist_interface")
         self.player_interface.setObjectName("player_interface")
+
+        # Wide windows: centre each tab in a readable column instead of stretching
+        # forms across a 2560 px screen. Search and History hold grids/tables that
+        # use the extra room, so they get a wider column.
+        from ui.responsive import cap_width
+        self._width_caps = [cap_width(page, width) for page, width in (
+            (self.downloader_interface, 1100), (self.manager_interface, 1300),
+            (self.watchlist_interface, 1300), (self.player_interface, 1200),
+            (self.progress_interface, 1300), (self.search_interface, 1700),
+            (self.history_interface, 1600))]
 
         # Track if the progress tab has been added yet
         self.progress_added = False

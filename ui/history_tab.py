@@ -5,7 +5,9 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QHeaderView, QTab
 from PyQt6.QtGui import QColor
 
 # THE UPGRADE: Fluent Components
-from qfluentwidgets import TableWidget, PushButton, SubtitleLabel, MessageBox, FluentIcon as FIF, InfoBar, InfoBarPosition
+from qfluentwidgets import (TableWidget, PushButton, ToolButton, SubtitleLabel, MessageBox,
+                            FluentIcon as FIF, InfoBar, InfoBarPosition, ToolTipFilter,
+                            ToolTipPosition)
 
 from utils.config import DB_FILE
 from utils.database import db_lock
@@ -50,6 +52,7 @@ class HistoryWidget(QWidget):
         # Rebuild the visible rows' action buttons as the user scrolls.
         self._action_rows = set()
         self._row_meta = []
+        self._compact = False
         self.table.verticalScrollBar().valueChanged.connect(self._sync_action_widgets)
 
         # Still asks before deleting (see clear_history).
@@ -112,6 +115,7 @@ class HistoryWidget(QWidget):
                     for col_idx, item_data in enumerate(row_data):
                         item = QTableWidgetItem(str(item_data))
                         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        item.setToolTip(str(item_data))   # full text when the column is narrow
 
                         if col_idx == 3:
                             if item_data == "Success": item.setForeground(QColor("#2ecc71"))
@@ -140,11 +144,20 @@ class HistoryWidget(QWidget):
         cl = QHBoxLayout(cell)
         cl.setContentsMargins(4, 2, 4, 2)
         cl.setSpacing(6)
-        play_btn = PushButton(FIF.PLAY, "Watch")
+        if self._compact:
+            # Narrow window: icon buttons, so Profile and Notes keep readable widths.
+            play_btn = ToolButton(FIF.PLAY)
+            re_btn = ToolButton(FIF.SYNC)
+            play_btn.setToolTip("Watch")
+            re_btn.setToolTip("Re-download")
+            for btn in (play_btn, re_btn):
+                btn.installEventFilter(ToolTipFilter(btn, 300, ToolTipPosition.TOP))
+        else:
+            play_btn = PushButton(FIF.PLAY, "Watch")
+            re_btn = PushButton(FIF.SYNC, "Re-download")
         play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         play_btn.setFixedHeight(28)
         play_btn.clicked.connect(lambda checked, r=row_idx: self.play_download(r))
-        re_btn = PushButton(FIF.SYNC, "Re-download")
         re_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         re_btn.setFixedHeight(28)
         re_btn.clicked.connect(lambda checked, p=prof, e=eps: self.redownload_signal.emit(p, e))
@@ -180,8 +193,16 @@ class HistoryWidget(QWidget):
             self.table.setCellWidget(row, 5, self._make_action_cell(row))
         self._action_rows = wanted
 
+    COMPACT_BELOW = 1050   # table width (px) under which the action buttons lose their text
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        compact = self.table.width() < self.COMPACT_BELOW
+        if compact != self._compact:
+            self._compact = compact
+            for row in self._action_rows:          # rebuild in the other style
+                self.table.removeCellWidget(row, 5)
+            self._action_rows = set()
         self._sync_action_widgets()
 
     def play_download(self, row):
@@ -255,7 +276,8 @@ class HistoryWidget(QWidget):
                 
             if selected_video:
                 try:
-                    os.startfile(selected_video)
+                    from utils.mpvnet import open_videos
+                    open_videos([selected_video])
                 except Exception as e:
                     InfoBar.warning(
                         title="Playback Error",

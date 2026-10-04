@@ -298,6 +298,9 @@ if __name__ == "__main__":
     _startup_mark("ui.app_window imported")
     window = AppWindow(autostart_commands=initial_commands)
     _startup_mark("AppWindow built")
+    # Finger drags scroll the pages and lists (Qt treats them as mouse drags otherwise).
+    from ui.touch import install as _install_touch
+    _install_touch(app)
     window.showNormal()
     window.raise_()
     window.activateWindow()

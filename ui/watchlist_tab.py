@@ -367,8 +367,8 @@ class CloudSettingsDialog(MessageBoxBase):
 
         self.wh_label = BodyLabel("Discord Webhook URL:", self)
         # Masked like the Downloader's copy: the URL alone is enough to post there.
-        from qfluentwidgets import PasswordLineEdit
-        self.wh_input = PasswordLineEdit(self)
+        from ui.secret_field import SecretLineEdit
+        self.wh_input = SecretLineEdit(self)
         self.wh_input.setPlaceholderText("https://discord.com/api/webhooks/...")
         self.wh_input.setText(app_settings.get("discord_webhook", ""))
 
