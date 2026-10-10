@@ -5067,6 +5067,62 @@ class LibraryEdgeCaseTests(unittest.TestCase):
         self.assertEqual(["P3", "P4", "P5"], rows)
 
 
+class DiscordRepeatTests(unittest.TestCase):
+    """One new episode, one Discord message. The 30-minute check re-posted the same
+    episode every half hour until it was downloaded from the Watchlist, and posted
+    a second copy beside the cloud service's own."""
+
+    W = {"url": "https://witanime.site/anime/black-clover-2nd-season/", "domain": "witanime.site",
+         "seen_max": 1, "latest_max": 2}
+    A = {"url": "https://eta.animerco.org/animes/x/", "domain": "eta.animerco.org", "seen_max": 1}
+
+    def test_each_episode_is_announced_once(self):
+        from ui.watchlist_tab import episodes_to_announce
+        self.assertEqual([2], episodes_to_announce(self.A, 2, cloud_on=False))
+        self.assertEqual([], episodes_to_announce(dict(self.A, notified_max=2), 2, cloud_on=False))
+        self.assertEqual([3, 4], episodes_to_announce(dict(self.A, notified_max=2), 4, cloud_on=False))
+        self.assertEqual([], episodes_to_announce(dict(self.A, seen_max=None), 2, cloud_on=False))
+
+    def test_cloud_announces_the_sites_it_checks(self):
+        from ui.watchlist_tab import episodes_to_announce
+        self.assertEqual([], episodes_to_announce(self.W, 2, cloud_on=True))
+        self.assertEqual([2], episodes_to_announce(self.W, 2, cloud_on=False))
+        self.assertEqual([2], episodes_to_announce(self.A, 2, cloud_on=True))   # cloud can't reach it
+
+    def test_a_check_records_what_was_announced(self):
+        from unittest import mock
+        from ui import watchlist_tab as wt
+        store = [dict(self.A)]
+        updates = []
+
+        def update(url, **fields):
+            updates.append(fields)
+            store[0].update(fields)
+
+        fake = mock.MagicMock()
+        fake._cards = {}
+        with mock.patch.object(wt, "update_watch", side_effect=update), \
+                mock.patch.object(wt, "get_watchlist", return_value=store), \
+                mock.patch.dict(wt.app_settings, {"discord_webhook": "", "cloud_notify_enabled": False}), \
+                mock.patch("ui.search_tab.raise_episode_bound", return_value=None):
+            for _ in range(4):                                 # four half-hourly checks
+                wt.WatchlistWidget._on_entry_done(fake, self.A["url"], 2, 1, "", False)
+        self.assertEqual(2, store[0]["notified_max"])
+        self.assertEqual(1, sum(1 for u in updates if "notified_max" in u))
+
+    def test_a_discord_download_counts_the_episodes_as_taken(self):
+        from unittest import mock
+        from ui.app_window import AppWindow
+        fake = mock.MagicMock()
+        fake.watchlist_interface = None
+        with mock.patch("utils.config.update_watch") as update:
+            AppWindow._acknowledge_remote(fake, dict(self.W, seen_max=1, latest_max=3), "2")
+            update.assert_called_once_with(self.W["url"], seen_max=2, new_count=1, notified_max=2)
+            update.reset_mock()
+            AppWindow._acknowledge_remote(fake, dict(self.W, seen_max=1, latest_max=3), "3")
+            update.assert_not_called()                     # ep 2 skipped: stays new
+
+
 class DeferredTabsTests(unittest.TestCase):
     """The window opens with only the Downloader built; the other tabs are built
     after the first paint, or at once when one is clicked before that."""

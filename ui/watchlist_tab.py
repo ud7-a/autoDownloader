@@ -66,6 +66,33 @@ def entries_airing_today(entries, today):
             if not w.get("release_day") or w.get("release_day") == today]
 
 
+# Sites the cloud service checks and announces on Discord by itself. animerco
+# blocks requests from cloud servers, so its anime are still announced by the app.
+CLOUD_CHECKED_SITES = ("witanime",)
+
+
+def episodes_to_announce(entry, latest_max, cloud_on):
+    """The episodes the app should post to Discord after a check: each new episode
+    once, ever.
+
+    The check runs every 30 minutes, and "new" (latest_max > seen_max) stays true
+    until the episodes are downloaded from the Watchlist -- so announcing every
+    "new" episode re-posted the same one every half hour. notified_max remembers
+    what was already announced. With cloud notifications on, the cloud announces
+    the sites it checks itself (with its download button), so the app stays quiet
+    for those instead of posting a second copy."""
+    seen = entry.get("seen_max")
+    if seen is None:
+        return []                                  # first check: just the baseline
+    start = max(int(seen or 0), int(entry.get("notified_max") or 0))
+    if latest_max <= start:
+        return []
+    where = (entry.get("domain") or entry.get("url") or "").lower()
+    if cloud_on and any(site in where for site in CLOUD_CHECKED_SITES):
+        return []
+    return list(range(start + 1, latest_max + 1))
+
+
 # Covers saved this session, kept decoded. A card built right after Follow would
 # otherwise open the file that was written a moment earlier, on the GUI thread --
 # and the first read of freshly written image bytes on Windows can take seconds
@@ -786,21 +813,30 @@ class WatchlistWidget(QWidget):
         if card:
             card.apply_entry(entry)
 
-        # Dispatch Discord release notification if webhook is configured
-        if new_count > 0 and not first_time:
+        # Discord: each new episode once (see episodes_to_announce).
+        if new_count > 0 and not first_time and entry:
+            cloud_on = bool(app_settings.get("cloud_notify_enabled")
+                            and app_settings.get("cloud_subscriber_id"))
+            episodes = episodes_to_announce(entry, latest_max, cloud_on)
+            prior = max(int(entry.get("seen_max") or 0), int(entry.get("notified_max") or 0))
+            if latest_max > prior:
+                # Recorded before sending, whether or not the app posts them: a
+                # check that overlaps this one, or the next one, must not post again.
+                update_watch(url, notified_max=latest_max)
             webhook = app_settings.get("discord_webhook", "").strip()
-            if webhook:
+            if episodes and webhook:
                 anime_title = entry.get("title") or url
-                seen = entry.get("seen_max") or 0
                 import threading
                 # The app's own sender, never the cloud service's: importing
                 # service.checker here killed the installed app (see utils/discord_notify).
                 from utils.discord_notify import release_embed, send
-                def _bg_notify(title, a_url, s_max, l_max, wh):
-                    for ep in range(s_max + 1, l_max + 1):
+
+                def _bg_notify(title, a_url, eps, wh):
+                    for ep in eps:
                         send(wh, release_embed(title, a_url, ep))
                         time.sleep(0.2)
-                threading.Thread(target=_bg_notify, args=(anime_title, url, seen, latest_max, webhook), daemon=True).start()
+                threading.Thread(target=_bg_notify, args=(anime_title, url, episodes, webhook),
+                                 daemon=True).start()
 
     def refresh_schedule(self):
         """Look up each followed anime's release day from the sites' schedule pages."""

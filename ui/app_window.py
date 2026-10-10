@@ -369,6 +369,7 @@ class AppWindow(FluentWindow):
             key = (url, ep_spec)
             if key not in seen_keys:
                 seen_keys.add(key)
+                self._acknowledge_remote(entry, ep_spec)
                 template = entry.get("latest_template") if entry else ""
                 domain = entry.get("domain") if entry else ("witanime" if "witanime" in url else "animerco")
                 if not template:
@@ -377,6 +378,27 @@ class AppWindow(FluentWindow):
 
         if items_to_download:
             self._queue_remote_downloads(items_to_download)
+
+    def _acknowledge_remote(self, entry, ep_spec):
+        """Episodes asked for from Discord count as taken, the way "Download new"
+        in the Watchlist counts them. Before this they stayed "new": the card kept
+        offering them, and every 30-minute check flagged them again.
+
+        seen_max only moves across an unbroken run from the last seen episode, as
+        in the Watchlist's own picker, so a skipped episode stays flagged."""
+        from ui.downloader_tab import spec_to_ranges
+        from utils.config import update_watch
+        wanted = {e for a, b in spec_to_ranges(ep_spec) for e in range(a, b + 1)}
+        seen = new_seen = int(entry.get("seen_max") or 0)
+        while new_seen + 1 in wanted:
+            new_seen += 1
+        if new_seen == seen:
+            return
+        latest = int(entry.get("latest_max") or 0)
+        update_watch(entry["url"], seen_max=new_seen, new_count=max(0, latest - new_seen),
+                     notified_max=max(new_seen, int(entry.get("notified_max") or 0)))
+        if self.watchlist_interface is not None:
+            self.watchlist_interface.refresh_cards()
 
     @staticmethod
     def _download_key(item):
