@@ -5143,8 +5143,19 @@ class DeferredTabsTests(unittest.TestCase):
         patch = mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json"))
         patch.start()
         self.addCleanup(patch.stop)
+        # No Watchlist: with entries, building the tabs schedules the 8-second
+        # Watchlist check, which fired during later tests and started a real
+        # headless Chrome that outlived the run (and held its output pipe open).
+        no_watchlist = mock.patch("ui.app_window.get_watchlist", return_value=[])
+        no_watchlist.start()
+        self.addCleanup(no_watchlist.stop)
         w = AppWindow()
-        self.addCleanup(w.deleteLater)
+
+        def dispose():
+            w._tabs_built = True          # the 1.5 s fallback must not build them later
+            w.hide()
+            w.deleteLater()
+        self.addCleanup(dispose)
         return w
 
     def test_only_the_downloader_is_built_up_front(self):
