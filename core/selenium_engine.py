@@ -840,32 +840,17 @@ def create_browser(download_dir, headless=True):
     options.add_argument("--no-default-browser-check")
     options.add_argument("--mute-audio")
 
+    from core.window_guard import WindowGuard
+    guard = WindowGuard(headless=headless, profile_dir=PROFILE_DIR)
+    if headless:
+        guard.start_prelaunch()
+
     service = Service()
     service.creation_flags = CREATE_NO_WINDOW
     driver = webdriver.Chrome(options=options, service=service)
     
     if headless:
-        try:
-            import ctypes
-            from ctypes import wintypes
-            user32 = ctypes.windll.user32
-            SW_HIDE = 0
-            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-            class _RECT(ctypes.Structure):
-                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-            def _hide_offscreen(hwnd, _):
-                buf = ctypes.create_unicode_buffer(256)
-                user32.GetClassNameW(hwnd, buf, 256)
-                if buf.value == "Chrome_WidgetWin_1":
-                    rect = _RECT()
-                    user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                    if rect.left <= -5000 and rect.top <= -5000:
-                        user32.ShowWindow(hwnd, SW_HIDE)
-                return True
-            user32.EnumWindows(WNDENUMPROC(_hide_offscreen), 0)
-        except Exception:
-            pass
+        guard.attach_driver(driver)
         
     driver.set_page_load_timeout(45)
     # The two blockers do different jobs, so both are applied rather than one being
@@ -1926,10 +1911,13 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                     if handle == keeper:
                                         continue
                                     try:
-                                        driver.switch_to.window(handle)
-                                        driver.close()
+                                        driver.execute_cdp_cmd("Target.closeTarget", {"targetId": handle})
                                     except Exception:
-                                        pass
+                                        try:
+                                            driver.switch_to.window(handle)
+                                            driver.close()
+                                        except Exception:
+                                            pass
 
                                 try:
                                     driver.switch_to.window(keeper or driver.window_handles[0])
@@ -2135,10 +2123,13 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                 base = handles[0]
                 for h in handles[1:]:
                     try:
-                        driver.switch_to.window(h)
-                        driver.close()
+                        driver.execute_cdp_cmd("Target.closeTarget", {"targetId": h})
                     except Exception:
-                        pass
+                        try:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        except Exception:
+                            pass
                 driver.switch_to.window(base)
             except Exception:
                 pass

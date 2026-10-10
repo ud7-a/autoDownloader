@@ -1949,6 +1949,144 @@ class WitAnimeBrowserModeTests(unittest.TestCase):
                 eng._PENDING_ADJUST.clear()
 
 
+class WindowGuardTests(unittest.TestCase):
+    def test_window_guard_headless_flag(self):
+        from core.window_guard import WindowGuard
+        guard_visible = WindowGuard(headless=False)
+        self.assertFalse(guard_visible.headless)
+
+        guard_hidden = WindowGuard(headless=True)
+        # On Windows, headless=True enables guard
+        import sys
+        if sys.platform == "win32":
+            self.assertTrue(guard_hidden.headless)
+
+    def test_window_guard_suppresses_only_target_windows(self):
+        from unittest import mock
+        from core.window_guard import (
+            WindowGuard, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW,
+            SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE
+        )
+
+        guard = WindowGuard(headless=True)
+        guard.target_pids = {9999}
+        guard.prelaunch = False
+        guard.last_user_fg = 1234  # User was typing in window 1234
+
+        # Window 1: Our Chrome window (PID 9999, class Chrome_WidgetWin_1, on screen at 100, 100)
+        # Window 2: User's personal Chrome (PID 1111, class Chrome_WidgetWin_1, on screen at 200, 200)
+        # Window 3: Notepad (PID 2222, class Notepad, on screen)
+        # Window 4: Our Chrome popup window that stole foreground (PID 9999, class Chrome_WidgetWin_1)
+
+        set_styles = {}
+        moved_windows = {}
+        hidden_windows = []
+        restored_fgs = []
+
+        class MockUser32:
+            def GetForegroundWindow(self):
+                return 4  # Window 4 stole foreground
+
+            def GetWindowThreadProcessId(self, hwnd, pid_ref):
+                pid_map = {1: 9999, 2: 1111, 3: 2222, 4: 9999}
+                pid_ref._obj.value = pid_map.get(hwnd, 0)
+                return 1
+
+            def GetClassNameW(self, hwnd, buf, maxlen):
+                cls_map = {1: "Chrome_WidgetWin_1", 2: "Chrome_WidgetWin_1", 3: "Notepad", 4: "Chrome_WidgetWin_1"}
+                buf.value = cls_map.get(hwnd, "")
+                return len(buf.value)
+
+            def GetWindowRect(self, hwnd, rect_ref):
+                if hwnd == 1:
+                    rect_ref._obj.left, rect_ref._obj.top = 100, 100
+                elif hwnd == 2:
+                    rect_ref._obj.left, rect_ref._obj.top = 200, 200
+                elif hwnd == 4:
+                    rect_ref._obj.left, rect_ref._obj.top = 50, 50
+
+            def SetWindowPos(self, hwnd, insert_after, x, y, cx, cy, flags):
+                moved_windows[hwnd] = (x, y, flags)
+
+            def IsWindowVisible(self, hwnd):
+                return True
+
+            def ShowWindow(self, hwnd, cmd):
+                hidden_windows.append((hwnd, cmd))
+
+            def EnumWindows(self, cb, lparam):
+                for h in [1, 2, 3, 4]:
+                    cb(h, lparam)
+                return True
+
+        mock_user = MockUser32()
+
+        def mock_get_long(hwnd, idx):
+            return WS_EX_APPWINDOW
+
+        def mock_set_long(hwnd, idx, val):
+            set_styles[hwnd] = val
+            return val
+
+        with mock.patch("core.window_guard.user32", mock_user), \
+             mock.patch("core.window_guard.GetWindowLongPtrW", mock_get_long), \
+             mock.patch("core.window_guard.SetWindowLongPtrW", mock_set_long), \
+             mock.patch("core.window_guard.restore_foreground", lambda h: restored_fgs.append(h)):
+            guard.suppress_windows()
+
+        # Window 1 (ours): style updated to NOACTIVATE | TOOLWINDOW, moved to (-32000, -32000), hidden
+        self.assertIn(1, set_styles)
+        self.assertTrue(set_styles[1] & WS_EX_NOACTIVATE)
+        self.assertTrue(set_styles[1] & WS_EX_TOOLWINDOW)
+        self.assertFalse(set_styles[1] & WS_EX_APPWINDOW)
+        self.assertEqual(moved_windows[1], (-32000, -32000, SWP_NOACTIVATE | SWP_NOZORDER))
+        self.assertIn((1, SW_HIDE), hidden_windows)
+
+        # Window 2 (user's personal Chrome): NEVER TOUCHED!
+        self.assertNotIn(2, set_styles)
+        self.assertNotIn(2, moved_windows)
+        self.assertNotIn((2, SW_HIDE), hidden_windows)
+
+        # Window 3 (Notepad): NEVER TOUCHED!
+        self.assertNotIn(3, set_styles)
+        self.assertNotIn(3, moved_windows)
+
+        # Window 4 (our popup that stole FG): suppressed AND restored user's previous foreground!
+        self.assertIn(4, set_styles)
+        self.assertIn(1234, restored_fgs)
+
+    def test_window_guard_driver_wrapping(self):
+        from unittest import mock
+        from core.window_guard import WindowGuard
+
+        guard = WindowGuard(headless=True)
+        mock_driver = mock.MagicMock()
+        mock_driver.service.process.pid = 5555
+
+        orig_switch = mock_driver.switch_to.window
+        orig_quit = mock_driver.quit
+
+        with mock.patch.object(guard, "suppress_windows") as mock_suppress, \
+             mock.patch("core.window_guard.get_session_chrome_pids", return_value={5555}):
+            guard.attach_driver(mock_driver)
+
+            # Target PIDs mapped
+            self.assertIn(5555, guard.target_pids)
+            self.assertFalse(guard.prelaunch)
+            self.assertTrue(mock_suppress.called)
+
+            # Test switch_to.window wrapper
+            mock_suppress.reset_mock()
+            mock_driver.switch_to.window("tab-2")
+            orig_switch.assert_called_with("tab-2")
+            self.assertTrue(mock_suppress.called)
+
+            # Test quit wrapper stops guard
+            with mock.patch.object(guard, "stop") as mock_stop:
+                mock_driver.quit()
+                self.assertTrue(mock_stop.called)
+                self.assertTrue(orig_quit.called)
+
 
 class FinalEpisodeTests(unittest.TestCase):
     def test_detects_witanime_final_marker(self):
