@@ -87,7 +87,11 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         # Working tree only. Nothing is pushed until the build has succeeded, so a
         # failed build leaves no bump commit and no dangling tag to clean up.
-        run: python tools/bump_version.py "${{ steps.v.outputs.version }}"
+        # CHANGELOG.md's Unreleased section becomes this version's (publish.py does
+        # the same on the tag-push path, before the tag exists).
+        run: |
+          python tools/bump_version.py "${{ steps.v.outputs.version }}"
+          python tools/release_notes.py --stamp "${{ steps.v.outputs.version }}"
 
       - name: Build app and installer
         env:
@@ -151,9 +155,18 @@ jobs:
             exit 0
           fi
 
+          # The release body is this version's section of CHANGELOG.md; GitHub's
+          # generated commit list only when the changelog has nothing for it.
+          if python tools/release_notes.py "${{ steps.v.outputs.version }}" > dist/release_notes.md; then
+            notes=(--notes-file dist/release_notes.md)
+          else
+            echo "::warning::CHANGELOG.md has no notes for ${{ steps.v.outputs.version }}; using generated notes."
+            notes=(--generate-notes)
+          fi
+
           if ! gh release create "$tag" "${files[@]}" \
                  --title "Auto Episodes Downloader ${{ steps.v.outputs.version }}" \
-                 --generate-notes \
+                 "${notes[@]}" \
                  ${{ inputs.prerelease && '--prerelease' || '' }}; then
             # A parallel run for the same tag may have published it a moment ago.
             sleep 20

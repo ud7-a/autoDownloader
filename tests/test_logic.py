@@ -5205,6 +5205,41 @@ class LibraryEdgeCaseTests(unittest.TestCase):
         self.assertEqual(["P3", "P4", "P5"], rows)
 
 
+class ReleaseNotesTests(unittest.TestCase):
+    """CHANGELOG.md's section for a version is the GitHub release's text
+    (tools/release_notes.py, used by publish.py and the Release workflow)."""
+
+    LOG = ("# Changelog\n\nIntro.\n\n## Unreleased\n\n### New\n- Library tab\n\n"
+           "## 4.9.1 — 2026-09-30\n\n- Older fix\n")
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "tools"))
+        import release_notes
+        self.rn = release_notes
+
+    def test_stamp_turns_unreleased_into_the_version(self):
+        from datetime import date
+        out = self.rn.stamp(self.LOG, "4.10.0", today=date(2026, 10, 11))
+        self.assertIn("## Unreleased\n\n## 4.10.0 — 2026-10-11\n\n### New\n- Library tab", out)
+        self.assertEqual(out, self.rn.stamp(out, "4.10.0"))          # once only
+        self.assertEqual("### New\n- Library tab\n", self.rn.notes_for(out, "4.10.0"))
+        self.assertEqual("", self.rn.notes_for(out, "4.11.0"))       # new Unreleased is empty
+
+    def test_notes_for_a_version_or_unreleased(self):
+        self.assertEqual("- Older fix\n", self.rn.notes_for(self.LOG, "4.9.1"))
+        self.assertEqual("- Older fix\n", self.rn.notes_for(self.LOG, "v4.9.1".lstrip("v")))
+        self.assertEqual("### New\n- Library tab\n", self.rn.notes_for(self.LOG, "4.10.0"))
+        self.assertNotIn("4.9.10", self.rn.notes_for(self.LOG, "4.9.10"))   # no prefix match
+        empty = "# Changelog\n\n## Unreleased\n\n## 4.9.1\n\n- x\n"
+        self.assertEqual(empty, self.rn.stamp(empty, "4.10.0"))       # nothing to stamp
+
+    def test_the_shipped_changelog_parses(self):
+        with open(self.rn.CHANGELOG, encoding="utf-8") as f:
+            text = f.read()
+        self.assertTrue(any(t.lower() == "unreleased" for t, _b in self.rn._sections(text)))
+
+
 class DiscordRepeatTests(unittest.TestCase):
     """One new episode, one Discord message. The 30-minute check re-posted the same
     episode every half hour until it was downloaded from the Watchlist, and posted
