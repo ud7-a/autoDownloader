@@ -7,7 +7,9 @@ Run:
 ```bash
 python publish.py
 ```
-This tool reads the current version, prompts for a bump (major/minor/patch), commits, pushes, and triggers GitHub Actions to compile and publish the release.
+This tool (kept locally, not in the repository) checks you are on an up-to-date `main`, runs the release checks (lint + unit tests), prompts for a bump (major/minor/patch), shows exactly which files will be published, and on your confirmation commits, pushes and tags the release so GitHub Actions builds and publishes it.
+
+Changes to files already in the repository are always published; **new** files only when they are part of the app (the project's folders and top-level files). Anything else new in the folder is listed as left out and never committed.
 
 ---
 

@@ -155,7 +155,7 @@ python tools/build_release.py --app-only  # just dist/AutoDownloader/
 ```bash
 python publish.py
 ```
-*Prompts for the version bump, commits and tags the release, and pushes; GitHub Actions then builds the installer and portable ZIP and attaches them to the release.*
+*Runs the release checks, prompts for the version bump, shows which files will be published (stray files in the folder are left out), then commits, tags and pushes; GitHub Actions builds the installer and portable ZIP and attaches them to the release. See [`docs/RELEASING.md`](docs/RELEASING.md).*
 
 ---
 
