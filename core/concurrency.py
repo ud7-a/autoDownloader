@@ -25,8 +25,8 @@ class ConcurrencyController:
     MIN_LIMIT = 1
     MAX_LIMIT = 6
 
-    TARGET_LOW = 60.0        # seconds; below this we have headroom
-    TARGET_HIGH = 90.0       # seconds; above this we are over-subscribed
+    TARGET_LOW = 45.0        # seconds; below this we have headroom
+    TARGET_HIGH = 180.0      # seconds; above this we are over-subscribed
     WINDOW = 15.0            # seconds between decisions
     SETTLE_WINDOWS = 2       # windows to wait after a change before deciding again
     FAILURE_COOLDOWN = 60.0  # seconds to stay off the gas after host pushback

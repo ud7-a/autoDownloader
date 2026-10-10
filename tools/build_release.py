@@ -81,6 +81,8 @@ REQUIRED_IN_BUNDLE = [
     os.path.join("_internal", "tools", "unrar.exe"),
     os.path.join("_internal", "tools", "ublock_lite.crx"),
     os.path.join("_internal", "assets", "finishingDownloadSound.wav"),
+    # The mpv.net script the Library's watched-episode tracking depends on.
+    os.path.join("_internal", "assets", "mpvnet", "scripts", "aed-progress.lua"),
 ]
 
 

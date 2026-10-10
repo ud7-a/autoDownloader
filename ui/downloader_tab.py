@@ -17,6 +17,7 @@ from core.signals import signals
 from core.selenium_engine import run_selenium_task, launch_visible_browser
 from ui.styles import apply_danger_style
 from ui.secret_field import SecretLineEdit
+from utils.naming import safe_folder_name
 
 
 # Sentinel stored in selected_sound to mean "no finish sound". Distinct from ""
@@ -192,6 +193,7 @@ class EpisodeRangePicker(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rows = []
+        self._limits = None        # (first, last) episode the anime has, if known
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -224,8 +226,8 @@ class EpisodeRangePicker(QWidget):
         sp_from = SpinBox()
         sp_to = SpinBox()
         for sp, val in ((sp_from, a), (sp_to, b)):
-            sp.setRange(0, 99999)
-            sp.setValue(val)
+            self._apply_limits(sp)
+            sp.setValue(val)          # clamped into the anime's episodes when known
             sp.setMinimumWidth(80)   # keep the up/down arrows off the digits
             sp.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             sp.wheelEvent = lambda e: e.ignore()   # don't change value on scroll
@@ -270,6 +272,26 @@ class EpisodeRangePicker(QWidget):
         for e in self._rows:
             e["rm"].setVisible(not only)
 
+    def _apply_limits(self, sp):
+        if self._limits:
+            first, last = self._limits
+            sp.setRange(first, last)
+            sp.setToolTip(f"This anime has episodes {first}–{last}.")
+        else:
+            sp.setRange(0, 99999)
+            sp.setToolTip("")
+
+    def set_limits(self, limits):
+        """Cap every box to (first, last) -- the anime's real episodes -- or lift
+        the cap with None. Values already outside are pulled inside."""
+        self._limits = tuple(limits) if limits else None
+        for e in self._rows:
+            for sp in (e["from"], e["to"]):
+                self._apply_limits(sp)
+
+    def limits(self):
+        return self._limits
+
     def ranges(self):
         return [(e["from"].value(), e["to"].value()) for e in self._rows]
 
@@ -292,7 +314,20 @@ class EpisodeRangePicker(QWidget):
         return ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in self.ranges())
 
     def set_spec(self, text):
+        """Fill the boxes with a spec ("1-5, 8-12").
+
+        A spec handed in -- a saved range, a History re-download -- names episodes
+        that do exist (they were picked or downloaded before), so it widens the
+        limits rather than being bent to fit them: replacing it once turned a "25-26"
+        re-download into all 24 episodes. The limits only stop typing past them.
+        """
         ranges = spec_to_ranges(text) or [(1, 1)]
+        if self._limits:
+            first, last = self._limits
+            lo = min([first] + [a for a, _b in ranges])
+            hi = max([last] + [b for _a, b in ranges])
+            if (lo, hi) != (first, last):
+                self.set_limits((lo, hi))
         for e in list(self._rows):
             e["widget"].setParent(None)
             e["widget"].deleteLater()
@@ -568,6 +603,13 @@ class DownloaderWidget(QWidget):
         
         main_layout.addWidget(self.volume_container)
 
+        self.chk_win_notify = CheckBox("Show Windows notifications")
+        self.chk_win_notify.setToolTip("When downloads finish or new episodes are found, "
+                                       "while the app isn't the window you're using.")
+        self.chk_win_notify.setChecked(bool(app_settings.get("windows_notifications", True)))
+        self.chk_win_notify.toggled.connect(self._on_win_notify_toggled)
+        main_layout.addWidget(self.chk_win_notify)
+
         self.refresh_sound_dropdown()
         self.on_volume_change(self.slider_vol.value())
 
@@ -616,6 +658,7 @@ class DownloaderWidget(QWidget):
         signals.update_buttons.connect(self.set_buttons)
         signals.concurrency_changed.connect(self.on_concurrency_changed)
         signals.paused_settings_changed.connect(self.on_paused_settings_changed)
+        signals.profile_limits_changed.connect(self.on_profile_limits_changed)
         self.refresh_dropdown()
         self._update_episode_feedback()   # populate the live preview for the initial value
         self.on_auto_concurrency_toggled()   # sync the spin box + hint to the saved mode
@@ -933,8 +976,12 @@ class DownloaderWidget(QWidget):
                 if self.ep_picker.isEnabled() and not self._checking:
                     self.btn_start.setEnabled(False)
                 return
+            limits = self.ep_picker.limits()
+            known = (f"   ·   this anime has episodes {limits[0]}–{limits[1]} (newer ones show "
+                     f"up after a Watchlist check or loading it from Search again)"
+                     if limits else "")
             self.lbl_ep_feedback.setText(
-                f"✓  {len(eps)} {noun}   →   {compact_episode_spec(eps)}{extra}")
+                f"✓  {len(eps)} {noun}   →   {compact_episode_spec(eps)}{extra}{known}")
             self.lbl_ep_feedback.setStyleSheet("color:#51cf66; font-size:12px; background:transparent;")
         # Only touch the button while idle -- during a task the picker is disabled,
         # and during a connection check we must not re-enable Start under the checker.
@@ -942,6 +989,18 @@ class DownloaderWidget(QWidget):
             site = self.combo_site.currentText()
             valid_site = site not in ("No Profiles", "No profile selected", "")
             self.btn_start.setEnabled(self._episodes_valid and valid_site)
+
+    def on_profile_limits_changed(self, name):
+        """A Watchlist check raised this profile's last episode: if it is the one
+        open here, let the boxes reach the new episodes now (not after a reselect)."""
+        if self.combo_site.currentText() != name:
+            return
+        from ui.search_tab import episode_bounds
+        with config_lock:
+            limits = episode_bounds(sites_data.get(name, {}))
+        if limits:
+            self.ep_picker.set_limits(limits)
+            self._update_episode_feedback()
 
     def on_paused_settings_changed(self, values):
         """Mirror what was changed on the paused screen, so these controls -- and the
@@ -967,6 +1026,8 @@ class DownloaderWidget(QWidget):
                                                  ("concurrency", "limit"))
                    if values.get(src) is not None}
         with config_lock:
+            for k, v in updates.items():
+                app_settings[k] = v
             session = app_settings.get("unfinished_session")
             if session:
                 session.update(updates)
@@ -1039,7 +1100,11 @@ class DownloaderWidget(QWidget):
                         spec = s if s == e else f"{s}-{e}"
                 spec = spec or "1"
                 if hasattr(self, 'ep_picker'):
+                    from ui.search_tab import episode_bounds
                     self.ep_picker.blockSignals(True)
+                    # Profiles made from Search know the site's first/last episode;
+                    # the boxes can't go outside them. Older profiles stay open.
+                    self.ep_picker.set_limits(episode_bounds(sites_data[text]))
                     self.ep_picker.set_spec(spec)
                     self.ep_picker.blockSignals(False)
                 # Filler is per anime, so the setting and the cached list both
@@ -1054,6 +1119,7 @@ class DownloaderWidget(QWidget):
                 save_config()
             else: 
                 self.lbl_url.setText("No profile selected")
+
     def set_buttons(self, start_en, _close_en, prof_en):
         if self.combo_site.currentText() == "No Profiles":
             self.btn_start.setEnabled(False)
@@ -1061,22 +1127,6 @@ class DownloaderWidget(QWidget):
         else:
             self.btn_start.setEnabled(start_en)
             self.btn_profile.setEnabled(prof_en)
-
-    def start_redownload(self, profile, episodes_str):
-        """Re-run a past download from the History tab: select the profile, set the
-        episode spec, and start."""
-        names = [self.combo_site.itemText(i) for i in range(self.combo_site.count())]
-        if profile not in names:
-            InfoBar.warning(title="Profile Missing",
-                            content=f"Profile '{profile}' no longer exists. Recreate it first.",
-                            orient=Qt.Orientation.Horizontal, isClosable=True,
-                            position=InfoBarPosition.TOP, duration=4000, parent=self)
-            return
-        self.combo_site.setCurrentText(profile)
-        # The stored episodes string ("1-12", "5", or "1-5, 8-12") seeds the picker.
-        self.ep_picker.set_spec((episodes_str or "").strip())
-        self._update_episode_feedback()
-        self.start_task()
 
     def retry_episodes(self, episodes):
         """Re-download just `episodes` from the most recent task.
@@ -1130,7 +1180,7 @@ class DownloaderWidget(QWidget):
             return
 
         # Folder / lookup key = the anime name (so videos land in a sensible folder).
-        site_key = "".join(c for c in title if c not in r'\/:*?"<>|').strip() or "Anime"
+        site_key = safe_folder_name(title) or "Anime"
         # Kept so a retry can rebuild the transient profile after it is cleaned up.
         self.last_watch_meta = (title, template, domain)
 
@@ -1356,13 +1406,55 @@ class DownloaderWidget(QWidget):
                 parent=self
             )
             return
+        if not self._confirm_disk_space(params):
+            return
         self._begin_download(params)
+
+    def _on_win_notify_toggled(self, on):
+        with config_lock:
+            app_settings["windows_notifications"] = bool(on)
+        save_config()
+
+    def _confirm_disk_space(self, p):
+        """Before a Start: warn when the run likely won't fit on the drive.
+        True to go ahead. (Watchlist and Discord downloads aren't asked -- nobody
+        may be at the PC to answer.)"""
+        import tempfile
+        from qfluentwidgets import MessageBox
+        from utils.disk import check_space, human
+        from core.concurrency import ConcurrencyController
+        safe = safe_folder_name(p["site"])
+        # Auto concurrency may climb to its maximum, so plan for that many at once.
+        parallel = (ConcurrencyController.MAX_LIMIT if app_settings.get("concurrency_auto", True)
+                    else int(p.get("concurrency") or 1))
+        per_ep, short = check_space(p["target_dir"], os.path.join(p["target_dir"], safe),
+                                    len(p["episodes_list"]), temp_dir=tempfile.gettempdir(),
+                                    parallel=parallel)
+        if not short:
+            return True
+        n = len(p["episodes_list"])
+        lines = []
+        for drive, needed, free in short:
+            role = ("the download folder's drive"
+                    if drive == os.path.splitdrive(os.path.abspath(p["target_dir"]))[0].upper()
+                    else "the temporary folder's drive (episodes download there first)")
+            lines.append(f"{drive} — {role}: needs about {human(needed)}, "
+                         f"only {human(free)} free.")
+        box = MessageBox(
+            "Not enough disk space",
+            f"{n} episode{'s' if n != 1 else ''} at ~{human(per_ep)} each:\n"
+            + "\n".join(lines)
+            + "\n\nFree up space, pick fewer episodes, or choose another download folder.",
+            self.window())
+        box.yesButton.setText("Start anyway")
+        box.cancelButton.setText("Cancel")
+        return bool(box.exec())
 
     def _begin_download(self, p):
         # Remember where these episodes land, and which ones they are, so
         # "Start Watching" opens the first episode of THIS session rather than
         # whatever happens to sort first in a folder full of older downloads.
-        safe = "".join(c for c in p["site"] if c not in r'\/:*?"<>|').strip()
+        safe = safe_folder_name(p["site"])
         self.last_download_folder = os.path.join(p["target_dir"], safe)
         self.last_download_episodes = list(p["episodes_list"])
         self.last_download_params = dict(p)   # lets us re-run just the failed episodes

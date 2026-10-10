@@ -44,6 +44,10 @@ app_settings = {
     # Auto-tune how many episodes download at once from measured speed; the
     # "concurrency" value above stays as the manual setting and the starting point.
     "concurrency_auto": True,
+    # Ids of one-time profile migrations already applied (see _PROFILE_MIGRATIONS).
+    "migrations_done": [],
+    # Windows notifications for finished downloads and new episodes (ui/notifier.py).
+    "windows_notifications": True,
     # Followed anime for the new-episode watcher. Each entry:
     # {"title", "url", "domain", "seen_max", "latest_template", "latest_max", "checked"}
     "watchlist": [],
@@ -100,6 +104,72 @@ def migrate_witanime_url(url):
                   url, flags=re.I)
 
 
+def is_witanime_url(url):
+    """Return True if the URL belongs to witanime."""
+    return bool(url and "witanime" in str(url).lower())
+
+
+def is_witanime_profile(profile_data_or_name):
+    """Return True if the profile uses a witanime URL."""
+    if isinstance(profile_data_or_name, dict):
+        return is_witanime_url(profile_data_or_name.get("url", ""))
+    with config_lock:
+        prof = sites_data.get(str(profile_data_or_name), {})
+        return is_witanime_url(prof.get("url", ""))
+
+
+
+def _add_witanime_mp4upload():
+    """Give existing witanime profiles the built-in "FHD - mp4upload" path."""
+    import copy
+    from core.site_flows import DEFAULT_SITE_FLOWS
+    flow = DEFAULT_SITE_FLOWS.get("witanime.site", {}).get("step_paths", {}).get("FHD - mp4upload")
+    if not flow:
+        return
+    for site_config in sites_data.values():
+        paths = site_config.get("step_paths") if isinstance(site_config, dict) else None
+        # A profile without its own path list uses the built-in flow already.
+        if (isinstance(paths, dict) and "witanime.site" in site_config.get("url", "")
+                and "FHD - mp4upload" not in paths):
+            paths["FHD - mp4upload"] = copy.deepcopy(flow)   # same copy Search uses
+
+
+def _add_witanime_wahmi():
+    """Give existing witanime profiles the built-in "FHD - wahmi" path."""
+    import copy
+    from core.site_flows import DEFAULT_SITE_FLOWS
+    flow = DEFAULT_SITE_FLOWS.get("witanime.site", {}).get("step_paths", {}).get("FHD - wahmi")
+    if not flow:
+        return
+    for site_config in sites_data.values():
+        paths = site_config.get("step_paths") if isinstance(site_config, dict) else None
+        if (isinstance(paths, dict) and "witanime.site" in site_config.get("url", "")
+                and "FHD - wahmi" not in paths):
+            paths["FHD - wahmi"] = copy.deepcopy(flow)
+
+
+# Profile migrations that run ONCE per install, recorded in
+# app_settings["migrations_done"]. Running them on every load re-added a path the
+# user had deliberately deleted.
+_PROFILE_MIGRATIONS = (
+    ("witanime_mp4upload_v1", _add_witanime_mp4upload),
+    ("witanime_wahmi_v1", _add_witanime_wahmi),
+)
+
+
+def _run_profile_migrations(done):
+    """Run the migrations not in `done`; return the ids that ran."""
+    ran = []
+    for mig_id, fn in _PROFILE_MIGRATIONS:
+        if mig_id not in done:
+            try:
+                fn()
+            except Exception:
+                continue          # leave it unrecorded so it is retried next launch
+            ran.append(mig_id)
+    return ran
+
+
 def load_config():
     if not os.path.exists(APP_DIR):
         os.makedirs(APP_DIR, exist_ok=True)
@@ -128,11 +198,18 @@ def load_config():
                         site_config["step_paths"] = {"Path 1": site_config["steps"]}
                         del site_config["steps"]
                         needs_save = True
-
+                    
                 saved_settings = data.get("settings", {})
+                done = set(saved_settings.get("migrations_done") or [])
+                ran = _run_profile_migrations(done)
+                if ran:
+                    needs_save = True
+
                 for k in app_settings.keys():
                     if k in saved_settings:
                         app_settings[k] = saved_settings[k]
+                if ran:
+                    app_settings["migrations_done"] = sorted(done | set(ran))
                         
                 for w in app_settings.get("watchlist", []):
                     # url AND latest_template: the template is what a Watchlist or
@@ -153,7 +230,7 @@ def load_config():
                     app_settings["discord_webhook"] = decrypt_webhook(app_settings["discord_webhook"])
                 if app_settings.get("cloud_token"):
                     app_settings["cloud_token"] = decrypt_webhook(app_settings["cloud_token"])
-                        
+
                 if "custom_sound_path" in saved_settings and saved_settings["custom_sound_path"]:
                     old_path = saved_settings["custom_sound_path"]
                     if old_path not in app_settings["custom_sounds"]:
@@ -177,7 +254,11 @@ def load_config():
 
         except Exception as e:
             print(f"Error loading config: {e}")
-    else: 
+    else:
+        # Fresh install: profiles made from now on already get the current built-in
+        # flows, so every migration counts as applied. Leaving the list empty let a
+        # later launch run one -- re-adding a path the user had since deleted.
+        app_settings["migrations_done"] = [mig_id for mig_id, _fn in _PROFILE_MIGRATIONS]
         save_config()
 
 # --- Watchlist helpers (followed anime for the new-episode watcher) ---

@@ -15,6 +15,7 @@ from subprocess import CREATE_NO_WINDOW
 
 from core.signals import signals
 from utils.config import PROFILE_DIR, ARIA2C_PATH, UNRAR_PATH, APP_DIR, sites_data, app_settings, config_lock, progress_lock, migrate_witanime_url
+from utils.naming import safe_folder_name, VIDEO_EXTENSIONS as _VIDEO_EXTENSIONS
 from utils.database import log_history
 
 # --- GLOBAL THREAD EVENTS ---
@@ -403,7 +404,55 @@ PATH_HOSTS = {
     "mega": ("mega.nz", "mega.io"),
     "4shared": ("4shared.com",),
     "yourupload": ("yourupload.com",),
+    "wahmi": ("wahmi.org",),
 }
+
+
+# Exact domains a script step's link may come from, by the host word in the path
+# name. Separate from PATH_HOSTS (the click-path check) so that one keeps its
+# exact-name lookups. Matching a host *name* alone let look-alikes through:
+# "mp4upload" also matched cdn.mp4upload.xyz.
+SCRIPT_HOSTS = {**PATH_HOSTS, "mp4upload": ("mp4upload.com",), "wahmi": ("wahmi.org",)}
+
+# Optimal initial connection counts per host to avoid server-side rate limits / 403 Forbidden
+# while maximizing bandwidth:
+# - wahmi.org: does not support HTTP Range requests (RFC 7233), starts at 1 connection
+# - mp4upload.com: limits single streams to ~8MB/s and blocks >=8 connections with 403;
+#   sweet spot is 4 connections (achieving 25-35+ MB/s without triggering 403 blocks)
+HOST_INITIAL_CONNS = {
+    "wahmi.org": 1,
+    "mp4upload.com": 4,
+}
+
+SINGLE_CONN_HOSTS = {
+    "wahmi.org", "www.wahmi.org",
+}
+
+
+def script_url_allowed(url, path_name):
+    """May a script step hand this URL to the downloader?
+
+    A script returns whatever URL it computes, and the engine would download it
+    with the page's cookies and save it as the episode -- so the URL must be http(s)
+    on a listed domain of the host this path is named after: "FHD - mp4upload" ->
+    mp4upload.com and its subdomains, a "Mediafire" path -> mediafire.com. The tab
+    the script ran on is no proof (it can be an ad), nor is a domain that merely
+    contains the host's name. A path naming no listed host gets nothing.
+    """
+    from urllib.parse import urlparse
+    try:
+        scheme = urlparse(url).scheme.lower()
+    except Exception:
+        return False
+    host = _host_of(url)
+    if scheme not in ("http", "https") or not host:
+        return False
+    name = (path_name or "").lower()
+    for key, domains in SCRIPT_HOSTS.items():
+        if re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", name) and \
+                any(host == d or host.endswith("." + d) for d in domains):
+            return True
+    return False
 
 
 def tab_matches_path(url, path_name):
@@ -414,7 +463,13 @@ def tab_matches_path(url, path_name):
     A blank host also passes -- the tab is probably still on about:blank, which the
     normal waits already handle.
     """
-    hosts = PATH_HOSTS.get((path_name or "").strip().lower())
+    name = (path_name or "").strip().lower()
+    hosts = PATH_HOSTS.get(name)
+    if not hosts:
+        for k, v in PATH_HOSTS.items():
+            if k in name:
+                hosts = v
+                break
     if not hosts:
         return True
     host = _host_of(url)
@@ -462,17 +517,19 @@ def path_probes(step_paths):
     return probes
 
 
-def choose_paths(order, found):
+def choose_paths(order, found, fallback_only=()):
     """Paths to try, best first, given which probes were found on the page.
 
     `order` is the profile's priority order; `found` maps name -> True (link is
     there), False (it is not) or None (no probe for this path). Paths shown absent
     are skipped. If no probe matched at all, the look was inconclusive -- the layout
     may have changed or the page not finished -- and every path is tried as before,
-    so this can never make a download fail that would have worked.
+    so this can never make a download fail that would have worked. `fallback_only`
+    paths (the generated HD twins) are left out of that blind run: they only make
+    sense where the page shows an HD group, and each one tried blind costs ~20 s.
     """
     if not any(found.get(n) is True for n in order):
-        return list(order)
+        return [n for n in order if n not in fallback_only]
     return [n for n in order if found.get(n) is not False]
 
 
@@ -493,11 +550,12 @@ return out;
 """
 
 
-def available_paths(driver, step_paths, timeout=4.0):
+def available_paths(driver, step_paths, timeout=4.0, fallback_only=()):
     """Look at the loaded episode page once and return (paths to try, found map).
 
     Polls briefly because a page can still be rendering its download section; stops
-    as soon as any probe matches. Never raises -- on any error every path is tried.
+    as soon as any probe matches. Never raises -- on any error every path except
+    the `fallback_only` ones is tried (see choose_paths).
     """
     order = [n for n, steps in step_paths.items() if steps]
     probes = path_probes(step_paths)
@@ -507,7 +565,7 @@ def available_paths(driver, step_paths, timeout=4.0):
             xp = parse_smart_xpath(raw)
             js_probes[name] = [xp, xp.replace("text()", "@value")]
     if not js_probes:
-        return order, {n: None for n in order}
+        return [n for n in order if n not in fallback_only], {n: None for n in order}
 
     found = {}
     deadline = time.time() + timeout
@@ -520,7 +578,119 @@ def available_paths(driver, step_paths, timeout=4.0):
         if any(v is True for v in found.values()) or time.time() >= deadline:
             break
         time.sleep(0.5)
-    return choose_paths(order, found), found
+    return choose_paths(order, found, fallback_only), found
+
+
+# ---- The final episode ----
+#
+# witanime titles the last episode "الحلقة 19 والأخيرة" ("episode 19, the last") in
+# both the page <title> and its heading (checked on Re:Zero 4th season ep 19). The
+# phrase is matched next to "الحلقة <n>" on purpose: a bare "final" would also hit
+# every "Final Season" title.
+_FINAL_EP_RE = re.compile(r"الحلقة\s*\d+\s*و?\s*ال[أا]خير[ةه]")
+
+
+def is_final_text(text):
+    return bool(_FINAL_EP_RE.search(text or ""))
+
+
+def is_final_episode_page(driver):
+    """True when the loaded episode page says this is the anime's last episode."""
+    try:
+        text = driver.execute_script(
+            "return document.title + '\\n' + Array.from(document.querySelectorAll('h1,h2'))"
+            ".slice(0, 4).map(h => h.innerText).join('\\n');")
+    except Exception:
+        return False
+    return is_final_text(text)
+
+
+# witanime's "this page stayed open too long and the session expired. Reload the
+# page to keep watching" screen. The text is always in the page source (a hidden
+# template), so only the rendered text counts.
+_SESSION_EXPIRED_RE = re.compile(r"انتهت\s*صلاحية\s*الجلسة")
+
+
+def is_session_expired_text(text):
+    return bool(_SESSION_EXPIRED_RE.search(text or ""))
+
+
+def is_session_expired_page(driver):
+    """True when the episode page shows the expired-session screen instead of the
+    player and the download section."""
+    try:
+        text = driver.execute_script("return document.body ? document.body.innerText : '';")
+    except Exception:
+        return False
+    return is_session_expired_text(text)
+
+
+def episode_filename(profile, ep, ext, final=False, copy=0):
+    """'<profile> Ep<n>[ (Final)][ (copy)]<ext>'. The "Ep<n>" stays first, so
+    finding an episode's file by its number keeps working."""
+    name = f"{profile} Ep{ep}"
+    if final:
+        name += " (Final)"
+    if copy:
+        name += f" ({copy})"
+    return name + ext
+
+
+def next_episode(retry_q, work, downloads_running):
+    """The download loop's next move: ("ep", n) to fetch episode n, ("wait", None)
+    while downloads that could still fail are running, or ("done", None).
+
+    Episodes sent back after a failed download come first, so a retry isn't stuck
+    behind the rest of a long run. The queue is checked again after the threads,
+    because a thread re-queues its episode right before it ends.
+    """
+    if retry_q:
+        return "ep", retry_q.popleft()
+    if work:
+        return "ep", work.popleft()
+    if downloads_running():
+        return "wait", None
+    if retry_q:
+        return "ep", retry_q.popleft()
+    return "done", None
+
+
+# ---- HD fallback ----
+#
+# witanime groups its mirrors by quality -- FHD, HD, SD, each a button that opens
+# its own list of hosts -- and the profiles only target FHD. An episode without an
+# FHD group used to fail outright: every path starts by clicking FHD. The HD twin of
+# each FHD path is the same steps with the quality button swapped. Plain
+# contains(., 'HD') would also match "FHD", hence the not(): checked on a live page
+# (Black Clover 2nd Season ep 1), where it selects exactly the HD group.
+
+_FHD_TEST = re.compile(r"""contains\(\s*\.\s*,\s*(['"])FHD\1\s*\)""")
+_HD_TEST = "(contains(., 'HD') and not(contains(., 'FHD')))"
+
+
+def _hd_name(name, taken):
+    hd = re.sub(r"\bFHD\b", "HD", name) if re.search(r"\bFHD\b", name) else f"{name} (HD)"
+    while hd in taken:
+        hd += " (HD)"
+    return hd
+
+
+def with_hd_fallback(step_paths):
+    """step_paths plus an HD twin of every path that targets the FHD group,
+    appended after all the originals (so FHD is always tried first). Paths with no
+    FHD xpath (animerco, custom profiles) are left as they are."""
+    out = dict(step_paths)
+    for name, steps in step_paths.items():
+        if not steps or not any(_FHD_TEST.search(s.get("xpath") or "") for s in steps):
+            continue
+        twin = []
+        for step in steps:
+            step = dict(step)
+            if step.get("xpath"):
+                step["xpath"] = _FHD_TEST.sub(_HD_TEST, step["xpath"])
+            twin.append(step)
+        out[_hd_name(name, out)] = twin
+    return out
 
 
 def parse_smart_xpath(raw_input):
@@ -635,9 +805,14 @@ def create_browser(download_dir, headless=True):
     options.add_argument("--enable-features=WebContentsForceDark,ParallelDownloading")
 
     if headless: 
-        options.add_argument("--headless=new")
+        # Off-screen positioned window + Windows SW_HIDE trick:
+        # Sites with anti-bot/Cloudflare detection (like witanime.site) specifically
+        # detect `--headless=new` and block the page with "session expired" or "access forbidden".
+        # Running the full browser positioned off-screen at (-10000, -10000) and hidden via Windows API
+        # serves 100% authentic browser signatures to the site, while remaining 100% invisible
+        # to the user (no window on screen, no taskbar button, no focus disruption).
+        options.add_argument("--window-position=-10000,-10000")
         options.add_argument("--window-size=1920,1080")
-        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     else: 
         options.add_argument("--start-maximized") 
 
@@ -670,9 +845,27 @@ def create_browser(download_dir, headless=True):
     driver = webdriver.Chrome(options=options, service=service)
     
     if headless:
-        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-            'source': "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        })
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            SW_HIDE = 0
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            class _RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            def _hide_offscreen(hwnd, _):
+                buf = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, buf, 256)
+                if buf.value == "Chrome_WidgetWin_1":
+                    rect = _RECT()
+                    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                    if rect.left <= -5000 and rect.top <= -5000:
+                        user32.ShowWindow(hwnd, SW_HIDE)
+                return True
+            user32.EnumWindows(WNDENUMPROC(_hide_offscreen), 0)
+        except Exception:
+            pass
         
     driver.set_page_load_timeout(45)
     # The two blockers do different jobs, so both are applied rather than one being
@@ -936,7 +1129,15 @@ def solve_captcha_if_present(driver, url):
     except Exception as e:
         signals.update_status.emit(f"Status: ❌ Captcha error: {e}", "#ff4c4c")
 
-def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, on_episode_completed, process_callback=None, my_task_id=0, controller=None):
+def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, on_episode_completed, process_callback=None, my_task_id=0, controller=None, referer=None, on_failed=None):
+    """Download one episode with aria2c.
+
+    Exactly one callback fires at the end: on_episode_completed after a success or a
+    cancel, or on_failed(ep) when this link could not be downloaded -- the engine
+    then tries the episode's next server. (A failure used to call
+    on_episode_completed too, so a dead link counted as downloaded and the run
+    ended "successfully".) Without on_failed, a failure still completes, as before.
+    """
     if not os.path.exists(ARIA2C_PATH):
         from utils.tools_manager import ensure_aria2c
         signals.update_active_download.emit(ep, "⚡ Bootstrapping downloader...")
@@ -954,11 +1155,29 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
 
     # Some hosts (e.g. workupload) limit or reject multi-connection splitting
     # ("Invalid range header", errorCode=8). On failure we step down the connection
-    # count to find the largest one that actually works, instead of dropping to 1.
+    # Some hosts (e.g. workupload) limit multi-connection splitting; hosts without
+    # Range support (e.g. wahmi.org) reject it entirely ("Invalid range header", errorCode=8).
     conn_levels = [16, 8, 4, 2, 1]
-    conn_idx = 0
+    url_host = _host_of(url)
+    start_conns = 16
+    for h, max_c in HOST_INITIAL_CONNS.items():
+        if url_host == h or url_host.endswith("." + h):
+            start_conns = max_c
+            break
+    if start_conns in conn_levels:
+        conn_idx = conn_levels.index(start_conns)
+    elif any(url_host == h or url_host.endswith("." + h) for h in SINGLE_CONN_HOSTS):
+        conn_idx = len(conn_levels) - 1
+    else:
+        conn_idx = 0
     attempts = 0
     max_attempts = 6       # cap retries so a dead/blocking host isn't hammered forever
+    # A link that has not sent one byte after this many attempts is dead (timeouts,
+    # refused): give up early so the engine moves on to the episode's next server.
+    max_attempts_without_data = 3
+    got_data = False
+    succeeded = False
+    process_finished_normally = False
     verify_cert = True     # try with TLS verification first; drop it only on a cert error
 
     while True:
@@ -968,15 +1187,23 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
         if attempts > max_attempts:
             signals.update_active_download.emit(ep, "❌ Download failed after several attempts.")
             break
+        if not got_data and attempts > max_attempts_without_data:
+            signals.update_active_download.emit(ep, "❌ This server sent no data.")
+            break
 
+        is_multi_conn_rejected = False
         conns = str(conn_levels[conn_idx])
+        # Fail fast on multi-connection probes so unknown Range-rejecting hosts recover immediately
+        max_tries = "2" if conn_levels[conn_idx] > 1 else "5"
+        retry_wait = "1" if conn_levels[conn_idx] > 1 else "2"
         cmd = [
             ARIA2C_PATH, "-c", "--auto-file-renaming=false",
             "-x", conns, "-s", conns, "-j", conns,
             "-k", "1M", "--min-split-size=1M", "--disk-cache=128M",
+            "--socket-recv-buffer-size=4M", "--enable-mmap=true",
             "--optimize-concurrent-downloads=true", "--disable-ipv6=true",
             "--file-allocation=none", "--summary-interval=1", "--auto-save-interval=1",
-            "--connect-timeout=5", "--timeout=10", "--max-tries=5", "--retry-wait=2",
+            "--connect-timeout=15", "--timeout=25", f"--max-tries={max_tries}", f"--retry-wait={retry_wait}",
         ]
         # TLS: verify by default; fall back to no verification only after a cert error.
         cmd.append("--check-certificate=true" if verify_cert else "--check-certificate=false")
@@ -987,6 +1214,7 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                     "--header=Accept-Language: en-US,en;q=0.5", "--header=Sec-Fetch-Dest: document",
                     "--header=Sec-Fetch-Mode: navigate"])
         if cookie_str: cmd.append(f"--header=Cookie: {cookie_str}")
+        if referer: cmd.append(f"--header=Referer: {referer}")
         cmd.extend([f"--dir={temp_dir}", f"--out={final_name}", url])
 
         # Phantom File Cleanup with lock bypass
@@ -1023,6 +1251,8 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
                         match = _ARIA_PROGRESS_RE.search(line)
                         if match:
                             pct = int(match.group(3))
+                            if pct > 0 or _aria_to_bytes(match.group(1)) or _aria_to_bytes(match.group(4)):
+                                got_data = True
                             speed = _aria_convert_unit(match.group(4)) + "/s"
                             total_size = _aria_convert_unit(match.group(2))   # full episode size
 
@@ -1057,19 +1287,38 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
             if process.returncode == 0:
                 process_finished_normally = True
             elif not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id or ep_cancel_events[ep].is_set() or pause_event.is_set() or ep_pause_events[ep].is_set()):
-                # A genuine failure often means the host is pushing back, so ease off
-                # the number of parallel downloads rather than hammering it harder.
-                if controller is not None:
-                    controller.record_failure(f"download error (rc={process.returncode})")
-                # Failed -> step down to fewer connections (server may limit
-                # splitting / ignore Range) to find the largest working count.
-                if conn_idx < len(conn_levels) - 1:
-                    conn_idx += 1
-                    signals.update_active_download.emit(ep, f"⚙ Retrying with {conn_levels[conn_idx]} connection(s)...")
-                    # Split count changed -> clear the partial + control file for a clean retry.
+                # Detect server rejecting Range headers (errorCode=8 / Invalid range header)
+                # or rejecting multi-connection requests (403 Forbidden / status=403 / errorCode=22).
+                # When multi-connection is rejected, jumping straight to single connection
+                # saves ~60-90s of useless retries and avoids hammering the host.
+                is_multi_conn_rejected = any(
+                    ("invalid range header" in l.lower() or "errorcode=8" in l.lower()
+                     or (conn_levels[conn_idx] > 1 and ("status=403" in l.lower() or "forbidden" in l.lower() or "errorcode=22" in l.lower())))
+                    for l in recent_lines
+                )
+                if is_multi_conn_rejected:
+                    if url_host:
+                        SINGLE_CONN_HOSTS.add(url_host)
+                        root_host = ".".join(url_host.split(".")[-2:])
+                        if root_host:
+                            SINGLE_CONN_HOSTS.add(root_host)
+                    conn_idx = len(conn_levels) - 1
+                    signals.update_active_download.emit(ep, "⚙ Server rejects multi-connection — switching to single connection...")
                     for _f in (target_file, aria2_file):
                         try: os.remove(_f)
                         except Exception: pass
+                else:
+                    # A genuine failure often means the host is pushing back, so ease off
+                    # the number of parallel downloads rather than hammering it harder.
+                    if controller is not None:
+                        controller.record_failure(f"download error (rc={process.returncode})")
+                    if conn_idx < len(conn_levels) - 1:
+                        conn_idx += 1
+                        signals.update_active_download.emit(ep, f"⚙ Retrying with {conn_levels[conn_idx]} connection(s)...")
+                        # Split count changed -> clear the partial + control file for a clean retry.
+                        for _f in (target_file, aria2_file):
+                            try: os.remove(_f)
+                            except Exception: pass
                 # A TLS/certificate failure -> retry once without verification.
                 if verify_cert and any(w in l.lower() for l in recent_lines for w in ("ssl", "certificate", "handshake")):
                     verify_cert = False
@@ -1100,7 +1349,10 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
             while (pause_event.is_set() or ep_pause_events[ep].is_set()) and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) and not ep_cancel_events[ep].is_set():
                 time.sleep(1)
             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) or ep_cancel_events[ep].is_set(): break
-            continue 
+            # A pause stopped this run, the server didn't fail it: don't count it, or
+            # a few pauses before the first byte would mark a working server dead.
+            attempts -= 1
+            continue
             
         # A tiny "completed" file is a block/error page, not the video -> treat as failed.
         if process_finished_normally and is_block_page(target_file):
@@ -1128,10 +1380,12 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
 
             time.sleep(1)
             signals.remove_active_download.emit(ep)
-            break 
+            succeeded = True
+            break
         elif not pause_event.is_set() and not ep_pause_events[ep].is_set() and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) and not ep_cancel_events[ep].is_set():
-            signals.update_active_download.emit(ep, "❌ Download Failed. Retrying...")
-            time.sleep(min(3 * attempts, 30))   # backoff -- don't hammer the host
+            if not is_multi_conn_rejected:
+                signals.update_active_download.emit(ep, "❌ Download Failed. Retrying...")
+                time.sleep(min(3 * attempts, 30))   # backoff -- don't hammer the host
             
     if ep_cancel_events[ep].is_set() and not process_finished_normally:
         signals.remove_active_download.emit(ep)
@@ -1142,7 +1396,12 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
         if host_active.get(h):
             host_active[h] = max(0, host_active[h] - 1)
 
-    on_episode_completed()
+    stopped = (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id
+               or ep_cancel_events[ep].is_set())
+    if succeeded or stopped or on_failed is None:
+        on_episode_completed()
+    else:
+        on_failed(ep)
 
 def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_url, selected_sound, volume , concurrency, step_paths_override=None):
     from selenium.webdriver.common.by import By
@@ -1208,11 +1467,17 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
         # hand-edited steps can't change how the episode is fetched. The profile in
         # sites_data is left untouched -- it belongs to the user.
         step_paths = step_paths_override or config.get("step_paths", {"Path 1": config.get("steps", [])})
-        safe_site_name = "".join(c for c in site_key if c not in r'\/:*?"<>|').strip()
+        # FHD paths get HD twins, tried after every FHD path: an episode with no FHD
+        # group, or whose FHD mirrors all fail, still downloads in HD.
+        profile_path_names = set(step_paths)
+        step_paths = with_hd_fallback(step_paths)
+        hd_twins = {n for n in step_paths if n not in profile_path_names}
+        safe_site_name = safe_folder_name(site_key)
 
         profile_folder_path = os.path.join(download_dir, safe_site_name)
         os.makedirs(profile_folder_path, exist_ok=True)
-        VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts')
+        VIDEO_EXTENSIONS = _VIDEO_EXTENSIONS
+        final_eps = set()      # episodes whose page says they are the last one
 
         def process_downloaded_episode(x, temp_dir):
             if not os.path.exists(temp_dir): return
@@ -1223,6 +1488,20 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                 rarfile.UNRAR_TOOL = UNRAR_PATH
             try:
                 current_timestamp = time.time()
+
+                def place_video(src, ext):
+                    """Move the episode's video into the anime folder under its final name."""
+                    copy = 0
+                    while True:
+                        dst = os.path.join(profile_folder_path, episode_filename(
+                            safe_site_name, x, ext, final=x in final_eps, copy=copy))
+                        if not os.path.exists(dst):
+                            break
+                        copy += 1
+                    shutil.move(src, dst)
+                    try: os.utime(dst, (current_timestamp, current_timestamp))
+                    except Exception as e: print(f"Error setting timestamp for Ep {x}: {e}")
+
                 for item in os.listdir(temp_dir):
                     src_item = os.path.join(temp_dir, item)
                     
@@ -1259,18 +1538,7 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                             if found_videos:
                                 found_videos.sort(key=os.path.getsize, reverse=True)
                                 main_video = found_videos[0]
-                                _, ext = os.path.splitext(main_video)
-                                new_name = f"{safe_site_name} Ep{x}{ext}"
-                                dst_item = os.path.join(profile_folder_path, new_name)
-                                
-                                counter = 1
-                                while os.path.exists(dst_item):
-                                    dst_item = os.path.join(profile_folder_path, f"{safe_site_name} Ep{x} ({counter}){ext}")
-                                    counter += 1
-                                    
-                                shutil.move(main_video, dst_item)
-                                try: os.utime(dst_item, (current_timestamp, current_timestamp))
-                                except Exception as e: print(f"Error setting timestamp for Ep {x}: {e}")
+                                place_video(main_video, os.path.splitext(main_video)[1])
                         except Exception as e:
                             print(f"Extraction failed for Ep {x}: {e}")
                             
@@ -1283,28 +1551,10 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                         if found_videos:
                             found_videos.sort(key=os.path.getsize, reverse=True)
                             main_video = found_videos[0]
-                            _, ext = os.path.splitext(main_video)
-                            new_name = f"{safe_site_name} Ep{x}{ext}"
-                            dst_item = os.path.join(profile_folder_path, new_name)
-                            counter = 1
-                            while os.path.exists(dst_item):
-                                dst_item = os.path.join(profile_folder_path, f"{safe_site_name} Ep{x} ({counter}){ext}")
-                                counter += 1
-                            shutil.move(main_video, dst_item)
-                            try: os.utime(dst_item, (current_timestamp, current_timestamp))
-                            except Exception as e: print(f"Error setting timestamp for Ep {x}: {e}")
+                            place_video(main_video, os.path.splitext(main_video)[1])
 
                     elif os.path.isfile(src_item) and src_item.lower().endswith(VIDEO_EXTENSIONS):
-                        _, ext = os.path.splitext(item)
-                        new_name = f"{safe_site_name} Ep{x}{ext}"
-                        dst_item = os.path.join(profile_folder_path, new_name)
-                        counter = 1
-                        while os.path.exists(dst_item):
-                            dst_item = os.path.join(profile_folder_path, f"{safe_site_name} Ep{x} ({counter}){ext}")
-                            counter += 1
-                        shutil.move(src_item, dst_item)
-                        try: os.utime(dst_item, (current_timestamp, current_timestamp))
-                        except Exception as e: print(f"Error setting timestamp for Ep {x}: {e}")
+                        place_video(src_item, os.path.splitext(item)[1])
                         
                 shutil.rmtree(temp_dir)
             except Exception as e:
@@ -1328,7 +1578,6 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
             the engine spends most of its time there, and a mode change used to
             wait for a slot to free up.
             """
-            nonlocal driver, wait, headless
             adj = _take_adjustments()
             skipped = apply_skips(episodes_list, adj.get("skip", ()))
             if skipped:
@@ -1338,23 +1587,50 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                     f"Status: Skipping episode{'s' if len(skipped) > 1 else ''} "
                     f"{compact_spec(skipped)}.", "#f39c12")
             if "headless" in adj and adj["headless"] != headless:
-                headless = adj["headless"]
-                with _run_lock:
-                    RUN_STATE["headless"] = headless
                 signals.update_status.emit(
-                    f"Status: Restarting the browser ({'hidden' if headless else 'visible'})...",
+                    f"Status: Restarting the browser ({'hidden' if adj['headless'] else 'visible'})...",
                     "#f39c12")
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-                driver = create_browser(download_dir, headless)
-                wait = WebDriverWait(driver, 10)
+                restart_browser(adj["headless"])
+
+        def restart_browser(new_headless):
+            nonlocal driver, wait, headless
+            headless = new_headless
+            with _run_lock:
+                RUN_STATE["headless"] = headless
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            driver = create_browser(download_dir, headless)
+            wait = WebDriverWait(driver, 10)
 
         total_episodes = len(episodes_list)
         signals.update_progress.emit(0, total_episodes)
 
-        for x in list(episodes_list):
+        # Work queue: every episode once, plus episodes whose download failed, which
+        # come back to try their next server (aria2c_downloader's on_failed). A dead
+        # link used to end the episode even when the page offered other servers.
+        work = collections.deque(episodes_list)
+        retry_q = collections.deque()      # appended from download threads
+        exclude_paths = {}                 # ep -> paths whose download already failed
+        waiting_shown = False
+
+        while True:
+            action, x = next_episode(retry_q, work,
+                                     lambda: any(t.is_alive() for t in active_engine_threads))
+            if action == "done":
+                break
+            if action == "wait":
+                # Nothing left to fetch, but a running download may still fail and
+                # send its episode back here.
+                if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
+                if not waiting_shown:
+                    signals.update_status.emit(
+                        "Status: All downloads triggered! Waiting for files to finish...", "#f39c12")
+                    waiting_shown = True
+                time.sleep(1)
+                continue
+            waiting_shown = False
             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
 
             while pause_event.is_set() and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
@@ -1373,9 +1649,21 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                 time.sleep(random.uniform(2.0, 4.0))
 
             path_success = False
+            no_server_left = False
             ep_temp_dir = os.path.join(tempfile.gettempdir(), f"AnimeDL_{safe_site_name}_Ep_{x}")
             os.makedirs(ep_temp_dir, exist_ok=True)
             episode_temp_dirs[x] = ep_temp_dir
+            if exclude_paths.get(x):
+                # Second try at this episode: drop the failed server's partial file,
+                # or it would be picked up as the finished video.
+                for leftover in os.listdir(ep_temp_dir):
+                    try:
+                        os.remove(os.path.join(ep_temp_dir, leftover))
+                    except OSError:
+                        pass
+                signals.update_status.emit(
+                    f"Status: Ep {x}: {', '.join(sorted(exclude_paths[x]))} failed — "
+                    f"trying another server...", "#f39c12")
             
             url = url_template.replace("{x}", str(x))
             print(f"\nProcessing Ep {x}")
@@ -1389,7 +1677,15 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                     driver.switch_to.window(driver.window_handles[-1])
                     driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": ep_temp_dir})
                     
-                    driver.get(url)
+                    try:
+                        driver.get(url)
+                    except Exception as nav_e:
+                        msg = str(nav_e).lower()
+                        if any(k in msg for k in ("err_connection_reset", "err_connection_closed", "err_timed_out", "err_network_changed")):
+                            time.sleep(1)
+                            driver.get(url)
+                        else:
+                            raise
                     time.sleep(3)
 
                     # A site may serve this episode under a different URL slug (an
@@ -1408,10 +1704,32 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                     except Exception as captcha_err:
                         print(f"Captcha solving failed: {captcha_err}")
 
+                    # witanime answers the hidden browser with its "session expired,
+                    # reload the page" screen and leaves out the player and the
+                    # download section, so every server then failed blind. Carry on
+                    # in a visible browser, which it serves normally.
+                    if is_session_expired_page(driver):
+                        if headless:
+                            signals.update_status.emit(
+                                f"Status: {site_key} doesn't show downloads to the hidden "
+                                "browser. Continuing with a visible one...", "#f39c12")
+                            restart_browser(False)
+                            continue          # next attempt opens the episode afresh
+                        driver.refresh()
+                        time.sleep(3)
+
                     # Only try the mirrors this episode actually has, in the profile's
                     # priority order. A missing one used to cost ~20 s of waiting for
                     # a button that was never going to appear.
-                    to_try, found = available_paths(driver, step_paths)
+                    to_try, found = available_paths(driver, step_paths, fallback_only=hd_twins)
+                    if is_final_episode_page(driver):
+                        final_eps.add(x)
+                    tried = exclude_paths.get(x)
+                    if tried:
+                        to_try = [p for p in to_try if p not in tried]
+                        if not to_try:
+                            no_server_left = True
+                            break
                     skipped = [n for n, v in found.items() if v is False and n not in to_try]
                     if skipped:
                         signals.update_status.emit(
@@ -1427,6 +1745,7 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                         
                         signals.update_status.emit(f"Status: [{path_name}] Executing...", "#ffffff")
                         path_failed = False
+                        found_data = None
 
                         for step_idx, step in enumerate(steps):
                             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
@@ -1436,7 +1755,34 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                             if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
 
                             raw_xpath = step.get("xpath", "").strip()
+                            js_script = step.get("script", "").strip()
                             delay = float(step.get("delay", 0.0))
+                            
+                            if js_script:
+                                signals.update_status.emit(f"Status: [{path_name}] Executing Script Step {step_idx + 1}...", "#ffffff")
+                                try:
+                                    res = driver.execute_script(js_script)
+                                    if res and isinstance(res, str) and res.startswith("http"):
+                                        page_url = driver.current_url
+                                        if script_url_allowed(res, path_name):
+                                            found_data = json.dumps({"url": res, "filename": f"Episode_{x}.mp4", "referer": page_url})
+                                            break
+                                        signals.update_status.emit(
+                                            f"Status: [{path_name}] Ignored a script link to "
+                                            f"{_host_of(res) or 'an unknown site'} -- not this path's host.",
+                                            "#e74c3c")
+                                except Exception:
+                                    pass
+                                
+                                slept = 0
+                                while slept < delay:
+                                    while pause_event.is_set() and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): 
+                                        time.sleep(1)
+                                    if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
+                                    time.sleep(0.5)
+                                    slept += 0.5
+                                continue
+
                             if not raw_xpath: continue
                             
                             xpath = parse_smart_xpath(raw_xpath)
@@ -1506,6 +1852,8 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 while pause_event.is_set() and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): 
                                     time.sleep(1)
                                 if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id): break
+                                if len(driver.window_handles) > len(before_handles):
+                                    break
                                 time.sleep(0.5)
                                 slept += 0.5
 
@@ -1543,8 +1891,11 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                         driver.switch_to.window(handle)
                                     except Exception:
                                         continue
-                                    url = driver.current_url
-                                    if _host_of(url) and tab_matches_path(url, path_name):
+                                    # Not `url`: that is the episode page, which a later
+                                    # attempt reloads -- overwriting it sent attempts 2
+                                    # and 3 to the host/ad tab instead.
+                                    tab_url = driver.current_url
+                                    if _host_of(tab_url) and tab_matches_path(tab_url, path_name):
                                         keeper = handle
                                         break
 
@@ -1605,14 +1956,13 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 except Exception as captcha_err:
                                     print(f"Captcha solving failed on tab switch: {captcha_err}")
                         
-                        if not path_failed:
+                        if not path_failed and not found_data:
                             signals.update_status.emit(f"Status: Intercepting Ep {x} (Waiting up to 35s)...", "#f39c12")
                             
                             driver.execute_script("window.open('');")
                             driver.switch_to.window(driver.window_handles[-1])
                             driver.get('chrome://downloads')
                             
-                            found_data = None
                             wait_timer = 0
                             
                             while wait_timer < 35 and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
@@ -1690,59 +2040,71 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                                 time.sleep(1)
                                 wait_timer += 1
                             
-                            if found_data and found_data != "BLOB":
-                                signals.update_status.emit(f"Status: ✅ Locked onto Ep {x}! Pre-fetched download details.", "#2ecc71")                                
-                                signals.add_active_download.emit(x)
-                                data_obj = json.loads(found_data)
-                                dl_url = data_obj['url']
-                                dl_fname = data_obj['filename']
-                                cookies = get_download_cookies(driver, dl_url)
-                                ua = driver.execute_script("return navigator.userAgent;")
-                                
-                                # Close the successfully intercepted tab immediately to free up system memory
-                                if len(driver.window_handles) > 1:
-                                    try:
-                                        driver.close()
-                                        driver.switch_to.window(driver.window_handles[0])
-                                    except: pass
-                                
-                                # Throttle: wait until an overall slot is free AND the
-                                # download's host is under its per-host cap.
-                                dl_host = _host_of(dl_url)
-                                while not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
-                                    previous_limit = controller.limit
-                                    limit = controller.evaluate()   # acts once per window
-                                    if limit != previous_limit:
-                                        signals.concurrency_changed.emit(controller.describe())
-                                    alive = len([t for t in active_engine_threads if t.is_alive()])
-                                    with host_lock:
-                                        host_n = host_active.get(dl_host, 0)
-                                    if alive < limit and host_n < PER_HOST_MAX:
-                                        break
-                                    if not pause_event.is_set():
-                                        apply_pending_adjustments()
-                                    time.sleep(1)
-
-                                if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
-                                    break
-
+                        if found_data and found_data != "BLOB":
+                            signals.update_status.emit(f"Status: ✅ Locked onto Ep {x}! Pre-fetched download details.", "#2ecc71")                                
+                            signals.add_active_download.emit(x)
+                            data_obj = json.loads(found_data)
+                            dl_url = data_obj['url']
+                            dl_fname = data_obj['filename']
+                            dl_referer = data_obj.get('referer')
+                            cookies = get_download_cookies(driver, dl_url)
+                            ua = driver.execute_script("return navigator.userAgent;")
+                            
+                            # Close the successfully intercepted tab immediately to free up system memory
+                            if len(driver.window_handles) > 1:
+                                try:
+                                    driver.close()
+                                    driver.switch_to.window(driver.window_handles[0])
+                                except: pass
+                            
+                            # Throttle: wait until an overall slot is free AND the
+                            # download's host is under its per-host cap.
+                            dl_host = _host_of(dl_url)
+                            while not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
+                                previous_limit = controller.limit
+                                limit = controller.evaluate()   # acts once per window
+                                if limit != previous_limit:
+                                    signals.concurrency_changed.emit(controller.describe())
+                                alive = len([t for t in active_engine_threads if t.is_alive()])
                                 with host_lock:
-                                    host_active[dl_host] = host_active.get(dl_host, 0) + 1
+                                    host_n = host_active.get(dl_host, 0)
+                                if alive < limit and host_n < PER_HOST_MAX:
+                                    break
+                                signals.update_active_download.emit(
+                                    x, f"⏳ Queued ({alive}/{limit} downloading)...")
+                                if not pause_event.is_set():
+                                    apply_pending_adjustments()
+                                time.sleep(1)
 
-                                signals.update_status.emit(f"Status: ▶ Starting download for Ep {x}...", "#2ecc71")
-                                t = threading.Thread(target=aria2c_downloader,
-                                                     args=(x, dl_url, dl_fname, cookies, ua, ep_temp_dir, cancel_event, on_episode_completed, process_downloaded_episode, my_task_id, controller))
-                                t.start()
-                                active_engine_threads.append(t)
-                                path_success = True
+                            if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
                                 break
-                            elif found_data == "BLOB":
-                                path_failed = True
-                                signals.update_status.emit(f"Status: ❌ Video is streaming, not a direct file.", "#e74c3c")
-                                break
-                            else:
-                                path_failed = True
+
+                            with host_lock:
+                                host_active[dl_host] = host_active.get(dl_host, 0) + 1
+
+                            signals.update_status.emit(f"Status: ▶ Starting download for Ep {x}...", "#2ecc71")
+
+                            def requeue(ep, failed_path=path_name):
+                                # Runs on the download thread; deque appends are atomic.
+                                exclude_paths.setdefault(ep, set()).add(failed_path)
+                                retry_q.append(ep)
+
+                            t = threading.Thread(target=aria2c_downloader,
+                                                 args=(x, dl_url, dl_fname, cookies, ua, ep_temp_dir, cancel_event, on_episode_completed, process_downloaded_episode, my_task_id, controller, dl_referer, requeue))
+                            t.start()
+                            active_engine_threads.append(t)
+                            path_success = True
+                            break
+                        elif found_data == "BLOB":
+                            path_failed = True
+                            signals.update_status.emit(f"Status: ❌ Video is streaming, not a direct file.", "#e74c3c")
+                            break
+                        else:
+                            # A step that already failed has reported its own reason
+                            # (missing button, ad redirect); don't overwrite it.
+                            if not path_failed:
                                 signals.update_status.emit(f"Status: ❌ Download never started on the webpage.", "#e74c3c")
+                            path_failed = True
                                 
                     if not path_success: raise Exception("Interception failed")
                     
@@ -1755,7 +2117,15 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
 
             if not path_success:
                 failed_eps.append(x)
-                signals.update_status.emit(f"Status: ❌ Failed to grab Episode {x} after 3 retries.", "#e74c3c")
+                # A retried episode still has the card from its failed download;
+                # without this it stayed in Active Tasks as if still running.
+                signals.remove_active_download.emit(x)
+                if no_server_left:
+                    signals.update_status.emit(
+                        f"Status: ❌ Ep {x}: every server on its page failed "
+                        f"({', '.join(sorted(exclude_paths.get(x, ())))}).", "#e74c3c")
+                else:
+                    signals.update_status.emit(f"Status: ❌ Failed to grab Episode {x} after 3 retries.", "#e74c3c")
 
             # Close every tab this episode opened (episode page, ad/redirect tabs,
             # chrome://downloads) and keep only the base tab, so Chrome tabs don't
@@ -1854,6 +2224,17 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                 return ", ".join(out)
             eps_str = _compact_spec(episodes_list) if episodes_list else ""
             log_history(site_key, eps_str, status, notes)
+            if status in ("Success", "Partial"):
+                # Note which site each finished episode came from (Library details
+                # and a hidden note in the anime's folder).
+                try:
+                    from utils.watch_later import record_sources
+                    done = [ep for ep in episodes_list if ep not in failed_eps
+                            and not (ep_cancel_events.get(ep) and ep_cancel_events[ep].is_set())]
+                    record_sources(site_key, done, locals().get("url_template", ""),
+                                   os.path.join(download_dir, safe_folder_name(site_key)))
+                except Exception:
+                    traceback.print_exc()
 
         if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
             signals.update_status.emit("Status: ❌ Download Cancelled.", "#e74c3c")
@@ -1863,6 +2244,10 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
         
         # Only emit task_finished (which triggers the Success Screen) if at least one episode actually succeeded!
         cancelled_count = sum(1 for ep in episodes_list if ep_cancel_events.get(ep) and ep_cancel_events[ep].is_set())
+        if task_started and not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id):
+            # episodes_list already excludes episodes skipped while paused.
+            signals.run_report.emit({"profile": site_key, "episodes": list(episodes_list),
+                                     "failed": sorted(set(failed_eps))})
         if not (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) and (len(failed_eps) + cancelled_count < len(episodes_list)):
             signals.task_finished.emit(failed_eps)
         else:

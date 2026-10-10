@@ -1,19 +1,16 @@
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import (FluentWindow, FluentIcon as FIF, MessageBoxBase,
                             SubtitleLabel, BodyLabel, PushButton)
 
 from ui.downloader_tab import DownloaderWidget
-from ui.search_tab import AnimeSearchWidget
-from ui.manager_tab import SiteManagerWidget
-from ui.history_tab import HistoryWidget
 from ui.progress_tab import ProgressTab
-from ui.watchlist_tab import WatchlistWidget
-from ui.player_tab import PlayerWidget
+from ui.notifier import Notifier, finished_message, new_episodes_message
+# The other tabs (and selenium, which they pull in) are imported in
+# AppWindow._build_tabs, after the window is on screen.
 from core.signals import signals
 from utils.config import APP_VERSION, app_settings, get_watchlist
-
-VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts')
+from utils.naming import VIDEO_EXTENSIONS
 
 
 class MissingEpisodesDialog(MessageBoxBase):
@@ -151,31 +148,30 @@ class AppWindow(FluentWindow):
         if app_settings.get("window_maximized", False):
             QTimer.singleShot(50, self.maximize_window)
 
+        # Only the Downloader (the tab the window opens on) and Active Tasks are
+        # built now. The other tabs were most of the window's build time, so they
+        # are built right after the window has painted (see _build_tabs); their
+        # navigation items are there from the start, and clicking one early builds
+        # them on the spot.
         self.downloader_interface = DownloaderWidget()
-        self.search_interface = AnimeSearchWidget(self)
         self.progress_interface = ProgressTab()
-        self.manager_interface = SiteManagerWidget()
-        self.history_interface = HistoryWidget()
-        self.watchlist_interface = WatchlistWidget()
-        self.player_interface = PlayerWidget()
+        self.search_interface = None
+        self.manager_interface = None
+        self.watch_later_interface = None
+        self.watchlist_interface = None
+        self.player_interface = None
+        self._tabs_built = False
+        self.notifier = Notifier(self)   # Windows notifications (finished runs, new episodes)
 
         self.downloader_interface.setObjectName("downloader_interface")
-        self.search_interface.setObjectName("search_interface")
         self.progress_interface.setObjectName("progress_interface")
-        self.manager_interface.setObjectName("manager_interface")
-        self.history_interface.setObjectName("history_interface")
-        self.watchlist_interface.setObjectName("watchlist_interface")
-        self.player_interface.setObjectName("player_interface")
 
         # Wide windows: centre each tab in a readable column instead of stretching
-        # forms across a 2560 px screen. Search and History hold grids/tables that
-        # use the extra room, so they get a wider column.
+        # forms across a 2560 px screen. Search holds a grid that uses the extra
+        # room, so it gets a wider column.
         from ui.responsive import cap_width
         self._width_caps = [cap_width(page, width) for page, width in (
-            (self.downloader_interface, 1100), (self.manager_interface, 1300),
-            (self.watchlist_interface, 1300), (self.player_interface, 1200),
-            (self.progress_interface, 1300), (self.search_interface, 1700),
-            (self.history_interface, 1600))]
+            (self.downloader_interface, 1100), (self.progress_interface, 1300))]
 
         # Track if the progress tab has been added yet
         self.progress_added = False
@@ -210,25 +206,13 @@ class AppWindow(FluentWindow):
         # When downloads finish the tab stays put; it closes on "Start Watching" or
         # as soon as the user navigates elsewhere.
         signals.task_finished.connect(self.on_task_finished)
+        signals.run_report.connect(self._on_run_report)
         self.progress_interface.watch_requested.connect(self.on_start_watching)
         self.stackedWidget.currentChanged.connect(self._dismiss_finished_tab_on_navigate)
         self.stackedWidget.currentChanged.connect(self._sync_manager_to_downloader)
         
-        # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
-        self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
-        self.search_interface.profile_created_signal.connect(self.on_search_profile_created)
-        self.downloader_interface.goto_profiles_signal.connect(lambda: self.switchTo(self.manager_interface))
-        self.history_interface.redownload_signal.connect(self.on_redownload_from_history)
-
-        # Watchlist wiring: follow from Search, and download-new -> Downloader.
-        self.search_interface.follow_signal.connect(self.on_follow_anime)
-        self.watchlist_interface.download_new_signal.connect(self.on_watch_download_new)
-        self.watchlist_interface.download_all_signal.connect(self.on_watch_download_all)
-        self.watchlist_interface.new_episodes_found.connect(self.on_new_episodes_found)
-
-        # Discord webhook sync between Downloader tab and Watchlist Cloud Notifications
-        self.downloader_interface.webhook_changed.connect(self.watchlist_interface.on_webhook_updated)
-        self.watchlist_interface.webhook_changed.connect(self.downloader_interface.on_webhook_updated)
+        self.downloader_interface.goto_profiles_signal.connect(
+            lambda: self.open_tab("manager_interface"))
 
         # Batch downloads run back-to-back: the engine handles one task at a time.
         self._download_queue = []
@@ -239,15 +223,11 @@ class AppWindow(FluentWindow):
         signals.update_available.connect(self.prompt_update)
         signals.remote_commands_received.connect(self._execute_remote_commands)
 
-        # Auto-check the Watchlist shortly after launch and periodically while open
-        if get_watchlist():
-            # Only today's anime on launch. A full sweep is slow, hammers both sites
-            # and mostly re-reads anime that cannot have a new episode today; "Check
-            # all now" in the Watchlist tab is there for the full pass.
-            QTimer.singleShot(8000, self.watchlist_interface.check_today)
-            self._watchlist_timer = QTimer(self)
-            self._watchlist_timer.timeout.connect(self.watchlist_interface.check_today)
-            self._watchlist_timer.start(30 * 60 * 1000)  # Check today's releases every 30 minutes
+        # The rest of the tabs: once the window is on screen (first paint), with a
+        # fallback in case no paint arrives (minimised, off-screen).
+        self._first_paint_seen = False
+        self.downloader_interface.installEventFilter(self)    # the page shown first
+        QTimer.singleShot(1500, self._build_tabs)
 
         # Silent background sync of watchlist & seen episodes with Cloud Service on launch
         if app_settings.get("cloud_notify_enabled"):
@@ -259,6 +239,9 @@ class AppWindow(FluentWindow):
             self._cloud_poll_timer = QTimer(self)
             self._cloud_poll_timer.timeout.connect(self._poll_cloud_commands)
             self._cloud_poll_timer.start(5 * 1000)
+            # The first poll right after the window is up (in the background):
+            # main.py no longer fetches commands before showing it.
+            QTimer.singleShot(0, self._poll_cloud_commands)
 
         if autostart_commands:
             QTimer.singleShot(600, lambda: self._execute_remote_commands(autostart_commands))
@@ -488,15 +471,12 @@ class AppWindow(FluentWindow):
             self.update_thread.error.connect(on_download_error)
             self.update_thread.start()
 
-    def on_redownload_from_history(self, profile, episodes_str):
-        self.switchTo(self.downloader_interface)
-        self.downloader_interface.start_redownload(profile, episodes_str)
-
     def on_search_profile_created(self, _name):
         # Search created a profile (and set it as last_profile); refresh both the
         # Downloader dropdown and the Profile Manager list, then jump to the Downloader.
         self.downloader_interface.refresh_dropdown()
-        self.manager_interface.refresh_combo()
+        if self.manager_interface is not None:
+            self.manager_interface.refresh_combo()
         self.switchTo(self.downloader_interface)
 
     def on_watch_download_all(self, items):
@@ -524,9 +504,15 @@ class AppWindow(FluentWindow):
         Skipped while a download is running, so an auto-check can't yank the user off
         the Active Tasks screen mid-download.
         """
+        self.notifier.notify(*new_episodes_message(int(_count or 0)))
         if self.progress_added:
             return
         self.switchTo(self.watchlist_interface)
+
+    def on_watch_later_add(self, title, url, domain, cover):
+        # A Search result was saved for later -> add it (no profile) and show it.
+        self.switchTo(self.watch_later_interface)
+        self.watch_later_interface.add(title, url, domain, cover)
 
     def on_follow_anime(self, title, url, domain, cover):
         # A Search result was followed -> add to the Watchlist and jump there.
@@ -544,14 +530,99 @@ class AppWindow(FluentWindow):
         else:
             self.showMaximized()
 
+    # The tabs built after the window first paints: (attribute = route key, icon,
+    # label), in navigation order.
+    DEFERRED_TABS = (
+        ("search_interface", FIF.SEARCH, "Search Anime"),
+        ("watchlist_interface", FIF.HEART, "Watchlist"),
+        ("watch_later_interface", FIF.LIBRARY, "Library"),
+        ("manager_interface", FIF.SETTING, "Profile Manager"),
+        ("player_interface", FIF.VIDEO, "Video Player"),
+    )
+    DEFERRED_WIDTHS = {"search_interface": 1700, "watchlist_interface": 1300,
+                       "watch_later_interface": 1300, "manager_interface": 1300,
+                       "player_interface": 1200}
+
     def init_navigation(self):
-        # We only add Downloader, Manager, and History at startup!
+        # Active Tasks is the one tab added later (when a download starts). The
+        # deferred tabs get their navigation items now -- the same items
+        # addSubInterface would make -- so the sidebar is complete on first paint.
+        from qfluentwidgets import NavigationItemPosition
         self.addSubInterface(self.downloader_interface, FIF.DOWNLOAD, "Downloader")
-        self.addSubInterface(self.search_interface, FIF.SEARCH, "Search Anime")
-        self.addSubInterface(self.watchlist_interface, FIF.HEART, "Watchlist")
-        self.addSubInterface(self.manager_interface, FIF.SETTING, "Profile Manager")
-        self.addSubInterface(self.history_interface, FIF.HISTORY, "History")
-        self.addSubInterface(self.player_interface, FIF.VIDEO, "Video Player")
+        for key, icon, text in self.DEFERRED_TABS:
+            self.navigationInterface.addItem(
+                routeKey=key, icon=icon, text=text, tooltip=text,
+                onClick=lambda _checked=False, k=key: self.open_tab(k),
+                position=NavigationItemPosition.TOP)
+
+    def eventFilter(self, obj, event):
+        # getattr: FluentWindow routes its own filters through here during
+        # super().__init__(), before this attribute exists -- and an exception in
+        # a Qt callback aborts the app.
+        if (not getattr(self, "_first_paint_seen", True) and event.type() == QEvent.Type.Paint
+                and obj is self.downloader_interface):
+            self._first_paint_seen = True
+            self.downloader_interface.removeEventFilter(self)
+            QTimer.singleShot(0, self._build_tabs)
+        return super().eventFilter(obj, event)
+
+    def open_tab(self, key):
+        """Switch to a tab by its route key, building the deferred tabs first if
+        they aren't yet (a click within the first moment after launch)."""
+        self._build_tabs()
+        self.switchTo(getattr(self, key))
+
+    def _build_tabs(self):
+        """Build Search, Watchlist, Library, Profile Manager and Video Player, and
+        wire them up. Runs once, right after the window's first paint."""
+        if self._tabs_built:
+            return
+        self._tabs_built = True
+        from ui.responsive import cap_width
+        from ui.search_tab import AnimeSearchWidget
+        from ui.manager_tab import SiteManagerWidget
+        from ui.watch_later_tab import WatchLaterWidget
+        from ui.watchlist_tab import WatchlistWidget
+        from ui.player_tab import PlayerWidget
+        self.search_interface = AnimeSearchWidget(self)
+        self.watchlist_interface = WatchlistWidget()
+        self.watch_later_interface = WatchLaterWidget()
+        self.manager_interface = SiteManagerWidget()
+        self.player_interface = PlayerWidget()
+        for key, _icon, _text in self.DEFERRED_TABS:
+            page = getattr(self, key)
+            page.setObjectName(key)
+            page.setProperty("isStackedTransparent", False)   # as addSubInterface sets it
+            self.stackedWidget.addWidget(page)
+            self._width_caps.append(cap_width(page, self.DEFERRED_WIDTHS[key]))
+
+        # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
+        self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
+        self.search_interface.profile_created_signal.connect(self.on_search_profile_created)
+        self.watch_later_interface.profile_ready.connect(self.on_search_profile_created)
+        self.watch_later_interface.search_requested.connect(lambda: self.switchTo(self.search_interface))
+        self.watch_later_interface.player_requested.connect(lambda: self.switchTo(self.player_interface))
+        self.search_interface.watch_later_signal.connect(self.on_watch_later_add)
+
+        # Watchlist wiring: follow from Search, and download-new -> Downloader.
+        self.search_interface.follow_signal.connect(self.on_follow_anime)
+        self.watchlist_interface.download_new_signal.connect(self.on_watch_download_new)
+        self.watchlist_interface.download_all_signal.connect(self.on_watch_download_all)
+        self.watchlist_interface.new_episodes_found.connect(self.on_new_episodes_found)
+
+        # Discord webhook sync between Downloader tab and Watchlist Cloud Notifications
+        self.downloader_interface.webhook_changed.connect(self.watchlist_interface.on_webhook_updated)
+        self.watchlist_interface.webhook_changed.connect(self.downloader_interface.on_webhook_updated)
+
+        # Auto-check the Watchlist shortly after launch and periodically while open
+        if get_watchlist():
+            # Only today's anime on launch. A full sweep is slow, hammers both sites
+            # and mostly re-reads anime that cannot have a new episode today; "Check
+            # all now" in the Watchlist tab is there for the full pass.
+            QTimer.singleShot(8000, self.watchlist_interface.check_today)
+            self._watchlist_timer = QTimer(self)
+            self._watchlist_timer.timeout.connect(self.watchlist_interface.check_today)
+            self._watchlist_timer.start(30 * 60 * 1000)  # Check today's releases every 30 minutes
 
     def hide_active_tasks(self, switch_away=True):
         """Hides the Active Tasks tab completely"""
@@ -588,6 +659,12 @@ class AppWindow(FluentWindow):
         self.navigationInterface.setEnabled(True)
         self._await_finish_dismiss = True
 
+    def _on_run_report(self, report):
+        """Every run that ended on its own -- including one where everything failed."""
+        self.notifier.notify(*finished_message(report.get("profile", ""),
+                                               report.get("episodes", []),
+                                               report.get("failed", [])))
+
     def _dismiss_finished_tab_on_navigate(self, _index=None):
         """Drop the finished Active Tasks tab once the user moves somewhere else."""
         if not getattr(self, "_await_finish_dismiss", False):
@@ -604,7 +681,8 @@ class AppWindow(FluentWindow):
         user who picked a profile on the Downloader tab and came here to edit it was
         looking at a different one -- easy to edit the wrong profile by mistake.
         """
-        if self.stackedWidget.currentWidget() is not self.manager_interface:
+        if self.manager_interface is None or \
+                self.stackedWidget.currentWidget() is not self.manager_interface:
             return
         try:
             self.manager_interface.show_profile(
@@ -668,6 +746,10 @@ class AppWindow(FluentWindow):
         threads = []
         try:
             threads += [t for t in getattr(self.search_interface, "_threads", []) if t and t.isRunning()]
+        except Exception:
+            pass
+        try:
+            threads += self.watch_later_interface.stop_threads()   # episode look-ups
         except Exception:
             pass
         for obj, attr in ((self.watchlist_interface, "_check_thread"),

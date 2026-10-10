@@ -770,6 +770,17 @@ class WatchlistWidget(QWidget):
         if first_time:
             fields["seen_max"] = latest_max
         update_watch(url, **fields)
+        # A profile for this anime may cap its episode boxes at the count it was
+        # made with; let it reach the episodes this check just found.
+        if template and latest_max:
+            from ui.search_tab import raise_episode_bound
+            from utils.config import sites_data, config_lock, save_config
+            with config_lock:
+                raised = raise_episode_bound(sites_data, template, latest_max)
+            if raised:
+                save_config()
+                from core.signals import signals as _signals
+                _signals.profile_limits_changed.emit(raised)
         card = self._cards.get(url)
         entry = next((w for w in get_watchlist() if w.get("url") == url), {})
         if card:

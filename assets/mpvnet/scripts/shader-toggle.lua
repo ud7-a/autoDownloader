@@ -1,8 +1,10 @@
 -- Toggle all glsl-shaders off/on for before/after comparison.
 -- Restores whatever the active profile had loaded.
+-- Bound unqualified in input.conf: newer mpv renames this script to
+-- "shader_toggle", so "shader-toggle/toggle" silently stops matching.
 local saved = nil
 
-mp.add_key_binding(nil, "toggle", function()
+mp.add_key_binding(nil, "shader-compare-toggle", function()
     local current = mp.get_property_native("glsl-shaders")
     if #current > 0 then
         saved = current

@@ -23,7 +23,31 @@ def _startup_mark(label):
         pass
 
 
-_startup_mark("python reached main.py")
+def _process_age_ms():
+    """How long this process ran before main.py: the exe's bootloader, loading
+    Python and its DLLs, and the virus scanner reading them. None if unknown."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        created, *_rest = [wintypes.FILETIME() for _ in range(4)]
+        if not k32.GetProcessTimes(k32.GetCurrentProcess(), ctypes.byref(created),
+                                   *[ctypes.byref(f) for f in _rest]):
+            return None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime   # 100 ns since 1601
+        return (_T0 - (ticks / 1e7 - 11644473600)) * 1000
+    except Exception:
+        return None
+
+
+if os.environ.get("AED_STARTUP_LOG"):
+    _age = _process_age_ms()
+    _startup_mark("process started" if _age is None
+                  else f"python reached main.py ({_age:.0f} ms after the process started)")
+else:
+    _startup_mark("python reached main.py")
 
 # Before anything else can fail: without this, an error inside any Qt callback made
 # PyQt abort the installed app (0xC0000409 in Qt6Core.dll) with no record of why.
@@ -200,6 +224,13 @@ if __name__ == "__main__":
     setThemeColor('#4cc2ff')
     _startup_mark("qfluentwidgets imported + theme set")
 
+    # Every hint in the app draws as a Fluent tooltip (see ui/tooltips.py).
+    from ui.tooltips import install_fluent_tooltips
+    install_fluent_tooltips(app)
+    # Dropdowns fade in place instead of sliding, which stuttered (ui/menus.py).
+    from ui.menus import install_smooth_menus
+    install_smooth_menus()
+
     # Load and apply the modern WinUI 3 custom stylesheet to standard controls
     from ui.styles import WIN11_QSS, generate_ui_icons
     check_icon, arrow_icon = generate_ui_icons()
@@ -283,15 +314,18 @@ if __name__ == "__main__":
     except Exception as _log_err:
         print(f"[logs] could not clear old logs: {type(_log_err).__name__}: {_log_err}")
 
-    # Fetch any pending remote download commands from cloud
+    # Launched at login with --autostart: stay only if a remote download command is
+    # waiting, so this one launch has to ask the cloud before showing anything. A
+    # normal launch never waits on the network: that call (up to 8 s) used to sit
+    # in front of every window. AppWindow polls for commands as soon as it is up.
     from utils.config import cloud_fetch_commands, app_settings
     initial_commands = []
-    if app_settings.get("cloud_notify_enabled"):
-        initial_commands = cloud_fetch_commands()
-
-    # If launched on Windows boot with --autostart and no commands exist -> exit immediately
-    if "--autostart" in sys.argv and not initial_commands:
-        sys.exit(0)
+    if "--autostart" in sys.argv:
+        if app_settings.get("cloud_notify_enabled"):
+            initial_commands = cloud_fetch_commands()
+        if not initial_commands:
+            sys.exit(0)
+    _startup_mark("remote commands checked")
 
     # Now import and instantiate the main app window
     from ui.app_window import AppWindow
@@ -313,6 +347,18 @@ if __name__ == "__main__":
         except Exception:
             pass
     _startup_mark("window shown")
+    if os.environ.get("AED_STARTUP_LOG"):
+        # Paint and the deferred tabs happen once the event loop runs.
+        from PyQt6.QtCore import QTimer as _QTimer
+        _QTimer.singleShot(0, lambda: _startup_mark("event loop running"))
+        _orig_build = window._build_tabs
+
+        def _marked_build():
+            first = not window._tabs_built
+            _orig_build()
+            if first:
+                _startup_mark("remaining tabs built")
+        window._build_tabs = _marked_build
 
     # Opt-in freeze recorder (AED_UI_WATCHDOG=1 or --watchdog). Does nothing otherwise.
     #

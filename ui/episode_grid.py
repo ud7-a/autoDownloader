@@ -28,9 +28,14 @@ class EpisodeGrid(QWidget):
     cells; Shift+click sets everything between the last click and here."""
 
     changed = pyqtSignal()
+    # Unselected cells are struck through: on the paused screen they are skipped.
+    # Watch later's grid marks watched episodes instead, where off means "not yet".
+    STRIKE_OFF = True
+    CELL_H = CELL_H                     # taller in grids that show a caption line
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._captions = {}             # episode -> small second line, e.g. its site
         self._eps = []
         self._sel = []
         self._hover = None
@@ -53,6 +58,11 @@ class EpisodeGrid(QWidget):
         self._sel = [e in keep for e in self._eps]
         self._hover = self._anchor = None
         self.updateGeometry()
+        self.update()
+
+    def set_captions(self, captions):
+        """A small line under each episode number ({episode: text})."""
+        self._captions = dict(captions or {})
         self.update()
 
     def episodes(self):
@@ -79,7 +89,7 @@ class EpisodeGrid(QWidget):
 
     def heightForWidth(self, width):
         rows = math.ceil(len(self._eps) / self.columns_for(width)) if self._eps else 0
-        return max(0, rows * (CELL_H + GAP) - GAP)
+        return max(0, rows * (self.CELL_H + GAP) - GAP)
 
     def hasHeightForWidth(self):
         return True
@@ -89,7 +99,7 @@ class EpisodeGrid(QWidget):
         return QSize(w, self.heightForWidth(w))
 
     def minimumSizeHint(self):
-        return QSize(CELL_W, CELL_H)
+        return QSize(CELL_W, self.CELL_H)
 
     def _layout(self):
         cols = self.columns_for(self.width())
@@ -98,12 +108,12 @@ class EpisodeGrid(QWidget):
 
     def _rect(self, i, cols, cell_w):
         row, col = divmod(i, cols)
-        return QRectF(col * (cell_w + GAP), row * (CELL_H + GAP), cell_w, CELL_H)
+        return QRectF(col * (cell_w + GAP), row * (self.CELL_H + GAP), cell_w, self.CELL_H)
 
     def index_at(self, pos):
         cols, cell_w = self._layout()
         col = int(pos.x() // (cell_w + GAP))
-        row = int(pos.y() // (CELL_H + GAP))
+        row = int(pos.y() // (self.CELL_H + GAP))
         if pos.x() < 0 or pos.y() < 0 or col >= cols:
             return None
         i = row * cols + col
@@ -119,11 +129,11 @@ class EpisodeGrid(QWidget):
         accent_hover = accent.lighter(112)
         on_font = QFont(self.font())
         off_font = QFont(self.font())
-        off_font.setStrikeOut(True)
+        off_font.setStrikeOut(self.STRIKE_OFF)
         cols, cell_w = self._layout()
         # Only the rows inside the exposed area -- the rest is scrolled away.
-        first = max(0, int(event.rect().top() // (CELL_H + GAP)) * cols)
-        last = min(len(self._eps), (int(event.rect().bottom() // (CELL_H + GAP)) + 1) * cols)
+        first = max(0, int(event.rect().top() // (self.CELL_H + GAP)) * cols)
+        last = min(len(self._eps), (int(event.rect().bottom() // (self.CELL_H + GAP)) + 1) * cols)
         for i in range(first, last):
             r = self._rect(i, cols, cell_w).adjusted(0.5, 0.5, -0.5, -0.5)
             on = self._sel[i]
@@ -138,7 +148,22 @@ class EpisodeGrid(QWidget):
             p.drawRoundedRect(r, 6, 6)
             p.setFont(on_font if on else off_font)
             p.setPen(ON_TEXT if on else OFF_TEXT)
-            p.drawText(r, Qt.AlignmentFlag.AlignCenter, str(self._eps[i]))
+            caption = self._captions.get(self._eps[i])
+            if caption:
+                number = QRectF(r.left(), r.top() + 2, r.width(), r.height() * 0.55)
+                p.drawText(number, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
+                           str(self._eps[i]))
+                small = QFont(self.font())
+                small.setPixelSize(10)
+                small.setStrikeOut(False)
+                p.setFont(small)
+                line = QRectF(r.left() + 3, number.bottom(), r.width() - 6,
+                              r.bottom() - number.bottom() - 2)
+                text = p.fontMetrics().elidedText(caption, Qt.TextElideMode.ElideRight,
+                                                  int(line.width()))
+                p.drawText(line, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, text)
+            else:
+                p.drawText(r, Qt.AlignmentFlag.AlignCenter, str(self._eps[i]))
         p.end()
 
     # ---- mouse

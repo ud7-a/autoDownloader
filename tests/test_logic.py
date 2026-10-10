@@ -1000,7 +1000,9 @@ class WitanimeTemplateTests(unittest.TestCase):
         for name, steps in expected.items():
             self.assertEqual(len(flow[name]), len(steps), f"{name}: step count changed")
             for i, step in enumerate(steps):
-                self.assertEqual(flow[name][i]["xpath"], step["xpath"], f"{name}[{i}] xpath")
+                # A step is either a click (xpath) or page JavaScript (script).
+                self.assertEqual(flow[name][i].get("xpath"), step.get("xpath"), f"{name}[{i}] xpath")
+                self.assertEqual(flow[name][i].get("script"), step.get("script"), f"{name}[{i}] script")
                 self.assertEqual(float(flow[name][i]["delay"]), float(step["delay"]),
                                  f"{name}[{i}] delay")
 
@@ -1262,6 +1264,763 @@ class ResponsiveLayoutTests(unittest.TestCase):
         w, h = (calls[0].args[0].value, calls[0].args[1].value)
         self.assertLessEqual(w, 1024)
         self.assertLessEqual(h, 576)
+
+
+class HdFallbackTests(unittest.TestCase):
+    """Episodes with no FHD group (or dead FHD mirrors) fall back to HD."""
+
+    def setUp(self):
+        from ui.search_tab import DEFAULT_SITE_FLOWS
+        self.flows = DEFAULT_SITE_FLOWS
+
+    def test_hd_twins_follow_every_fhd_path(self):
+        from core.selenium_engine import with_hd_fallback
+        wit = self.flows["witanime.site"]["step_paths"]
+        out = with_hd_fallback(wit)
+        names = list(out)
+        self.assertEqual(names[:len(wit)], list(wit))               # FHD first, unchanged
+        self.assertEqual(names[len(wit):], [n.replace("FHD", "HD") for n in wit])
+        self.assertEqual(out["FHD - Mediafire"], wit["FHD - Mediafire"])
+
+    def test_hd_xpath_excludes_the_fhd_button(self):
+        from core.selenium_engine import with_hd_fallback
+        out = with_hd_fallback(self.flows["witanime.site"]["step_paths"])
+        step1 = out["HD - Mediafire"][0]["xpath"]
+        self.assertIn("contains(., 'HD') and not(contains(., 'FHD'))", step1)
+        self.assertNotIn("button[contains(., 'FHD')]", out["HD - Mediafire"][1]["xpath"])
+        self.assertEqual(out["HD - Mediafire"][2], out["FHD - Mediafire"][2])   # host page step
+
+    def test_twins_get_their_own_probes(self):
+        from core.selenium_engine import with_hd_fallback, path_probes
+        probes = path_probes(with_hd_fallback(self.flows["witanime.site"]["step_paths"]))
+        self.assertIn("'FHD')]]//button", probes["FHD - Mediafire"])
+        self.assertIn("not(contains(., 'FHD'))", probes["HD - Mediafire"])
+        self.assertIn("mediafire", probes["HD - Mediafire"])
+
+    def test_non_fhd_profiles_untouched(self):
+        from core.selenium_engine import with_hd_fallback
+        ani = self.flows["eta.animerco.org"]["step_paths"]
+        self.assertEqual(with_hd_fallback(ani), ani)
+        custom = {"FHD mirror": [{"xpath": "//a[@id='dl']"}]}
+        self.assertEqual(with_hd_fallback(custom), custom)          # name alone is not enough
+
+    def test_name_clash(self):
+        from core.selenium_engine import with_hd_fallback
+        sp = {"FHD - x": [{"xpath": "//b[contains(., 'FHD')]"}], "HD - x": [{"xpath": "//i"}]}
+        self.assertIn("HD - x (HD)", with_hd_fallback(sp))
+
+
+class ServerFallbackTests(unittest.TestCase):
+    """A captured link that won't download sends the episode back to try its next
+    server, and a dead link is no longer counted as downloaded."""
+
+    def test_next_episode_order(self):
+        import collections
+        from core.selenium_engine import next_episode
+        retry, work = collections.deque([4]), collections.deque([5, 6])
+        self.assertEqual(("ep", 4), next_episode(retry, work, lambda: True))   # retries first
+        self.assertEqual(("ep", 5), next_episode(retry, work, lambda: True))
+        self.assertEqual(("ep", 6), next_episode(retry, work, lambda: True))
+        self.assertEqual(("wait", None), next_episode(retry, work, lambda: True))
+        self.assertEqual(("done", None), next_episode(retry, work, lambda: False))
+
+    def test_late_requeue_is_not_lost(self):
+        import collections
+        from core.selenium_engine import next_episode
+        retry, work = collections.deque(), collections.deque()
+
+        def thread_finishes():            # the thread re-queues, then exits
+            retry.append(7)
+            return False
+        self.assertEqual(("ep", 7), next_episode(retry, work, thread_finishes))
+
+    def run_download(self, lines_per_attempt, returncodes, on_failed=True, url="https://host.example/v.mp4"):
+        """Drive aria2c_downloader with a fake aria2c process."""
+        from unittest import mock
+        import core.selenium_engine as eng
+        calls = {"completed": 0, "failed": [], "popen": 0, "cmds": []}
+        codes = iter(returncodes)
+
+        class FakeProc:
+            def __init__(self, *a, **k):
+                calls["popen"] += 1
+                if a and len(a) > 0:
+                    calls["cmds"].append(list(a[0]))
+                self.stdout = iter(lines_per_attempt)
+                self.returncode = next(codes)
+
+            def wait(self):
+                return self.returncode
+
+        tmp = tempfile.mkdtemp(prefix="aed_dl_")
+        eng.CURRENT_TASK_ID = 99
+        eng.ep_cancel_events.pop(1, None)
+        eng.ep_pause_events.pop(1, None)
+        eng.pause_event.clear()
+        cancel = __import__("threading").Event()
+        with mock.patch.object(eng.subprocess, "Popen", FakeProc), \
+                mock.patch.object(eng.os.path, "exists", side_effect=lambda p: True), \
+                mock.patch.object(eng.time, "sleep", lambda s: None), \
+                mock.patch.object(eng, "is_block_page", return_value=False), \
+                mock.patch.object(eng, "rotate_error_log", lambda p: None), \
+                mock.patch.object(eng, "APP_DIR", tmp), \
+                mock.patch.object(eng, "save_config", create=True), \
+                mock.patch("utils.config.save_config"):
+            eng.aria2c_downloader(
+                1, url, "v.mp4", [], "ua", tmp, cancel,
+                lambda: calls.__setitem__("completed", calls["completed"] + 1),
+                None, 99, None, None,
+                (lambda ep: calls["failed"].append(ep)) if on_failed else None)
+        return calls
+
+    def test_dead_link_goes_to_the_next_server(self):
+        no_data = ["[#1 0B/0B CN:1 DL:0B]"]
+        calls = self.run_download(no_data, [2] * 6)
+        self.assertEqual([1], calls["failed"])
+        self.assertEqual(0, calls["completed"])          # not counted as downloaded
+        self.assertEqual(3, calls["popen"])               # gives up after 3, not 6
+
+    def test_success_completes(self):
+        ok = ["[#1 210MiB/421MiB(50%) CN:16 DL:5.1MiB ETA:41s]"]
+        calls = self.run_download(ok, [0])
+        self.assertEqual(1, calls["completed"])
+        self.assertEqual([], calls["failed"])
+
+    def test_without_fallback_a_failure_still_completes(self):
+        calls = self.run_download(["[#1 0B/0B CN:1 DL:0B]"], [2] * 6, on_failed=False)
+        self.assertEqual(1, calls["completed"])
+
+    def test_single_conn_host_starts_with_one_connection(self):
+        # Hosts known not to support Range headers (e.g. wahmi.org) start with 1 connection immediately
+        ok = ["[#1 417MiB/417MiB(100%) CN:1 DL:35MiB ETA:0s]"]
+        calls = self.run_download(ok, [0], url="https://wahmi.org/download/abc/def/ep.mp4")
+        self.assertEqual(1, calls["completed"])
+        self.assertEqual(1, calls["popen"])
+        first_cmd = calls["cmds"][0]
+        # Must have -x 1, -s 1, -j 1 and 4M buffer with mmap
+        self.assertIn("-x", first_cmd)
+        x_idx = first_cmd.index("-x")
+        self.assertEqual("1", first_cmd[x_idx + 1])
+        self.assertIn("--socket-recv-buffer-size=4M", first_cmd)
+        self.assertIn("--enable-mmap=true", first_cmd)
+
+    def test_mp4upload_starts_with_optimal_connections(self):
+        # mp4upload limits concurrent connections per IP and blocks >=8 with 403,
+        # but 4 connections allows maximum throughput (25-35+ MB/s).
+        ok = ["[#1 365MiB/365MiB(100%) CN:4 DL:30MiB ETA:0s]"]
+        calls = self.run_download(ok, [0], url="https://a1.mp4upload.com:183/d/xyz/video.mp4")
+        self.assertEqual(1, calls["completed"])
+        self.assertEqual(1, calls["popen"])
+        first_cmd = calls["cmds"][0]
+        self.assertIn("-x", first_cmd)
+        x_idx = first_cmd.index("-x")
+        self.assertEqual("4", first_cmd[x_idx + 1])
+        self.assertIn("--connect-timeout=15", first_cmd)
+
+    def test_range_error_skips_intermediate_step_downs(self):
+        # When a server returns "Invalid range header", it jumps straight to 1 connection
+        range_err_lines = [
+            "Exception: [AbstractCommand.cc:351] errorCode=8 URI=https://unknown-host.com/v.mp4",
+            "-> [HttpResponse.cc:81] errorCode=8 Invalid range header. Request: 100-200/400, Response: 0-400/400"
+        ]
+        # Attempt 1: 16 conns fails with range error. Attempt 2: jumps straight to 1 conn and succeeds.
+        calls = self.run_download(range_err_lines, [8, 0], url="https://unknown-host.com/v.mp4")
+        self.assertEqual(1, calls["completed"])
+        self.assertEqual(2, calls["popen"])   # 2 popens total, NOT 5 (16 -> 1 directly, skipping 8, 4, 2)
+        second_cmd = calls["cmds"][1]
+        x_idx = second_cmd.index("-x")
+        self.assertEqual("1", second_cmd[x_idx + 1])
+
+    def test_403_multi_conn_rejection_skips_intermediate_step_downs(self):
+        # When a server rejects multi-connection requests with 403 Forbidden / errorCode=22,
+        # it jumps straight to 1 connection rather than trying 8, 4, 2.
+        err_lines = [
+            "[ERROR] CUID#14 - Download aborted. URI=https://cdn.example.org/video.mp4",
+            "Exception: [AbstractCommand.cc:351] errorCode=22 URI=https://cdn.example.org/video.mp4",
+            "-> [HttpSkipResponseCommand.cc:239] errorCode=22 The response status is not successful. status=403"
+        ]
+        calls = self.run_download(err_lines, [22, 0], url="https://cdn.example.org/video.mp4")
+        self.assertEqual(1, calls["completed"])
+        self.assertEqual(2, calls["popen"])
+        second_cmd = calls["cmds"][1]
+        x_idx = second_cmd.index("-x")
+        self.assertEqual("1", second_cmd[x_idx + 1])
+
+
+class ScriptSafetyTests(unittest.TestCase):
+    """Script steps: their links must stay on the site they ran on."""
+
+    def test_script_link_must_be_on_the_paths_host(self):
+        from core.selenium_engine import script_url_allowed as ok
+        self.assertTrue(ok("https://a3.mp4upload.com:183/d/x/video.mp4", "FHD - mp4upload"))
+        self.assertTrue(ok("https://a3.mp4upload.com:183/d/x/video.mp4", "HD - mp4upload"))
+        # An ad tab's own video: not the host the path is named after.
+        self.assertFalse(ok("https://cdn.some-ad-network.com/clip.mp4", "FHD - mp4upload"))
+        self.assertFalse(ok("https://mp4upload.com.evil.org/x.mp4", "FHD - mp4upload"))
+        self.assertFalse(ok("https://cdn.mp4upload.xyz/x.mp4", "FHD - mp4upload"))   # look-alike TLD
+        self.assertFalse(ok("https://notmp4upload.com/x.mp4", "FHD - mp4upload"))
+        self.assertFalse(ok("file:///C:/Windows/win.ini", "FHD - mp4upload"))
+        self.assertFalse(ok("javascript:alert(1)", "FHD - mp4upload"))
+        # Known hosts by their table entry; a path naming no host gets nothing.
+        self.assertTrue(ok("https://download1.mediafire.com/f/ep.mp4", "FHD - Mediafire"))
+        self.assertFalse(ok("https://download1.mediafire.com/f/ep.mp4", "FHD - gofile"))
+        self.assertFalse(ok("https://a3.mp4upload.com/d/x/video.mp4", "Path 1"))
+        self.assertTrue(ok("https://wahmi.org/download/GKcq82QDdbgfy78/1RgzRYEMb3bpB/ep.mp4", "FHD - wahmi"))
+        self.assertTrue(ok("https://wahmi.org/download/GKcq82QDdbgfy78/1RgzRYEMb3bpB/ep.mp4", "HD - wahmi"))
+        self.assertFalse(ok("https://fake-wahmi.com/ep.mp4", "FHD - wahmi"))
+
+
+class DuplicateProfileTests(unittest.TestCase):
+    """Loading an anime that already has a profile opens it instead of copying it."""
+
+    def test_same_anime_matches(self):
+        from ui.search_tab import find_profile_for_template
+        profiles = {
+            "One Piece": {"url": "https://witanime.site/watch/one-piece-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-{x}/"},
+            "Bleach": {"url": "https://eta.animerco.org/episodes/bleach-episode-{x}"},
+        }
+        self.assertEqual("One Piece", find_profile_for_template(
+            profiles, "https://witanime.site/watch/one-piece-الحلقة-{x}"))      # decoded, no slash
+        self.assertEqual("Bleach", find_profile_for_template(
+            profiles, "https://animerco.org/episodes/bleach-episode-{x}/"))      # subdomain
+        self.assertIsNone(find_profile_for_template(
+            profiles, "https://witanime.site/watch/one-piece-film-red-{x}/"))
+        self.assertIsNone(find_profile_for_template(profiles, ""))
+
+    def test_load_opens_existing_instead_of_copying(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from unittest import mock
+        from PyQt6.QtWidgets import QApplication
+        type(self)._app = QApplication.instance() or QApplication([])   # alive for the run
+        import ui.search_tab as st
+        fake = mock.MagicMock()
+        tpl = "https://witanime.site/watch/black-clover-2nd-season/{x}"
+        with mock.patch.object(st, "sites_data", {"Black Clover 2nd Season": {"url": tpl}}), \
+                mock.patch.object(st, "save_config"):
+            name = st.AnimeSearchWidget._open_or_create_profile(fake, "Black Clover 2nd Season - S2",
+                                                                 tpl, 12)
+        self.assertEqual("Black Clover 2nd Season", name)
+        fake._create_profile.assert_not_called()
+        self.assertFalse(fake._go_to_profile.call_args.kwargs["created"])
+
+
+class ReviewFixTests(unittest.TestCase):
+    """Fixes from the full-app review."""
+
+    def test_unreadable_page_skips_hd_twins(self):
+        from core.selenium_engine import choose_paths
+        order = ["FHD - a", "FHD - b", "HD - a", "HD - b"]
+        twins = {"HD - a", "HD - b"}
+        unsure = {n: False for n in order}                  # nothing matched
+        self.assertEqual(["FHD - a", "FHD - b"], choose_paths(order, unsure, twins))
+        seen = {"FHD - a": False, "FHD - b": False, "HD - a": True, "HD - b": False}
+        self.assertEqual(["HD - a"], choose_paths(order, seen, twins))   # page shows HD
+
+    def test_mp4upload_and_wahmi_migrations_run_once(self):
+        from unittest import mock
+        import utils.config as cfg
+        from core.site_flows import DEFAULT_SITE_FLOWS
+        flow_mp4 = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]["FHD - mp4upload"]
+        flow_wahmi = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]["FHD - wahmi"]
+        profiles = {
+            "wit": {"url": "https://witanime.site/watch/a/{x}", "step_paths": {"FHD - x": []}},
+            "no paths": {"url": "https://witanime.site/watch/b/{x}"},
+            "ani": {"url": "https://eta.animerco.org/e/{x}", "step_paths": {}},
+        }
+        with mock.patch.object(cfg, "sites_data", profiles):
+            ran = cfg._run_profile_migrations(set())
+            self.assertEqual(["witanime_mp4upload_v1", "witanime_wahmi_v1"], ran)
+            self.assertEqual(flow_mp4, profiles["wit"]["step_paths"]["FHD - mp4upload"])
+            self.assertEqual(flow_wahmi, profiles["wit"]["step_paths"]["FHD - wahmi"])
+            self.assertIsNot(flow_wahmi, profiles["wit"]["step_paths"]["FHD - wahmi"])  # a copy
+            self.assertNotIn("step_paths", profiles["no paths"])     # nothing to change
+            self.assertNotIn("FHD - wahmi", profiles["ani"]["step_paths"])
+            # The user deletes it; a later launch (migration recorded) leaves it gone.
+            del profiles["wit"]["step_paths"]["FHD - wahmi"]
+            self.assertEqual([], cfg._run_profile_migrations(set(ran)))
+            self.assertNotIn("FHD - wahmi", profiles["wit"]["step_paths"])
+
+    def test_reopened_profile_moves_to_new_episodes(self):
+        from ui.search_tab import extend_to_new_episodes
+        p = {"last_episodes": "1-12"}
+        self.assertEqual("13-24", extend_to_new_episodes(p, 24))
+        self.assertEqual("13-24", p["last_episodes"])
+        p = {"last_episodes": "1-12"}
+        self.assertIsNone(extend_to_new_episodes(p, 12))             # nothing new
+        self.assertEqual("1-12", p["last_episodes"])
+        self.assertEqual("13", extend_to_new_episodes({"last_episodes": "12"}, 13))
+        self.assertEqual("1-5", extend_to_new_episodes({}, 5))
+
+    def test_profile_manager_keeps_script_steps_on_save(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from unittest import mock
+        from PyQt6.QtWidgets import QApplication
+        type(self)._app = QApplication.instance() or QApplication([])   # alive for the run
+        import ui.manager_tab as mt
+        steps = [{"xpath": "//a", "delay": 2.0}, {"script": "return 1;", "delay": 3.0},
+                 {"xpath": "//b", "delay": 1.0}]
+        data = {"url": "https://witanime.site/watch/z/{x}", "next_btn_xpath": "n",
+                "step_paths": {"FHD - mp4upload": steps}, "last_episodes": "1"}
+        sites = {"Z": json.loads(json.dumps(data))}
+        with mock.patch.object(mt, "sites_data", sites), mock.patch.object(mt, "save_config"):
+            w = mt.SiteManagerWidget()
+            w.load_profile("Z")
+            tab = w.path_tabs.widget(0)
+            hidden = [o["card"].isHidden() for o in tab.step_widgets]
+            self.assertEqual([False, True, False], hidden)       # the script row isn't shown
+            w.save_profile()
+            self.assertEqual(steps, sites["Z"]["step_paths"]["FHD - mp4upload"])
+
+
+class DiskSpaceTests(unittest.TestCase):
+    def test_estimate_from_existing_episodes(self):
+        import shutil
+        from utils import disk
+        folder = tempfile.mkdtemp(prefix="aed_disk_")
+        # 1.7 GB of real disk space per run: it was never removed, and 60 leftover
+        # copies (99 GB) filled the drive until writes failed with "No space left".
+        self.addCleanup(shutil.rmtree, folder, True)
+        for name, size in (("A Ep1.mp4", 300), ("A Ep2.mp4", 500), ("notes.txt", 900)):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.truncate(size * 1024 ** 2)
+        self.assertEqual(400 * 1024 ** 2, disk.typical_episode_bytes(folder))
+        self.assertEqual(disk.TYPICAL_EPISODE_BYTES,
+                         disk.typical_episode_bytes(os.path.join(folder, "missing")))
+
+    def test_check_space(self):
+        from unittest import mock
+        from utils import disk
+        gb = 1024 ** 3
+        with mock.patch.object(disk, "typical_episode_bytes", return_value=gb // 2), \
+                mock.patch.object(disk, "free_bytes", return_value=10 * gb):
+            self.assertEqual([], disk.check_space("C:\\x", "C:\\x\\A", 10)[1])   # 5 GB fits
+            per, short = disk.check_space("C:\\x", "C:\\x\\A", 30)              # 15 GB doesn't
+            self.assertEqual((gb // 2, [("C:", 15 * gb, 10 * gb)]), (per, short))
+        with mock.patch.object(disk, "free_bytes", return_value=None):
+            self.assertEqual([], disk.check_space("C:\\x", "C:\\x\\A", 999)[1])  # unreadable: allow
+
+    def test_temp_drive_is_checked_too(self):
+        from unittest import mock
+        from utils import disk
+        gb = 1024 ** 3
+        free = {"D:\\anime": 500 * gb, "C:\\Temp": 2 * gb}
+        with mock.patch.object(disk, "typical_episode_bytes", return_value=gb // 2), \
+                mock.patch.object(disk, "free_bytes", side_effect=lambda p: free[p]):
+            # 10 episodes, 6 at once: D: holds 5 GB fine, C: must hold 3 GB at a time.
+            _per, short = disk.check_space("D:\\anime", "D:\\anime\\A", 10,
+                                           temp_dir="C:\\Temp", parallel=6)
+            self.assertEqual([("C:", 3 * gb, 2 * gb)], short)
+            # Same drive: a move, not a second copy -- only the total counts.
+            free["D:\\Temp"] = 6 * gb + gb
+            _per, short = disk.check_space("D:\\anime", "D:\\anime\\A", 10,
+                                           temp_dir="D:\\Temp", parallel=6)
+            self.assertEqual([], short)
+
+
+class SecondReviewFixTests(unittest.TestCase):
+    def test_search_ignores_transient_profiles(self):
+        from ui.search_tab import find_profile_for_template
+        tpl = "https://witanime.site/watch/one-piece/{x}"
+        self.assertIsNone(find_profile_for_template({"One Piece": {"url": tpl, "_transient": True}}, tpl))
+        self.assertEqual("OP", find_profile_for_template(
+            {"One Piece": {"url": tpl, "_transient": True}, "OP": {"url": tpl}}, tpl))
+
+    def test_fresh_install_marks_migrations_done(self):
+        import importlib
+        import utils.config as cfg
+        fresh = tempfile.mkdtemp(prefix="aed_fresh_")
+        old = (cfg.APP_DIR, cfg.CONFIG_FILE, list(cfg.app_settings.get("migrations_done", [])))
+        try:
+            cfg.APP_DIR, cfg.CONFIG_FILE = fresh, os.path.join(fresh, "sites_config.json")
+            cfg.app_settings["migrations_done"] = []
+            cfg.load_config()
+            self.assertEqual([m for m, _f in cfg._PROFILE_MIGRATIONS],
+                             cfg.app_settings["migrations_done"])
+            with open(cfg.CONFIG_FILE, encoding="utf-8") as f:
+                saved = json.load(f)["settings"]["migrations_done"]
+            self.assertIn("witanime_mp4upload_v1", saved)
+            self.assertIn("witanime_wahmi_v1", saved)
+        finally:
+            cfg.APP_DIR, cfg.CONFIG_FILE = old[0], old[1]
+            cfg.app_settings["migrations_done"] = old[2]
+            importlib.invalidate_caches()
+
+    def test_profile_manager_keeps_only_the_edited_profiles_fields(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from unittest import mock
+        from PyQt6.QtWidgets import QApplication
+        type(self)._app = QApplication.instance() or QApplication([])   # alive for the run
+        import ui.manager_tab as mt
+        sites = {
+            "A": {"url": "https://witanime.site/watch/a/{x}", "step_paths": {"P": [{"xpath": "//a", "delay": 1.0}]},
+                  "last_episodes": "1", "skip_filler": True, "filler_episodes": [3],
+                  "episode_bounds": [1, 12], "_transient": True},
+            "B": {"url": "https://witanime.site/watch/b/{x}", "step_paths": {}, "last_episodes": "2",
+                  "filler_source": "B's cache"},
+        }
+        with mock.patch.object(mt, "sites_data", sites), mock.patch.object(mt, "save_config"):
+            w = mt.SiteManagerWidget()
+            w.load_profile("A")
+            w.save_profile()                                          # same URL: kept
+            self.assertEqual([1, 12], sites["A"]["episode_bounds"])
+            self.assertTrue(sites["A"]["skip_filler"])
+            self.assertNotIn("_transient", sites["A"])
+            w.load_profile("A")
+            w.url_entry.setText("https://witanime.site/watch/other/{x}")
+            w.save_profile()                                          # other anime: dropped
+            for k in mt.ANIME_SPECIFIC_FIELDS:
+                self.assertNotIn(k, sites["A"])
+            w.load_profile("A")
+            w.name_entry.setText("B")                                 # renamed onto B
+            w.save_profile()
+            self.assertNotIn("filler_source", sites["B"])             # B's fields don't leak in
+
+
+class NotifierTests(unittest.TestCase):
+    def test_messages(self):
+        from ui.notifier import finished_message, new_episodes_message
+        self.assertEqual(("Download complete", "Bleach: 12 episodes downloaded."),
+                         finished_message("Bleach", list(range(1, 13)), []))
+        title, text = finished_message("Bleach", list(range(1, 13)), [4, 7])
+        self.assertEqual("Download finished with errors", title)
+        self.assertIn("10 of 12", text)
+        self.assertIn("4, 7", text)
+        self.assertEqual("1 new episode across your Watchlist.", new_episodes_message(1)[1])
+
+    def test_quiet_when_off_or_in_use(self):
+        from unittest import mock
+        import ui.notifier as nt
+        win = mock.MagicMock()
+        n = nt.Notifier(win)
+        tray = mock.MagicMock()
+        n._tray = tray
+        with mock.patch.dict(nt.app_settings, {"windows_notifications": False}):
+            self.assertFalse(n.notify("t", "x"))
+        with mock.patch.dict(nt.app_settings, {"windows_notifications": True}):
+            win.isActiveWindow.return_value, win.isMinimized.return_value = True, False
+            self.assertFalse(n.notify("t", "x"))                 # user is looking at the app
+            win.isActiveWindow.return_value = False
+            self.assertTrue(n.notify("t", "x"))
+        tray.showMessage.assert_called_once()
+
+
+class SessionExpiredTests(unittest.TestCase):
+    """witanime shows the hidden browser an expired-session screen with no
+    download section (Hyouken no Majutsushi ep 8, headless)."""
+
+    TEXT = ("بقيت هذه الصفحة مفتوحة لفترة طويلة وانتهت صلاحية الجلسة. "
+            "أعد تحميل الصفحة لمتابعة المشاهدة.")
+
+    def test_detects_the_screen(self):
+        from core.selenium_engine import is_session_expired_text
+        self.assertTrue(is_session_expired_text(self.TEXT))
+        self.assertFalse(is_session_expired_text("الحلقة 8 تحميل FHD"))
+        self.assertFalse(is_session_expired_text(None))
+
+    def test_reads_rendered_text_only(self):
+        from unittest import mock
+        from core.selenium_engine import is_session_expired_page
+        driver = mock.Mock()
+        driver.execute_script.return_value = self.TEXT
+        self.assertTrue(is_session_expired_page(driver))
+        self.assertIn("innerText", driver.execute_script.call_args[0][0])
+        driver.execute_script.side_effect = RuntimeError("tab gone")
+        self.assertFalse(is_session_expired_page(driver))
+
+
+class WitAnimeBrowserModeTests(unittest.TestCase):
+    """WitAnime blocks standard headless Chrome (--headless=new). The app runs
+    the browser invisibly via off-screen positioning and SW_HIDE so downloads succeed
+    without opening visible windows or ruining UX."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_is_witanime_url_detection(self):
+        from utils.config import is_witanime_url
+        self.assertTrue(is_witanime_url("https://witanime.site/watch/slug/1"))
+        self.assertTrue(is_witanime_url("https://witanime.life/episode/slug-الحلقة-1/"))
+        self.assertTrue(is_witanime_url("https://www.witanime.site/watch/slug/{x}"))
+        self.assertTrue(is_witanime_url("witanime.site"))
+        self.assertFalse(is_witanime_url("https://eta.animerco.org/episode/show-1"))
+        self.assertFalse(is_witanime_url(""))
+        self.assertFalse(is_witanime_url(None))
+
+    def test_is_witanime_profile_detection(self):
+        from utils.config import is_witanime_profile, sites_data, config_lock
+        self.assertTrue(is_witanime_profile({"url": "https://witanime.site/watch/slug/1"}))
+        self.assertFalse(is_witanime_profile({"url": "https://eta.animerco.org/episode/show-1"}))
+        with config_lock:
+            sites_data["_test_wit_prof"] = {"url": "https://witanime.site/watch/slug/{x}"}
+            sites_data["_test_ani_prof"] = {"url": "https://eta.animerco.org/episode/slug-{x}"}
+        try:
+            self.assertTrue(is_witanime_profile("_test_wit_prof"))
+            self.assertFalse(is_witanime_profile("_test_ani_prof"))
+            self.assertFalse(is_witanime_profile("non_existent_profile"))
+        finally:
+            with config_lock:
+                sites_data.pop("_test_wit_prof", None)
+                sites_data.pop("_test_ani_prof", None)
+
+    def test_create_browser_headless_options(self):
+        from unittest import mock
+        import core.selenium_engine as eng
+        with mock.patch("selenium.webdriver.Chrome") as mock_chrome, \
+             mock.patch("selenium.webdriver.chrome.service.Service"):
+            eng.create_browser("C:\\dummy", headless=True)
+            self.assertTrue(mock_chrome.called)
+            options = mock_chrome.call_args.kwargs.get("options") or mock_chrome.call_args[1].get("options")
+            args = options.arguments
+            # Must NOT use --headless=new which witanime/Cloudflare blocks
+            self.assertFalse(any("--headless" in a for a in args))
+            # Must position off-screen and set desktop viewport for invisible execution
+            self.assertIn("--window-position=-10000,-10000", args)
+            self.assertIn("--window-size=1920,1080", args)
+
+    def test_downloader_tab_headless_remains_user_controlled(self):
+        import copy
+        from unittest import mock
+        import ui.downloader_tab as dt
+        import utils.config as cfg
+        saved_sites = copy.deepcopy(cfg.sites_data)
+        saved_settings = copy.deepcopy(cfg.app_settings)
+        self.addCleanup(lambda: (
+            cfg.sites_data.clear(), cfg.sites_data.update(saved_sites),
+            cfg.app_settings.clear(), cfg.app_settings.update(saved_settings)
+        ))
+        cfg.sites_data["WitAnime Show"] = {"url": "https://witanime.site/watch/hyouken/{x}"}
+        cfg.sites_data["Animerco Show"] = {"url": "https://eta.animerco.org/episode/hyouken-{x}"}
+        cfg.app_settings["headless"] = True
+
+        with mock.patch.object(dt, "save_config", lambda: None):
+            w = dt.DownloaderWidget()
+            w._save_timer.stop()
+            # Select WitAnime profile: user preference is preserved, checkbox remains enabled
+            w.on_site_select("WitAnime Show")
+            self.assertTrue(w.chk_headless.isChecked())
+            self.assertTrue(w.chk_headless.isEnabled())
+            self.assertEqual(w.chk_headless.text(), "Run Invisibly (Headless)")
+
+            # Select Animerco profile: checkbox remains enabled and checked
+            w.on_site_select("Animerco Show")
+            self.assertTrue(w.chk_headless.isChecked())
+            self.assertTrue(w.chk_headless.isEnabled())
+            self.assertEqual(w.chk_headless.text(), "Run Invisibly (Headless)")
+
+    def test_progress_tab_paused_panel_headless_remains_enabled(self):
+        from unittest import mock
+        from ui.progress_tab import ProgressTab
+        w = ProgressTab()
+        with mock.patch("ui.progress_tab.run_snapshot", return_value={
+            "task_id": 123, "headless": True, "not_started": [2],
+            "limit": 2, "auto": True, "total": 2
+        }):
+            w._fill_paused_panel()
+            self.assertTrue(w.chk_paused_headless.isChecked())
+            self.assertTrue(w.chk_paused_headless.isEnabled())
+
+    def test_run_selenium_task_preserves_headless_for_all_sites(self):
+        from unittest import mock
+        import core.selenium_engine as eng
+        from utils.config import sites_data, config_lock
+        with config_lock:
+            sites_data["_test_wit_run"] = {"url": "https://witanime.site/watch/show/{x}", "step_paths": {}}
+        try:
+            called_headless = []
+            def fake_create_browser(d_dir, headless=True):
+                called_headless.append(headless)
+                eng.cancel_event.set()
+                m = mock.MagicMock()
+                return m
+
+            with mock.patch.object(eng, "create_browser", fake_create_browser), \
+                 mock.patch.object(eng, "kill_stuck_chrome_processes", lambda: None), \
+                 mock.patch.object(eng, "log_history", lambda *a, **k: None):
+                eng.run_selenium_task(
+                    site_key="_test_wit_run",
+                    episodes_list=[1],
+                    download_dir=tempfile.gettempdir(),
+                    headless=True,
+                    webhook_url="",
+                    selected_sound="",
+                    volume=0,
+                    concurrency=1
+                )
+            self.assertEqual(called_headless, [True])
+        finally:
+            with config_lock:
+                sites_data.pop("_test_wit_run", None)
+            eng.cancel_event.clear()
+
+    def test_start_watch_download_headless_mode(self):
+        from unittest import mock
+        import ui.downloader_tab as dt
+        with mock.patch.object(dt, "save_config", lambda: None):
+            w = dt.DownloaderWidget()
+            w._save_timer.stop()
+            w.chk_headless.setChecked(True)
+            begun_params = []
+            w._begin_download = lambda p: begun_params.append(p)
+
+            # Witanime watch download -> headless respects chk_headless
+            w.start_watch_download("Show1", "https://witanime.site/watch/show/{x}", "witanime.site", "1")
+            self.assertTrue(begun_params[-1]["headless"])
+
+            # Animerco watch download -> headless respects chk_headless
+            w.start_watch_download("Show2", "https://eta.animerco.org/episode/show-{x}", "eta.animerco.org", "1")
+            self.assertTrue(begun_params[-1]["headless"])
+
+    def test_create_browser_visible_options(self):
+        from unittest import mock
+        import core.selenium_engine as eng
+        with mock.patch("selenium.webdriver.Chrome") as mock_chrome, \
+             mock.patch("selenium.webdriver.chrome.service.Service"):
+            eng.create_browser("C:\\dummy", headless=False)
+            self.assertTrue(mock_chrome.called)
+            options = mock_chrome.call_args.kwargs.get("options") or mock_chrome.call_args[1].get("options")
+            args = options.arguments
+            self.assertIn("--start-maximized", args)
+            self.assertFalse(any("--headless" in a for a in args))
+            self.assertFalse(any("--window-position" in a for a in args))
+
+    def test_hide_offscreen_window_logic(self):
+        """Verify the SW_HIDE logic targets only off-screen Chrome windows and leaves
+        on-screen or non-Chrome windows alone."""
+        shown = []
+        class MockUser32:
+            def GetClassNameW(self, hwnd, buf, maxlen):
+                if hwnd == 1:
+                    buf.value = "Chrome_WidgetWin_1"
+                elif hwnd == 2:
+                    buf.value = "Chrome_WidgetWin_1"
+                else:
+                    buf.value = "Notepad"
+                return len(buf.value)
+            def GetWindowRect(self, hwnd, rect_ref):
+                if hwnd == 1:
+                    rect_ref._obj.left = -10000
+                    rect_ref._obj.top = -10000
+                elif hwnd == 2:
+                    rect_ref._obj.left = 100
+                    rect_ref._obj.top = 100
+            def ShowWindow(self, hwnd, cmd):
+                shown.append((hwnd, cmd))
+
+        mock_user = MockUser32()
+        import ctypes
+        class _RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+        def _check_hide(hwnd):
+            buf = ctypes.create_unicode_buffer(256)
+            mock_user.GetClassNameW(hwnd, buf, 256)
+            if buf.value == "Chrome_WidgetWin_1":
+                rect = _RECT()
+                mock_user.GetWindowRect(hwnd, ctypes.byref(rect))
+                if rect.left <= -5000 and rect.top <= -5000:
+                    mock_user.ShowWindow(hwnd, 0)
+
+        _check_hide(1)
+        _check_hide(2)
+        _check_hide(3)
+        self.assertEqual(shown, [(1, 0)])
+
+    def test_request_adjustments_headless_toggling(self):
+        import core.selenium_engine as eng
+        with eng._run_lock:
+            eng.RUN_STATE.clear()
+            eng.RUN_STATE.update(task_id=42, episodes=[1], started=set(), headless=True)
+            eng._PENDING_ADJUST.clear()
+        try:
+            res = eng.request_adjustments(42, headless=False)
+            self.assertNotEqual(res, False)
+            snap = eng.run_snapshot()
+            self.assertFalse(snap["headless"])
+
+            eng.request_adjustments(42, headless=True)
+            snap = eng.run_snapshot()
+            self.assertTrue(snap["headless"])
+        finally:
+            with eng._run_lock:
+                eng.RUN_STATE.clear()
+                eng._PENDING_ADJUST.clear()
+
+
+
+class FinalEpisodeTests(unittest.TestCase):
+    def test_detects_witanime_final_marker(self):
+        from core.selenium_engine import is_final_text
+        self.assertTrue(is_final_text(
+            "انمي Re:Zero kara Hajimeru Isekai Seikatsu 4th season الحلقة 19 والأخيرة مترجمة"))
+        self.assertTrue(is_final_text("الحلقة 12 والاخيرة"))
+        self.assertFalse(is_final_text("Shingeki no Kyojin: The Final Season الحلقة 5"))
+        self.assertFalse(is_final_text("الحلقة 18"))
+        self.assertFalse(is_final_text(""))
+
+    def test_filename(self):
+        from core.selenium_engine import episode_filename as fn
+        self.assertEqual("ReZero Ep19 (Final).mp4", fn("ReZero", 19, ".mp4", final=True))
+        self.assertEqual("ReZero Ep18.mp4", fn("ReZero", 18, ".mp4"))
+        self.assertEqual("ReZero Ep19 (Final) (1).mkv", fn("ReZero", 19, ".mkv", final=True, copy=1))
+        # Still found by episode number (Start Watching / History).
+        import re
+        self.assertTrue(re.search(r"Ep19(?!\d)", fn("ReZero", 19, ".mp4", final=True)))
+
+
+class EpisodeBoundsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_bounds_only_widen(self):
+        from ui.search_tab import episode_bounds, set_episode_bounds, raise_episode_bound
+        p = {"url": "https://witanime.site/watch/x/{x}"}
+        self.assertIsNone(episode_bounds(p))
+        set_episode_bounds(p, 1, 12)
+        self.assertEqual((1, 12), episode_bounds(p))
+        set_episode_bounds(p, 3, 10)                    # a narrower detection
+        self.assertEqual((1, 12), episode_bounds(p))
+        profiles = {"X": p}
+        self.assertEqual("X", raise_episode_bound(profiles, "https://witanime.site/watch/x/{x}", 13))
+        self.assertEqual((1, 13), episode_bounds(p))
+        self.assertIsNone(raise_episode_bound(profiles, "https://witanime.site/watch/x/{x}", 5))
+
+    def test_picker_respects_limits(self):
+        from ui.downloader_tab import EpisodeRangePicker
+        pk = EpisodeRangePicker()
+        pk.set_limits((1, 19))
+        pk.set_spec("3-10")
+        row = pk._rows[0]
+        row["to"].setValue(40)
+        self.assertEqual(19, row["to"].value())            # typing can't pass the last episode
+        row["from"].setValue(0)
+        self.assertEqual(1, row["from"].value())           # nor go below the first
+        pk.set_limits(None)
+        pk.set_spec("30-40")
+        self.assertEqual([(30, 40)], pk.ranges())          # unknown anime: unrestricted
+
+    def test_given_spec_widens_instead_of_being_replaced(self):
+        # History re-download of "25-26" on a profile still capped at 1-24.
+        from ui.downloader_tab import EpisodeRangePicker
+        pk = EpisodeRangePicker()
+        pk.set_limits((1, 24))
+        pk.set_spec("25-26")
+        self.assertEqual([(25, 26)], pk.ranges())          # not swapped for all 24
+        self.assertEqual((1, 26), pk.limits())
+
+    def test_first_episode_counts_every_slug(self):
+        from ui.search_tab import AnimeDetailsThread
+        th = AnimeDetailsThread.__new__(AnimeDetailsThread)   # derivation helpers only
+        hrefs = ([f"https://site.example/episode/bleach-ep-{n}/" for n in range(63, 70)]
+                 + [f"https://site.example/episode/bleach-{n}/" for n in (1, 2)])
+        template, last = th._derive_from_hrefs(hrefs)
+        self.assertEqual(69, last)
+        self.assertEqual(1, th._last_first_ep)      # 1-2 live under another slug
 
 
 class SecretFieldTests(unittest.TestCase):
@@ -2620,6 +3379,42 @@ class ScipyDeferralTests(unittest.TestCase):
                     sys.modules.pop(n, None)
 
 
+class FastStartTests(unittest.TestCase):
+    """Launch-time trimming: importing qfluentwidgets must not load numpy, PIL,
+    colorthief or scipy, nor run darkdetect's WMI query -- and each still works
+    when something actually uses it."""
+
+    def test_qfluentwidgets_import_leaves_heavy_libraries_unloaded(self):
+        import subprocess
+        code = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from PyQt6.QtWidgets import QApplication; app = QApplication([])\n"
+            "from utils.fast_start import defer_scipy, undefer_scipy\n"
+            "defer_scipy(); import qfluentwidgets; undefer_scipy()\n"
+            "heavy = [m for m in ('numpy', 'PIL', 'PIL.Image', 'colorthief', 'scipy') if m in sys.modules]\n"
+            "print('HEAVY', heavy)\n"
+            "import darkdetect; print('DD', type(darkdetect).__name__)\n"
+            "from qfluentwidgets.common import image_utils as iu\n"
+            "from PyQt6.QtGui import QPixmap, QColor\n"
+            "pm = QPixmap(4, 4); pm.fill(QColor('red'))\n"
+            "print('BLUR', not iu.gaussianBlur(pm, 1).isNull())\n"
+            "print('NUMPY', type(sys.modules['numpy']).__name__)\n"
+        ) % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=env, timeout=120).stdout
+        self.assertIn("HEAVY []", out, out)
+        self.assertIn("DD module", out, out)            # the real one once asked for again
+        self.assertIn("BLUR True", out, out)            # loads numpy/PIL on first use
+        self.assertIn("NUMPY module", out, out)
+
+    def test_fast_darkdetect_matches_the_registry(self):
+        from utils import fast_start
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        self.assertIn(fast_start._windows_theme(), ("Dark", "Light", None))
+
+
 class SiteRegistryParityTests(unittest.TestCase):
     """Pins what the shipped sites currently do.
 
@@ -2686,6 +3481,12 @@ class DownloadDestinationTests(unittest.TestCase):
         self.assertTrue(tab_matches_path(
             "https://f54.workupload.com/download/xyz", "workupload"))
 
+    def test_wahmi_destination_is_accepted(self):
+        self.assertTrue(tab_matches_path(
+            "https://wahmi.org/GKcq82QDdbgfy78/file", "FHD - wahmi"))
+        self.assertFalse(tab_matches_path(
+            "https://ads.fast.io/interstitial", "FHD - wahmi"))
+
     def test_lookalike_domain_is_rejected(self):
         # endswith() on a bare name would wrongly accept this.
         self.assertFalse(tab_matches_path(
@@ -2748,7 +3549,11 @@ class SiteConfigTests(unittest.TestCase):
             for path_name, steps in flow["step_paths"].items():
                 self.assertTrue(steps, f"{domain}/{path_name} has no steps")
                 for step in steps:
-                    self.assertTrue(step.get("xpath", "").strip(), f"{domain}/{path_name}")
+                    # Each step clicks an xpath or runs a script (mp4upload's last two).
+                    action = (step.get("xpath") or step.get("script") or "").strip()
+                    self.assertTrue(action, f"{domain}/{path_name}")
+                    self.assertFalse(step.get("xpath") and step.get("script"),
+                                     f"{domain}/{path_name}: one action per step")
                     self.assertIsInstance(step["delay"], float)
                     self.assertGreater(step["delay"], 0)
 
@@ -2765,13 +3570,15 @@ class SiteConfigTests(unittest.TestCase):
         episodes silently fail on whichever host went missing."""
         paths = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
         self.assertEqual(set(paths), {"FHD - Google Drive", "FHD - Mediafire",
-                                      "FHD - wtsrv", "FHD - Workupload", "FHD - gofile"})
+                                      "FHD - wtsrv", "FHD - Workupload", "FHD - mp4upload",
+                                      "FHD - gofile", "FHD - wahmi"})
 
     def test_witanime_path_order_is_preserved(self):
         """The engine tries paths in order, so ordering is behaviour, not cosmetics."""
         paths = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
         self.assertEqual(list(paths), ["FHD - Mediafire", "FHD - Google Drive",
-                                       "FHD - wtsrv", "FHD - Workupload", "FHD - gofile"])
+                                       "FHD - wtsrv", "FHD - Workupload", "FHD - mp4upload",
+                                       "FHD - gofile", "FHD - wahmi"])
 
     def test_wtsrv_takes_the_leftmost_button(self):
         """RTL page: [last()] in source order is the button furthest left. Wrapped in
@@ -3230,6 +4037,1204 @@ class ConfigMigrationTests(unittest.TestCase):
         w = app_settings["watchlist"][0]
         self.assertEqual("https://witanime.site/anime/one-piece/", w["url"])
         self.assertEqual("https://witanime.site/watch/one-piece-الحلقة-{x}/", w["latest_template"])
+
+
+class WatchLaterTests(unittest.TestCase):
+    """Watch later's store (utils/watch_later.py): statuses, per-anime history,
+    watched tracking from mpv.net's progress log, and what Continue plays."""
+
+    URL = "https://witanime.site/anime/test-anime/"
+    TEMPLATE = "https://witanime.site/episode/test-anime-الحلقة-{x}/"
+
+    def setUp(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        self.wl = wl
+        self.tmp = tempfile.mkdtemp(prefix="aed_wl_")
+        patch = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.downloads = os.path.join(self.tmp, "animes")
+
+    def _linked(self, max_ep=3, profile="Test Anime"):
+        wl = self.wl
+        wl.add("Test Anime", self.URL, "witanime.site")
+        wl.set_parts(self.URL, [{"template": self.TEMPLATE, "max_ep": max_ep, "first_ep": 1}])
+        wl.link_profile(self.URL, 0, profile)
+        return profile
+
+    def _files(self, profile, eps):
+        folder = os.path.join(self.downloads, profile)
+        os.makedirs(folder, exist_ok=True)
+        for ep in eps:
+            open(os.path.join(folder, f"{profile} Ep{ep}.mp4"), "wb").close()
+        return folder
+
+    def _log(self, profile, ep, percent, eof=False):
+        path = os.path.join(self.downloads, profile, f"{profile} Ep{ep}.mp4")
+        return json.dumps({"path": path, "percent": percent, "eof": eof})
+
+    def test_adding_never_creates_a_profile_and_rejects_duplicates(self):
+        wl = self.wl
+        with config_lock:
+            before = set(sites_data)
+        self.assertTrue(wl.add("Test Anime", self.URL, "witanime.site"))
+        # Same page written another way is the same anime.
+        self.assertFalse(wl.add("Test Anime", "http://www.witanime.site/anime/test-anime", ""))
+        with config_lock:
+            self.assertEqual(before, set(sites_data))
+        e = wl.find(self.URL)
+        self.assertEqual(wl.LATER, e["status"])
+        self.assertEqual([], e["parts"])
+        self.assertEqual([], e["history"])
+
+    def test_refreshing_seasons_keeps_profile_and_watched(self):
+        wl = self.wl
+        self._linked()
+        wl.set_watched(self.URL, 0, [1, 2])
+        wl.set_parts(self.URL, [{"template": self.TEMPLATE, "max_ep": 5}])
+        part = wl.find(self.URL)["parts"][0]
+        self.assertEqual("Test Anime", part["profile"])
+        self.assertEqual([1, 2], part["watched"])
+        self.assertEqual(5, part["max_ep"])
+
+    def test_download_history_is_kept_per_anime(self):
+        wl = self.wl
+        profile = self._linked()
+        self.assertFalse(wl.record_download("Some Other Profile", "1-3", "Success", ""))
+        self.assertTrue(wl.record_download(profile, "1-3", "Failed", "timeout"))
+        self.assertEqual(wl.LATER, wl.find(self.URL)["status"])     # nothing landed
+        wl.record_download(profile, "1-3", "Success", "")
+        e = wl.find(self.URL)
+        self.assertEqual(wl.WATCHING, e["status"])
+        self.assertEqual(["Success", "Failed"], [h["status"] for h in e["history"]])
+
+    def test_progress_log_ticks_episodes_and_completes(self):
+        wl = self.wl
+        profile = self._linked(max_ep=2)
+        wl.apply_progress([self._log(profile, 1, 40.0)])
+        e = wl.find(self.URL)
+        self.assertEqual(wl.WATCHING, e["status"])
+        self.assertEqual({"1": 40.0}, e["parts"][0]["progress"])
+        self.assertEqual([], e["parts"][0]["watched"])
+        wl.apply_progress([self._log(profile, 1, 95.0), self._log(profile, 2, 12.0, eof=True)])
+        e = wl.find(self.URL)
+        self.assertEqual([1, 2], e["parts"][0]["watched"])
+        self.assertEqual({}, e["parts"][0]["progress"])
+        self.assertEqual(wl.COMPLETED, e["status"])
+
+    def test_playing_an_episode_counts_the_earlier_ones_as_watched(self):
+        wl = self.wl
+        profile = self._linked(max_ep=12)
+        wl.apply_progress([self._log(profile, 7, 95.0)])
+        part = wl.find(self.URL)["parts"][0]
+        self.assertEqual(list(range(1, 8)), part["watched"])
+        # Only started: the earlier ones still count, this one stays half-way.
+        wl.apply_progress([self._log(profile, 10, 20.0)])
+        part = wl.find(self.URL)["parts"][0]
+        self.assertEqual(list(range(1, 10)), part["watched"])
+        self.assertEqual({"10": 20.0}, part["progress"])
+        # Manual ticks are left exactly as set.
+        wl.set_watched(self.URL, 0, [3])
+        self.assertEqual([3], wl.find(self.URL)["parts"][0]["watched"])
+
+    def test_season_starting_past_one_fills_from_its_first_episode(self):
+        wl = self.wl
+        wl.add("Test Anime", self.URL, "witanime.site")
+        wl.set_parts(self.URL, [{"template": self.TEMPLATE, "max_ep": 24, "first_ep": 13}])
+        wl.link_profile(self.URL, 0, "Test Anime")
+        wl.apply_progress([self._log("Test Anime", 15, 99.0)])
+        self.assertEqual([13, 14, 15], wl.find(self.URL)["parts"][0]["watched"])
+
+    def test_older_entries_are_caught_up_once(self):
+        wl = self.wl
+        self._linked(max_ep=12)
+        data = wl._load()
+        data["entries"][0]["parts"][0]["watched"] = [7]          # tracked the old way
+        wl._save(data)
+        self.assertTrue(wl.fill_earlier_watched())
+        self.assertEqual(list(range(1, 8)), wl.find(self.URL)["parts"][0]["watched"])
+        wl.set_watched(self.URL, 0, [7])                         # user unticks 1-6
+        self.assertFalse(wl.fill_earlier_watched())              # never again
+        self.assertEqual([7], wl.find(self.URL)["parts"][0]["watched"])
+
+    def test_log_lines_that_are_not_episodes_are_ignored(self):
+        wl = self.wl
+        self.assertIsNone(wl.parse_log_line("not json"))
+        self.assertIsNone(wl.parse_log_line(json.dumps({"path": r"C:\x\notes.txt"})))
+        self.assertIsNone(wl.parse_log_line(json.dumps({"path": r"C:\x\Movie.mp4"})))
+        self.assertEqual(("Show", 12, 50.0, False),
+                         wl.parse_log_line(json.dumps({"path": r"C:\a\Show\Show Ep12.mkv",
+                                                       "percent": 50})))
+
+    def test_log_is_read_incrementally_and_only_whole_lines(self):
+        wl = self.wl
+        profile = self._linked(max_ep=3)
+        log = os.path.join(self.tmp, "aed-progress.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write(self._log(profile, 1, 99.0) + "\n" + self._log(profile, 2, 99.0)[:20])
+        self.assertTrue(wl.ingest_log(log))
+        self.assertEqual([1], wl.find(self.URL)["parts"][0]["watched"])
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(self._log(profile, 2, 99.0)[20:] + "\n")
+        self.assertTrue(wl.ingest_log(log))
+        self.assertFalse(wl.ingest_log(log))           # nothing new
+        self.assertEqual([1, 2], wl.find(self.URL)["parts"][0]["watched"])
+
+    def test_continue_prefers_a_half_watched_episode_then_the_next_one(self):
+        wl = self.wl
+        profile = self._linked(max_ep=4)
+        self._files(profile, [1, 2, 3])
+        wl.set_watched(self.URL, 0, [1])
+        wl.apply_progress([self._log(profile, 3, 30.0)])
+        part, ep, file, percent = wl.next_episode(wl.find(self.URL), self.downloads)
+        self.assertEqual((0, 3, 30.0), (part, ep, percent))
+        self.assertTrue(file.endswith("Ep3.mp4"))
+        wl.set_watched(self.URL, 0, [1, 2, 3])
+        part, ep, file, _ = wl.next_episode(wl.find(self.URL), self.downloads)
+        self.assertEqual(4, ep)
+        self.assertIsNone(file)                          # not downloaded yet
+        self.assertEqual(["Test Anime Ep2.mp4", "Test Anime Ep3.mp4"],
+                         [os.path.basename(p) for p in
+                          wl.playlist_from(wl.find(self.URL), 0, 2, self.downloads)])
+
+    def test_manual_status_is_not_undone_by_a_recompute(self):
+        wl = self.wl
+        profile = self._linked(max_ep=1)
+        wl.apply_progress([self._log(profile, 1, 100.0)])
+        self.assertEqual(wl.COMPLETED, wl.find(self.URL)["status"])
+        wl.set_status(self.URL, wl.WATCHING)             # rewatching
+        wl.set_watched(self.URL, 0, [1])                 # same ticks, nothing new
+        self.assertEqual(wl.WATCHING, wl.find(self.URL)["status"])
+
+    def test_a_deleted_profile_keeps_its_folder_link_until_replaced(self):
+        wl = self.wl
+        self._linked(profile="Old Name")
+        self.assertFalse(wl.resolve_profiles({}))         # nothing replaces it
+        self.assertEqual("Old Name", wl.find(self.URL)["parts"][0]["profile"])
+        renamed = {"New Name": {"url": self.TEMPLATE}}
+        self.assertTrue(wl.resolve_profiles(renamed))     # renamed in Profile Manager
+        self.assertEqual("New Name", wl.find(self.URL)["parts"][0]["profile"])
+
+    def test_remove_and_undo(self):
+        wl = self.wl
+        self._linked()
+        entry, index = wl.remove(self.URL)
+        self.assertIsNone(wl.find(self.URL))
+        self.assertTrue(wl.restore(entry, index))
+        self.assertEqual("Test Anime", wl.find(self.URL)["parts"][0]["profile"])
+
+    def test_season_profiles_are_named_after_the_season(self):
+        wl = self.wl
+        one = {"title": "Show", "parts": [{"label": "Season 1"}]}
+        two = {"title": "Show", "parts": [{"label": "Season 1"}, {"label": "Season 2"}]}
+        self.assertEqual("Show", wl.part_profile_name(one, one["parts"][0]))
+        self.assertEqual("Show - Season 2", wl.part_profile_name(two, two["parts"][1]))
+
+    def test_progress_script_is_bundled_and_installed_alone(self):
+        from unittest import mock
+        from utils import mpvnet
+        src = os.path.join(mpvnet.bundle_dir(), "scripts", mpvnet.PROGRESS_SCRIPT)
+        self.assertTrue(os.path.isfile(src))
+        cfg = os.path.join(self.tmp, "mpvcfg")
+        with mock.patch.object(mpvnet, "find_mpvnet", return_value=(r"C:\x\mpvnet.exe", None)), \
+                mock.patch.object(mpvnet, "config_dir", return_value=cfg):
+            self.assertTrue(mpvnet.ensure_progress_script())
+            self.assertEqual(os.path.join(cfg, mpvnet.PROGRESS_LOG), mpvnet.progress_log_path())
+        self.assertEqual(["aed-progress.lua"], os.listdir(os.path.join(cfg, "scripts")))
+        self.assertFalse(os.path.exists(os.path.join(cfg, "mpv.conf")))
+
+
+class LibraryImportTests(unittest.TestCase):
+    """First open after the update: anime already on disk land in the Library,
+    with what mpv.net says was watched (utils/library_scan.py)."""
+
+    TEMPLATE = "https://witanime.site/episode/show-a-الحلقة-{x}/"
+
+    def setUp(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        self.wl = wl
+        self.tmp = tempfile.mkdtemp(prefix="aed_scan_")
+        patch = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.downloads = os.path.join(self.tmp, "animes")
+
+    def _folder(self, name, eps):
+        folder = os.path.join(self.downloads, name)
+        os.makedirs(folder, exist_ok=True)
+        paths = {}
+        for ep in eps:
+            paths[ep] = os.path.join(folder, f"{name} Ep{ep}.mp4")
+            open(paths[ep], "wb").close()
+        return paths
+
+    def test_mp4_duration_reads_the_movie_header(self):
+        import struct
+        from utils.library_scan import mp4_duration
+        mvhd = struct.pack(">I4sB3xII", 0, b"mvhd", 0, 0, 0) + struct.pack(">II", 1000, 1440000)
+        mvhd = struct.pack(">I", len(mvhd)) + mvhd[4:]
+        moov = struct.pack(">I4s", 8 + len(mvhd), b"moov") + mvhd
+        ftyp = struct.pack(">I4s4s", 12, b"ftyp", b"isom")
+        mdat = struct.pack(">I4s", 16, b"mdat") + b"\0" * 8
+        path = os.path.join(self.tmp, "x.mp4")
+        with open(path, "wb") as f:
+            f.write(ftyp + mdat + moov)                  # moov after the media data
+        self.assertAlmostEqual(1440.0, mp4_duration(path))
+        with open(os.path.join(self.tmp, "bad.mp4"), "wb") as f:
+            f.write(b"junk")
+        self.assertIsNone(mp4_duration(os.path.join(self.tmp, "bad.mp4")))
+
+    def test_mpv_history_reads_resume_files_and_progress_log_not_recent_list(self):
+        from utils.library_scan import read_mpv_history
+        cfg = os.path.join(self.tmp, "mpvcfg")
+        os.makedirs(os.path.join(cfg, "watch_later"))
+        with open(os.path.join(cfg, "watch_later", "A"), "w", encoding="utf-8") as f:
+            f.write("# C:\\anime\\Show Ep2.mp4\nstart=600.5\n")
+        with open(os.path.join(cfg, "watch_later", "B"), "w", encoding="utf-8") as f:
+            f.write("# redirect entry\n# C:\\anime\n")
+        with open(os.path.join(cfg, "aed-progress.log"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"path": "C:\\anime\\Show Ep4.mp4", "percent": 97}) + "\n")
+            f.write(json.dumps({"path": "C:\\anime\\Show Ep5.mp4", "percent": 10}) + "\n")
+        # A playlist puts every file on mpv.net's recent list -- not a sign of watching.
+        with open(os.path.join(cfg, "settings.xml"), "w", encoding="utf-8") as f:
+            f.write("<AppSettings><RecentFiles><string>C:\\anime\\Show Ep9.mp4</string>"
+                    "</RecentFiles></AppSettings>")
+        h = read_mpv_history(cfg)
+        norm = os.path.normcase
+        self.assertEqual(600.5, h[norm("C:\\anime\\Show Ep2.mp4")])
+        self.assertIsNone(h[norm("C:\\anime\\Show Ep4.mp4")])      # finished per log
+        self.assertNotIn(norm("C:\\anime\\Show Ep5.mp4"), h)       # only started
+        self.assertNotIn(norm("C:\\anime\\Show Ep9.mp4"), h)
+        self.assertNotIn(norm("C:\\anime"), h)
+
+    def test_watch_state_from_resume_points(self):
+        from utils.library_scan import watch_state
+        files = {e: f"C:\\a\\S Ep{e}.mp4" for e in range(1, 7)}
+        key = os.path.normcase
+        history = {key(files[3]): 1400.0,         # 97% in -> watched
+                   key(files[5]): 300.0}          # 21% in -> in progress
+        watched, progress = watch_state(files, history, duration=lambda _p: 1440.0)
+        self.assertEqual({1, 2, 3, 4}, watched)   # earlier ones count as seen
+        self.assertEqual({5: 20.8}, progress)
+
+    def test_folders_and_profiles_become_entries(self):
+        wl = self.wl
+        from utils.library_scan import import_library, LOCAL_SCHEME
+        a = self._folder("Show A", [1, 2, 3])
+        self._folder("Loose Folder", [1, 2])
+        os.makedirs(os.path.join(self.downloads, "Not anime"))       # no episodes
+        profiles = {"Show A": {"url": self.TEMPLATE, "episode_bounds": [1, 12]},
+                    "Planned": {"url": "https://witanime.site/episode/planned-الحلقة-{x}/",
+                                "episode_bounds": [1, 10]}}
+        history = {os.path.normcase(a[2]): None}                      # finished Ep2
+        added = import_library(self.downloads, profiles, [], history, duration=lambda _p: None)
+        self.assertEqual(3, added)
+        by_title = {e["title"]: e for e in wl.entries()}
+        self.assertEqual({"Show A", "Planned", "Loose Folder"}, set(by_title))
+        self.assertEqual(wl.WATCHING, by_title["Show A"]["status"])
+        self.assertEqual([1, 2], by_title["Show A"]["parts"][0]["watched"])
+        self.assertEqual(wl.LATER, by_title["Planned"]["status"])
+        self.assertEqual(wl.WATCHING, by_title["Loose Folder"]["status"])
+        self.assertTrue(by_title["Loose Folder"]["url"].startswith(LOCAL_SCHEME))
+        # Show A has 9 episodes left to download; the loose folder has no link.
+        self.assertEqual((0, list(range(4, 13))),
+                         wl.missing_episodes(by_title["Show A"], self.downloads))
+        self.assertIsNone(wl.missing_episodes(by_title["Loose Folder"], self.downloads))
+        # Scanning again adds nothing.
+        self.assertEqual(0, import_library(self.downloads, profiles, [], history))
+        self.assertTrue(wl.imported_from_disk())
+
+    def test_anime_already_in_the_library_is_not_duplicated(self):
+        wl = self.wl
+        from utils.library_scan import import_library
+        self._folder("Show A", [1])
+        wl.add("Show A", "https://witanime.site/anime/show-a/", "witanime.site")
+        wl.set_parts("https://witanime.site/anime/show-a/",
+                     [{"template": self.TEMPLATE, "max_ep": 12}])
+        wl.link_profile("https://witanime.site/anime/show-a/", 0, "Show A")
+        self.assertEqual(0, import_library(self.downloads, {}, [], {}))
+        self.assertEqual(1, len(wl.entries()))
+
+    def test_adding_from_search_absorbs_the_folder_entry(self):
+        wl = self.wl
+        from utils.library_scan import import_library
+        self._folder("Show A", [1, 2])
+        import_library(self.downloads, {}, [], {}, duration=lambda _p: None)
+        local = wl.entries()[0]["url"]
+        wl.set_watched(local, 0, [1])
+        page = "https://witanime.site/anime/show-a/"
+        wl.add("Show A", page, "witanime.site")
+        wl.set_parts(page, [{"template": self.TEMPLATE, "max_ep": 12}])
+        items = wl.entries()
+        self.assertEqual(1, len(items))
+        self.assertEqual(page, items[0]["url"])
+        self.assertEqual([1], items[0]["parts"][0]["watched"])
+        self.assertEqual(wl.WATCHING, items[0]["status"])
+
+
+class EpisodeSourceTests(unittest.TestCase):
+    """Each downloaded episode records the site it came from: on its Library entry
+    and in a hidden note in the anime's folder that a later scan reads back."""
+
+    TEMPLATE = "https://witanime.site/episode/show-a-الحلقة-{x}/"
+
+    def setUp(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        self.wl = wl
+        self.tmp = tempfile.mkdtemp(prefix="aed_src_")
+        patch = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.downloads = os.path.join(self.tmp, "animes")
+        self.folder = os.path.join(self.downloads, "Show A")
+        os.makedirs(self.folder)
+
+    def test_download_records_site_on_entry_and_in_folder(self):
+        wl = self.wl
+        wl.add("Show A", "https://witanime.site/anime/show-a/", "witanime.site")
+        wl.set_parts("https://witanime.site/anime/show-a/", [{"template": self.TEMPLATE, "max_ep": 12}])
+        wl.link_profile("https://witanime.site/anime/show-a/", 0, "Show A")
+        wl.record_sources("Show A", [1, 2], self.TEMPLATE, self.folder)
+        wl.record_sources("Show A", [3], self.TEMPLATE, self.folder)   # hidden note rewritten
+        part = wl.find("https://witanime.site/anime/show-a/")["parts"][0]
+        self.assertEqual({"1", "2", "3"}, set(part["sources"]))
+        self.assertEqual("witanime.site", part["sources"]["3"]["site"])
+        self.assertEqual("https://witanime.site/episode/show-a-الحلقة-3/", part["sources"]["3"]["page"])
+        note = wl.read_folder_source(self.folder)
+        self.assertEqual(self.TEMPLATE, note["template"])
+        self.assertEqual({"1", "2", "3"}, set(note["episodes"]))
+        if sys.platform == "win32":
+            import ctypes
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(os.path.join(self.folder, wl.SOURCE_FILE))
+            self.assertTrue(attrs & 0x2, "note should be hidden")
+        # A re-lookup of the seasons keeps them.
+        wl.set_parts("https://witanime.site/anime/show-a/", [{"template": self.TEMPLATE, "max_ep": 13}])
+        self.assertEqual({"1", "2", "3"},
+                         set(wl.find("https://witanime.site/anime/show-a/")["parts"][0]["sources"]))
+
+    def test_anime_not_in_the_library_still_gets_the_folder_note(self):
+        wl = self.wl
+        wl.record_sources("Show A", [5], self.TEMPLATE, self.folder)
+        self.assertEqual(["5"], list(wl.read_folder_source(self.folder)["episodes"]))
+        self.assertEqual([], wl.entries())
+
+    def test_folder_scan_learns_the_site_from_the_note(self):
+        wl = self.wl
+        from utils.library_scan import import_library
+        open(os.path.join(self.folder, "Show A Ep1.mp4"), "wb").close()
+        wl.record_sources("Show A", [1], self.TEMPLATE, self.folder)
+        import_library(self.downloads, {}, [], {}, duration=lambda _p: None)
+        e = wl.entries()[0]
+        self.assertEqual(self.TEMPLATE, e["parts"][0]["template"])     # no profile needed
+        self.assertEqual("witanime.site", e["domain"])
+        self.assertEqual({1}, set(wl.part_sources(e["parts"][0], self.downloads)))
+
+
+class LibraryPosterTests(unittest.TestCase):
+    """Imported anime get their poster (and, for folder-only ones, their page)
+    from a site search -- only on a sure match."""
+
+    RESULTS = [
+        {"title": "Overlord IV", "link": "https://witanime.site/anime/overlord-iv"},
+        {"title": "Overlord", "link": "https://witanime.site/anime/overlord"},
+        {"title": "Fate/Zero", "link": "https://witanime.site/anime/fate-zero"},
+        {"title": "Black Clover 2nd Season", "link": "https://witanime.site/anime/black-clover-2nd-season"},
+        {"title": "Black Clover", "link": "https://witanime.site/anime/black-clover"},
+    ]
+
+    def setUp(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        self.wl = wl
+        tmp = tempfile.mkdtemp(prefix="aed_poster_")
+        patch = mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.cover = os.path.join(tmp, "c.img")
+        open(self.cover, "wb").close()
+
+    def test_query_variants_recover_lost_punctuation(self):
+        from utils.library_scan import query_variants
+        self.assertEqual(["FateZero", "Fate Zero"], query_variants("FateZero"))
+        self.assertEqual(["Sekai Saikou no Ansatsusha, Isekai Kizoku",
+                          "Sekai Saikou no Ansatsusha Isekai Kizoku", "Sekai Saikou no"],
+                         query_variants("Sekai Saikou no Ansatsusha, Isekai Kizoku"))
+
+    def test_slug_from_episode_templates(self):
+        from utils.library_scan import slug_from_template
+        self.assertEqual("black-clover", slug_from_template("https://witanime.site/watch/black-clover/{x}"))
+        self.assertEqual("show-a", slug_from_template("https://witanime.site/episode/show-a-الحلقة-{x}/"))
+        self.assertEqual("", slug_from_template("https://eta.animerco.org/episodes/x-{x}/"))
+
+    def test_only_a_sure_match_is_taken(self):
+        from utils.library_scan import match_result
+        m = lambda t, tpl="": (match_result(t, tpl, self.RESULTS) or {}).get("link")
+        self.assertEqual("https://witanime.site/anime/overlord", m("Overlord"))
+        self.assertEqual("https://witanime.site/anime/fate-zero", m("FateZero"))
+        self.assertEqual("https://witanime.site/anime/black-clover", m("Black Clover"))
+        # The episode link decides even when the folder name differs.
+        self.assertEqual("https://witanime.site/anime/black-clover-2nd-season",
+                         m("BC", "https://witanime.site/watch/black-clover-2nd-season/{x}"))
+        self.assertIsNone(m("Overlord V"))        # no "closest" guess
+
+    def test_poster_and_page_are_recorded(self):
+        wl = self.wl
+        wl.add_imported([{"url": "local://Overlord", "title": "Overlord", "status": wl.WATCHING,
+                          "parts": [{"profile": "Overlord"}], "history": []}])
+        e = wl.entries()[0]
+        self.assertTrue(wl.needs_poster(e))
+        new = wl.set_poster("local://Overlord", self.cover,
+                            "https://witanime.site/anime/overlord", "witanime.site")
+        self.assertEqual("https://witanime.site/anime/overlord", new)
+        e = wl.find(new)
+        self.assertEqual(self.cover, e["cover"])
+        self.assertFalse(wl.needs_poster(e))
+
+    def test_a_failed_lookup_waits_a_day(self):
+        wl = self.wl
+        wl.add_imported([{"url": "local://X", "title": "X", "parts": [], "history": []}])
+        wl.set_poster("local://X")                 # nothing found
+        e = wl.find("local://X")
+        self.assertFalse(wl.needs_poster(e))
+        self.assertTrue(wl.needs_poster(e, now=e["poster_tried"] + wl.POSTER_RETRY_SECONDS))
+
+    def test_linked_folder_takes_the_looked_up_season(self):
+        wl = self.wl
+        wl.add_imported([{"url": "local://Overlord", "title": "Overlord", "status": wl.WATCHING,
+                          "parts": [{"label": "", "template": "", "max_ep": 13, "first_ep": 1,
+                                     "profile": "Overlord", "watched": [1, 2],
+                                     "progress": {"3": 8.0}}], "history": []}])
+        url = wl.set_poster("local://Overlord", self.cover,
+                            "https://witanime.site/anime/overlord", "witanime.site")
+        wl.set_parts(url, [{"template": "https://witanime.site/episode/overlord-الحلقة-{x}/",
+                            "max_ep": 13, "first_ep": 1}])
+        parts = wl.find(url)["parts"]
+        self.assertEqual(1, len(parts))                     # not a second, empty season
+        self.assertEqual("Overlord", parts[0]["profile"])
+        self.assertEqual([1, 2], parts[0]["watched"])
+        self.assertEqual({"3": 8.0}, parts[0]["progress"])
+        self.assertIn("overlord", parts[0]["template"])
+
+    def test_page_already_in_the_library_absorbs_the_folder_entry(self):
+        wl = self.wl
+        page = "https://witanime.site/anime/overlord"
+        wl.add("Overlord", page, "witanime.site")
+        wl.add_imported([{"url": "local://Overlord copy", "title": "Overlord",
+                          "status": wl.WATCHING,
+                          "parts": [{"profile": "Overlord copy", "watched": [1, 2]}],
+                          "history": []}])
+        url = wl.set_poster("local://Overlord copy", self.cover, page, "witanime.site")
+        self.assertEqual(page, url)
+        items = wl.entries()
+        self.assertEqual(1, len(items))                       # one anime, one entry
+        self.assertEqual([1, 2], items[0]["parts"][0]["watched"])
+        self.assertEqual("Overlord copy", items[0]["parts"][0]["profile"])
+        self.assertEqual(wl.WATCHING, items[0]["status"])
+        self.assertEqual(self.cover, items[0]["cover"])
+        # The old address still reaches it (a dialog open on it, say).
+        self.assertEqual(page, wl.find("local://Overlord copy")["url"])
+        # Its season is looked up later: the folder part is adopted, not duplicated.
+        wl.set_parts(page, [{"template": "https://witanime.site/episode/overlord-الحلقة-{x}/",
+                             "max_ep": 13}])
+        parts = wl.find(page)["parts"]
+        self.assertEqual(1, len(parts))
+        self.assertEqual(("Overlord copy", [1, 2]), (parts[0]["profile"], parts[0]["watched"]))
+
+
+class WatchLaterTabClickTests(unittest.TestCase):
+    """Clicking the Watching / Watch later / Completed segments switches lists.
+    SegmentedWidget's onClick is connected to clicked(bool); a lambda without a
+    parameter for it received checked=True as the status and raised KeyError."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_details_save_on_done_and_close_discards(self):
+        from unittest import mock
+        from PyQt6.QtWidgets import QWidget
+        from utils import watch_later as wl
+        from ui.watch_later_tab import EntryDialog
+        tmp = tempfile.mkdtemp(prefix="aed_wldlg_")
+        url = "https://witanime.site/anime/show-d/"
+        with mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json")):
+            wl.add("Show D", url, "witanime.site")
+            wl.set_parts(url, [{"template": "https://witanime.site/episode/show-d-الحلقة-{x}/",
+                                "max_ep": 4}])
+            host = QWidget()
+
+            def edit(dlg):
+                grid = dlg._grids[0][1]
+                grid.set_selected([1, 2])
+                dlg.combo_status.setCurrentIndex(list(wl.STATUSES).index(wl.COMPLETED))
+
+            dlg = EntryDialog(wl.find(url), host)
+            edit(dlg)
+            dlg.cancelButton.click()                       # Close: nothing saved
+            e = wl.find(url)
+            self.assertEqual([], e["parts"][0]["watched"])
+            self.assertEqual(wl.LATER, e["status"])
+
+            dlg = EntryDialog(wl.find(url), host)
+            edit(dlg)
+            dlg.yesButton.click()                          # Done: saved
+            e = wl.find(url)
+            self.assertEqual([1, 2], e["parts"][0]["watched"])
+            self.assertEqual(wl.COMPLETED, e["status"])
+            self.assertEqual("Done", dlg.yesButton.text())
+            self.assertEqual("Close", dlg.cancelButton.text())
+
+    def test_switching_lists_opens_no_stray_windows(self):
+        """A row's progress bar was shown before it had a parent, so each switch
+        flashed a tiny top-level "Python" window per row."""
+        from unittest import mock
+        from PyQt6.QtCore import QObject, QEvent
+        from utils import watch_later as wl
+        from ui.watch_later_tab import WatchLaterWidget
+        tmp = tempfile.mkdtemp(prefix="aed_wltab_")
+        stray = []
+
+        class Spy(QObject):
+            def eventFilter(self, obj, ev):
+                if ev.type() == QEvent.Type.Show and obj.isWidgetType() and obj.isWindow() \
+                        and obj is not host:
+                    stray.append(type(obj).__name__)
+                return False
+
+        with mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json")):
+            for i, status in enumerate((wl.WATCHING, wl.LATER, wl.LATER)):
+                url = f"https://witanime.site/anime/show-{i}/"
+                wl.add(f"Show {i}", url, "witanime.site")
+                wl.set_parts(url, [{"template": f"https://witanime.site/episode/show-{i}-الحلقة-{{x}}/",
+                                    "max_ep": 12}])
+                wl.set_status(url, status)
+            from PyQt6.QtWidgets import QWidget, QVBoxLayout
+            host = QWidget()
+            w = WatchLaterWidget()
+            QVBoxLayout(host).addWidget(w)
+            w.fetch_posters = lambda: None
+            host.show()
+            spy = Spy()
+            self._app.installEventFilter(spy)
+            try:
+                for key in (wl.LATER, wl.WATCHING, wl.LATER):
+                    w.seg.items[key].click()
+                    self._app.processEvents()
+            finally:
+                self._app.removeEventFilter(spy)
+                host.close()
+        self.assertEqual([], stray)
+
+    def test_segment_clicks_switch_status(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        from ui.watch_later_tab import WatchLaterWidget
+        tmp = tempfile.mkdtemp(prefix="aed_wltab_")
+        with mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json")):
+            w = WatchLaterWidget()
+            for key in (wl.LATER, wl.COMPLETED, wl.WATCHING):
+                w.seg.items[key].click()
+                self.assertEqual(key, w._status)
+            w.deleteLater()
+
+
+class LibraryEdgeCaseTests(unittest.TestCase):
+    """Fixes from the Library review: merges never lose a season, odd log lines
+    never cost the good ones, Done only writes what was clicked, and the rest."""
+
+    PAGE = "https://witanime.site/anime/show-x/"
+    T1 = "https://witanime.site/episode/show-x-الحلقة-{x}/"
+    T2 = "https://witanime.site/episode/show-x-season-2-الحلقة-{x}/"
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        self.wl = wl
+        self.tmp = tempfile.mkdtemp(prefix="aed_edge_")
+        import shutil
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        patch = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.downloads = os.path.join(self.tmp, "animes")
+        os.makedirs(self.downloads)
+        from PyQt6.QtWidgets import QWidget
+        self.host = QWidget()               # dialogs' parent, alive for the whole test
+
+    def _files(self, folder, eps, ext=".mp4"):
+        path = os.path.join(self.downloads, folder)
+        os.makedirs(path, exist_ok=True)
+        for ep in eps:
+            open(os.path.join(path, f"{folder} Ep{ep}{ext}"), "wb").close()
+        return path
+
+    def _log(self, folder, ep, percent, eof=False):
+        return json.dumps({"path": os.path.join(self.downloads, folder, f"{folder} Ep{ep}.mp4"),
+                           "percent": percent, "eof": eof})
+
+    # ---- merging duplicates
+    def test_absorbing_a_duplicate_keeps_its_unmatched_seasons(self):
+        wl = self.wl
+        wl.add_imported([{"url": "local://Show X", "title": "Show X", "status": wl.WATCHING,
+                          "parts": [{"template": self.T1, "max_ep": 12, "profile": "Show X",
+                                     "watched": [1, 2]},
+                                    {"template": self.T2, "max_ep": 12, "profile": "Show X S2",
+                                     "watched": [1, 2, 3]}],
+                          "history": [{"status": "Success"}]}])
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12}])     # only S1 found
+        items = wl.entries()
+        self.assertEqual(1, len(items))
+        parts = items[0]["parts"]
+        self.assertEqual(2, len(parts))
+        self.assertEqual(("Show X", [1, 2]), (parts[0]["profile"], parts[0]["watched"]))
+        self.assertEqual(("Show X S2", [1, 2, 3]), (parts[1]["profile"], parts[1]["watched"]))
+        self.assertEqual(1, len(items[0]["history"]))
+        # A later lookup that finds both seasons keeps both, once each.
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12},
+                                 {"template": self.T2, "max_ep": 12}])
+        parts = wl.find(self.PAGE)["parts"]
+        self.assertEqual(["Show X", "Show X S2"], [p["profile"] for p in parts])
+
+    def test_folder_part_is_kept_when_its_season_matched_by_link(self):
+        wl = self.wl
+        wl.add("Show X", self.PAGE, "witanime.site")
+        data = wl._load()
+        data["entries"][0]["parts"] = [
+            {"template": self.T1, "max_ep": 12, "profile": None, "watched": []},
+            {"template": "", "max_ep": 12, "profile": "Other Folder", "watched": [4]}]
+        wl._save(data)
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12}])
+        parts = wl.find(self.PAGE)["parts"]
+        self.assertIn([4], [p["watched"] for p in parts])          # not silently dropped
+
+    # ---- the details dialog
+    def test_done_keeps_watched_episodes_the_grid_does_not_show(self):
+        wl = self.wl
+        from ui.watch_later_tab import EntryDialog
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12}])
+        wl.set_watched(self.PAGE, 0, list(range(1, 14)))          # ep 13 played, file gone
+        dlg = EntryDialog(wl.find(self.PAGE), self.host)
+        dlg.combo_status.setCurrentIndex(list(wl.STATUSES).index(wl.WATCHING))   # rewatching
+        dlg.yesButton.click()
+        e = wl.find(self.PAGE)
+        self.assertEqual(list(range(1, 14)), e["parts"][0]["watched"])
+        self.assertEqual(wl.WATCHING, e["status"])
+
+    def test_done_only_writes_the_clicks_not_a_stale_copy(self):
+        wl = self.wl
+        from ui.watch_later_tab import EntryDialog
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12}])
+        wl.link_profile(self.PAGE, 0, "Show X")
+        dlg = EntryDialog(wl.find(self.PAGE), self.host)
+        wl.apply_progress([self._log("Show X", 5, 99.0)])         # played while open
+        grid = dlg._grids[0][1]
+        grid.set_selected(sorted(set(grid.selected()) | {9}))     # the user ticks 9
+        dlg.yesButton.click()
+        self.assertEqual([1, 2, 3, 4, 5, 9], wl.find(self.PAGE)["parts"][0]["watched"])
+
+    def test_unknown_status_and_junk_entries_do_not_crash(self):
+        wl = self.wl
+        from ui.watch_later_tab import EntryDialog
+        with open(wl.FILE, "w", encoding="utf-8") as f:
+            json.dump({"entries": [{"url": self.PAGE, "title": "X", "status": "dropped",
+                                    "parts": None}, "junk", 7]}, f)
+        e = wl.find(self.PAGE)
+        self.assertEqual(wl.LATER, e["status"])
+        self.assertEqual(1, len(wl.entries()))
+        EntryDialog(e, self.host)                                  # no ValueError
+        raw = dict(e, status="dropped")
+        EntryDialog(raw, self.host)
+
+    def test_clear_history_waits_for_done(self):
+        wl = self.wl
+        from ui.watch_later_tab import EntryDialog
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.update(self.PAGE, history=[{"date": "d", "episodes": "1", "status": "Success"}])
+        dlg = EntryDialog(wl.find(self.PAGE), self.host)
+        dlg.btn_clear_history.click()
+        dlg.cancelButton.click()
+        self.assertEqual(1, len(wl.find(self.PAGE)["history"]))
+        dlg = EntryDialog(wl.find(self.PAGE), self.host)
+        dlg.btn_clear_history.click()
+        dlg.yesButton.click()
+        self.assertEqual([], wl.find(self.PAGE)["history"])
+
+    # ---- mpv.net progress log
+    def test_bad_log_lines_never_cost_the_good_ones(self):
+        wl = self.wl
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12}])
+        wl.link_profile(self.PAGE, 0, "Show X")
+        log = os.path.join(self.tmp, "aed-progress.log")
+        bad = ["123", "[1]", "null", '"text"', "{bad json",
+               json.dumps({"path": 5, "percent": "abc"}),
+               json.dumps({"path": "C:\\x\\Show X\\Show X Ep2.mp4", "percent": [1]})]
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("\n".join(bad + [self._log("Show X", 3, 95.0)]) + "\n")
+        self.assertTrue(wl.ingest_log(log))
+        self.assertEqual([1, 2, 3], wl.find(self.PAGE)["parts"][0]["watched"])
+        self.assertFalse(wl.ingest_log(log))                       # read once
+        self.assertEqual(os.path.getsize(log), wl._load()["log_offset"])
+
+    def test_history_from_log_survives_bad_lines(self):
+        from utils.library_scan import read_mpv_history
+        cfg = os.path.join(self.tmp, "mpv")
+        os.makedirs(cfg)
+        with open(os.path.join(cfg, "aed-progress.log"), "w", encoding="utf-8") as f:
+            f.write("[1]\n" + json.dumps({"path": "C:\\a\\S Ep1.mp4", "percent": "abc"}) + "\n"
+                    + json.dumps({"path": "C:\\a\\S Ep2.mp4", "percent": 99}) + "\n")
+        self.assertEqual({os.path.normcase("C:\\a\\S Ep2.mp4"): None}, read_mpv_history(cfg))
+
+    # ---- episode numbers from file names
+    def test_episode_number_ignores_ep_inside_words(self):
+        wl = self.wl
+        self.assertEqual(5, wl.episode_number("Sleep2 Ep5.mp4"))
+        self.assertEqual(7, wl.episode_number("Deep3 Sea Ep7.mkv"))
+        self.assertEqual(12, wl.episode_number("Ep1 Story Ep12.mp4"))
+        self.assertEqual(3, wl.episode_number(r"C:\Ep9 Folder\Show Ep3.mp4"))
+        self.assertIsNone(wl.episode_number("Keep2.mp4"))
+        self.assertIsNone(wl.episode_number("Movie.mp4"))
+        path = self._files("Sleep2", [1, 5])
+        self.assertEqual({1, 5}, set(wl.episode_files(path)))
+        self.assertEqual(("Sleep2", 5, 50.0, False), wl.parse_log_line(
+            json.dumps({"path": os.path.join(path, "Sleep2 Ep5.mp4"), "percent": 50})))
+
+    # ---- durations of other containers
+    def test_mkv_and_webm_durations(self):
+        import struct
+        from utils.library_scan import mkv_duration, video_duration
+
+        def elem(eid_bytes, body):
+            n = len(body)
+            return eid_bytes + (bytes([0x80 | n]) if n < 127 else bytes([0x40 | (n >> 8), n & 0xFF])) + body
+
+        header = elem(b"\x1A\x45\xDF\xA3", elem(b"\x42\x82", b"matroska"))
+        info = elem(b"\x15\x49\xA9\x66",
+                    elem(b"\x2A\xD7\xB1", (1000000).to_bytes(3, "big"))
+                    + elem(b"\x44\x89", struct.pack(">d", 1440000.0)))
+        seekhead = elem(b"\x11\x4D\x9B\x74", b"\0" * 10)
+        segment = b"\x18\x53\x80\x67" + b"\x01\xFF\xFF\xFF\xFF\xFF\xFF\xFF" + seekhead + info
+        path = os.path.join(self.tmp, "a.mkv")
+        with open(path, "wb") as f:
+            f.write(header + segment)
+        self.assertAlmostEqual(1440.0, mkv_duration(path))
+        webm = os.path.join(self.tmp, "a.webm")
+        with open(webm, "wb") as f:
+            f.write(header + segment)
+        self.assertAlmostEqual(1440.0, video_duration(webm))
+        with open(os.path.join(self.tmp, "bad.mkv"), "wb") as f:
+            f.write(b"\x1A\x45\xDF")
+        self.assertIsNone(mkv_duration(os.path.join(self.tmp, "bad.mkv")))
+        self.assertIsNone(mkv_duration(os.path.join(self.tmp, "missing.mkv")))
+
+    def test_avi_duration_prefers_the_opendml_frame_count(self):
+        import struct
+        from utils.library_scan import avi_duration
+
+        def chunk(cid, body):
+            return cid + struct.pack("<I", len(body)) + body + (b"\0" if len(body) & 1 else b"")
+
+        def lst(kind, body):
+            return b"LIST" + struct.pack("<I", 4 + len(body)) + kind + body
+
+        avih = chunk(b"avih", struct.pack("<10I", 41708, 0, 0, 0, 1000, 0, 0, 0, 0, 0)
+                     + b"\0" * 16)
+        odml = lst(b"odml", chunk(b"dmlh", struct.pack("<I", 34532) + b"\0" * 244))
+        body = lst(b"hdrl", avih + lst(b"strl", chunk(b"strh", b"\0" * 56)) + odml)
+        path = os.path.join(self.tmp, "a.avi")
+        with open(path, "wb") as f:
+            f.write(b"RIFF" + struct.pack("<I", 4 + len(body)) + b"AVI " + body)
+        self.assertAlmostEqual(34532 * 0.041708, avi_duration(path), places=3)
+        with open(os.path.join(self.tmp, "bad.avi"), "wb") as f:
+            f.write(b"RIFF\0\0\0\0WAVE")
+        self.assertIsNone(avi_duration(os.path.join(self.tmp, "bad.avi")))
+
+    def test_mkv_resume_point_counts_as_watched(self):
+        from utils.library_scan import watch_state
+        files = {e: f"C:\\a\\S Ep{e}.mkv" for e in (1, 2, 3)}
+        history = {os.path.normcase(files[3]): 1400.0}
+        watched, progress = watch_state(files, history, duration=lambda _p: 1440.0)
+        self.assertEqual({1, 2, 3}, watched)
+        self.assertEqual({}, progress)
+
+    # ---- downloads of profiles not in the Library
+    def test_download_of_an_unlinked_profile_lands_in_the_library(self):
+        wl = self.wl
+        from utils.config import app_settings
+        from unittest import mock
+        self._files("Solo Show", [1, 2])
+        with config_lock:
+            sites_data["Solo Show"] = {"url": "https://witanime.site/episode/solo-الحلقة-{x}/",
+                                       "episode_bounds": [1, 12]}
+        self.addCleanup(lambda: sites_data.pop("Solo Show", None))
+        with mock.patch.dict(app_settings, {"download_dir": self.downloads}):
+            self.assertTrue(wl.record_download("Solo Show", "1-2", "Success", "ok"))
+            self.assertTrue(wl.record_download("Solo Show", "3", "Failed", "x"))
+        items = wl.entries()
+        self.assertEqual(1, len(items))
+        e = items[0]
+        self.assertEqual("Solo Show", e["parts"][0]["profile"])
+        self.assertEqual(wl.WATCHING, e["status"])
+        self.assertEqual(["Failed", "Success"], [h["status"] for h in e["history"]])
+        self.assertFalse(wl.record_download("No Such Profile", "1", "Success", ""))
+
+    def test_download_links_the_entry_with_the_same_episode_link(self):
+        wl = self.wl
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12}])
+        with config_lock:
+            sites_data["Show X (old)"] = {"url": self.T1}
+        self.addCleanup(lambda: sites_data.pop("Show X (old)", None))
+        self.assertTrue(wl.record_download("Show X (old)", "1", "Success", ""))
+        e = wl.find(self.PAGE)
+        self.assertEqual(1, len(wl.entries()))
+        self.assertEqual("Show X (old)", e["parts"][0]["profile"])
+        self.assertEqual(1, len(e["history"]))
+
+    def test_download_keeps_the_folder_name_of_a_deleted_profile(self):
+        wl = self.wl
+        from unittest import mock
+        from ui import watch_later_tab as tab
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12},
+                                 {"template": self.T2, "max_ep": 12}])
+        wl.link_profile(self.PAGE, 0, "Show X")                  # not in sites_data
+        w = tab.WatchLaterWidget()
+        self.addCleanup(w.deleteLater)
+        with mock.patch("ui.search_tab.open_existing_profile", return_value=(None, None)), \
+                mock.patch("ui.search_tab.create_profile", return_value="Show X") as create, \
+                mock.patch.object(tab, "save_config"), mock.patch.dict(tab.app_settings):
+            w.download(wl.find(self.PAGE), 0)
+        self.assertEqual("Show X", create.call_args[0][0])        # not "Show X - Season 1"
+
+    # ---- Continue watching
+    def test_continue_card_downloads_its_own_season(self):
+        wl = self.wl
+        from unittest import mock
+        from ui import watch_later_tab as tab
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 6, "label": "Season 1"},
+                                 {"template": self.T2, "max_ep": 4, "label": "Season 2"}])
+        wl.link_profile(self.PAGE, 0, "Show X")
+        wl.set_watched(self.PAGE, 0, range(1, 7))                 # S1 done, files deleted
+        e = wl.find(self.PAGE)
+        with mock.patch.object(tab, "_download_dir", return_value=self.downloads):
+            nxt = wl.next_episode(e, self.downloads)
+            self.assertEqual((1, 1), nxt[:2])
+            w = tab.WatchLaterWidget()
+            self.addCleanup(w.deleteLater)
+            with mock.patch.object(w, "download") as dl:
+                w.on_continue(self.PAGE, 1, 1)
+                dl.assert_called_once()
+                self.assertEqual(1, dl.call_args[0][1])
+                self.assertEqual([1, 2, 3, 4], dl.call_args[1]["episodes"])
+                dl.reset_mock()
+                w.on_primary(self.PAGE)                           # the row's fallback too
+                self.assertEqual(1, dl.call_args[0][1])
+            self._files("Show X", [1])
+            with mock.patch.object(w, "_play") as play:
+                w.on_continue(self.PAGE, 0, 1)
+                play.assert_called_once()
+
+    def test_missing_from(self):
+        wl = self.wl
+        self._files("Show X", [1, 2, 4])
+        e = {"parts": [{"template": self.T1, "max_ep": 6, "profile": "Show X"}]}
+        self.assertEqual([3, 5, 6], wl.missing_from(e, 0, 3, self.downloads))
+        self.assertEqual([5, 6], wl.missing_from(e, 0, 5, self.downloads))
+        self.assertEqual([9], wl.missing_from(e, 0, 9, self.downloads))   # past the count
+        self.assertEqual([], wl.missing_from(e, 3, 1, self.downloads))
+
+    # ---- mpv.net lookups
+    def test_progress_poll_never_searches_the_registry(self):
+        from unittest import mock
+        from ui import watch_later_tab as tab
+        from utils import mpvnet
+        w = tab.WatchLaterWidget()
+        self.addCleanup(w.deleteLater)
+        with mock.patch.object(mpvnet, "find_mpvnet", return_value=(None, None)) as find, \
+                mock.patch.object(mpvnet, "ensure_progress_script") as ensure:
+            for _ in range(5):
+                w._poll_progress()
+            self.assertEqual(0, find.call_count)
+            w._check_mpv()
+            self.assertEqual(1, find.call_count)
+            self.assertTrue(w.mpv_notice.isVisibleTo(w))
+            ensure.assert_not_called()
+        cfg = os.path.join(self.tmp, "mpvcfg")
+        with mock.patch.object(mpvnet, "find_mpvnet", return_value=(r"C:\x\mpvnet.exe", None)), \
+                mock.patch.object(mpvnet, "config_dir", return_value=cfg), \
+                mock.patch.object(mpvnet, "ensure_progress_script") as ensure:
+            w._check_mpv()                                         # installed meanwhile
+            ensure.assert_called_once()
+            self.assertFalse(w.mpv_notice.isVisibleTo(w))
+            self.assertEqual(os.path.join(cfg, mpvnet.PROGRESS_LOG), w._log_path)
+
+    # ---- posters
+    def test_poster_search_fetches_only_the_matching_cover(self):
+        from unittest import mock
+        from ui import watch_later_tab as tab
+        seen = {}
+
+        class FakeSearch:
+            def __init__(self, query, url):
+                from PyQt6.QtCore import QObject, pyqtSignal
+
+                class Sig(QObject):
+                    finished = pyqtSignal(list)
+                    cover_loaded = pyqtSignal(str, object)
+                    error = pyqtSignal(str)
+                self._sig = Sig()
+                self.finished, self.cover_loaded, self.error = \
+                    self._sig.finished, self._sig.cover_loaded, self._sig.error
+                self.cover_links = None
+
+            def run(self):
+                self.finished.emit([{"title": "Other", "link": "L1"},
+                                    {"title": "Show X", "link": "L2"}])
+                seen["links"] = self.cover_links
+                seen["interrupted"] = self.isInterruptionRequested()
+                for link in ("L1", "L2"):
+                    if self.cover_links is None or link in self.cover_links:
+                        self.cover_loaded.emit(link, "img-" + link)
+
+        th = tab.PosterThread([])
+        with mock.patch("ui.search_tab.AnimeSearchThread", FakeSearch):
+            found, cover = th._search("Show X", "u", "Show X", "")
+            self.assertEqual(("L2", "img-L2"), (found["link"], cover))
+            self.assertEqual({"L2"}, seen["links"])
+            self.assertFalse(seen["interrupted"])
+            th.isInterruptionRequested = lambda: True             # the app is closing
+            th._search("Show X", "u", "Nope", "")
+            self.assertEqual(set(), seen["links"])                # no match: no covers
+            self.assertTrue(seen["interrupted"])                  # closing reaches it
+
+    def test_listing_is_cached_within_a_refresh_only(self):
+        wl = self.wl
+        from unittest import mock
+        path = self._files("Show X", [1])
+        real = os.listdir
+        with mock.patch("os.listdir", side_effect=real) as listdir:
+            with wl.cached_listing():
+                with wl.cached_listing():                         # nested
+                    wl.episode_files(path)
+                wl.episode_files(path)
+                self.assertEqual(1, listdir.call_count)
+            wl.episode_files(path)
+            self.assertEqual(2, listdir.call_count)
+
+    def test_old_address_still_finds_a_relinked_entry(self):
+        wl = self.wl
+        wl.add_imported([{"url": "local://Show X", "title": "Show X",
+                          "parts": [{"profile": "Show X"}], "history": []}])
+        wl.set_poster("local://Show X", "", self.PAGE, "witanime.site")
+        self.assertEqual(self.PAGE, wl.find("local://Show X")["url"])
+        self.assertTrue(wl.set_status("local://Show X", wl.WATCHING))
+        self.assertEqual(wl.WATCHING, wl.find(self.PAGE)["status"])
+        # A later scan doesn't bring the folder back as a second entry.
+        self.assertEqual(0, wl.add_imported([{"url": "local://Show X", "title": "Show X",
+                                              "parts": [], "history": []}]))
+
+    def test_download_history_table_is_capped(self):
+        import sqlite3
+        from unittest import mock
+        from utils import database
+        from utils.config import DB_FILE
+        database.init_db()
+        with mock.patch.object(database, "HISTORY_ROWS_KEPT", 3), \
+                mock.patch("utils.watch_later.record_download"):
+            for i in range(6):
+                database.log_history(f"P{i}", "1", "Success", "")
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            rows = [r[0] for r in conn.execute("SELECT profile FROM downloads_v2 ORDER BY id")]
+        finally:
+            conn.close()
+        self.assertEqual(["P3", "P4", "P5"], rows)
+
+
+class DeferredTabsTests(unittest.TestCase):
+    """The window opens with only the Downloader built; the other tabs are built
+    after the first paint, or at once when one is clicked before that."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def _window(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        from ui.app_window import AppWindow
+        tmp = tempfile.mkdtemp(prefix="aed_tabs_")
+        import shutil
+        self.addCleanup(shutil.rmtree, tmp, True)
+        patch = mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        w = AppWindow()
+        self.addCleanup(w.deleteLater)
+        return w
+
+    def test_only_the_downloader_is_built_up_front(self):
+        w = self._window()
+        self.assertIsNone(w.search_interface)
+        self.assertIsNone(w.manager_interface)
+        # The sidebar is complete anyway, in the usual order.
+        keys = [k for k, _i, _t in w.DEFERRED_TABS]
+        for key in keys:
+            self.assertIsNotNone(w.navigationInterface.widget(key), key)
+        w._sync_manager_to_downloader()                   # no crash before the build
+        w.on_search_profile_created("x")
+
+    def test_clicking_a_tab_early_builds_and_opens_it(self):
+        w = self._window()
+        w.open_tab("watch_later_interface")
+        self.assertTrue(w._tabs_built)
+        self.assertIs(w.stackedWidget.currentWidget(), w.watch_later_interface)
+        for key, _i, _t in w.DEFERRED_TABS:
+            page = getattr(w, key)
+            self.assertEqual(key, page.objectName())
+            self.assertGreaterEqual(w.stackedWidget.view.indexOf(page), 0)
+        before = w.search_interface
+        w._build_tabs()                                   # once only
+        self.assertIs(before, w.search_interface)
+        w.downloader_interface.goto_profiles_signal.emit()
+        self.assertIs(w.stackedWidget.currentWidget(), w.manager_interface)
+
+    def test_first_paint_builds_the_rest(self):
+        w = self._window()
+        w.show()
+        for _ in range(20):
+            self._app.processEvents()
+            if w._tabs_built:
+                break
+        w.hide()
+        self.assertTrue(w._tabs_built)
+
+
+class FluentToolTipTests(unittest.TestCase):
+    """Every hint is drawn as a Fluent tooltip: the app-wide filter attaches one to
+    any widget with a tooltip on hover, and the native white box never shows."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+        from ui.tooltips import install_fluent_tooltips
+        install_fluent_tooltips(cls._app)
+
+    def _hover(self, widget):
+        from PyQt6.QtCore import QPointF
+        from PyQt6.QtGui import QEnterEvent
+        from PyQt6.QtWidgets import QApplication
+        QApplication.sendEvent(widget, QEnterEvent(QPointF(1, 1), QPointF(1, 1), QPointF(1, 1)))
+
+    def test_hint_gets_a_fluent_tooltip_and_the_native_one_is_blocked(self):
+        from PyQt6.QtCore import QEvent, QPoint
+        from PyQt6.QtGui import QHelpEvent
+        from PyQt6.QtWidgets import QPushButton
+        from ui.tooltips import has_fluent_tooltip
+        btn = QPushButton("x")
+        btn.setToolTip("A hint")
+        btn.setEnabled(False)                  # disabled controls keep their hint
+        self.assertFalse(has_fluent_tooltip(btn))
+        self._hover(btn)
+        self.assertTrue(has_fluent_tooltip(btn))
+        from ui import tooltips
+        native = QHelpEvent(QEvent.Type.ToolTip, QPoint(1, 1), QPoint(1, 1))
+        self.assertTrue(tooltips._instance.eventFilter(btn, native))   # swallowed
+        self._hover(btn)                       # hovering again adds no second filter
+        from qfluentwidgets import ToolTipFilter
+        self.assertEqual(1, sum(isinstance(c, ToolTipFilter) for c in btn.children()))
+
+    def test_widgets_without_a_hint_are_left_alone(self):
+        from PyQt6.QtWidgets import QPushButton
+        from ui.tooltips import has_fluent_tooltip
+        btn = QPushButton("x")
+        self._hover(btn)
+        self.assertFalse(has_fluent_tooltip(btn))
+
+    def test_main_installs_it(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "main.py"), encoding="utf-8") as f:
+            self.assertIn("install_fluent_tooltips(app)", f.read())
+
+
+class SmoothMenuTests(unittest.TestCase):
+    """Dropdowns open in place and fade in. The stock slide moved the window and
+    reset its mask every frame, which stuttered on Windows."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+        from ui.menus import install_smooth_menus
+        install_smooth_menus()
+        install_smooth_menus()                 # idempotent
+
+    def test_combo_menu_opens_in_place_without_a_mask(self):
+        import time
+        from PyQt6.QtWidgets import QWidget, QVBoxLayout
+        from qfluentwidgets import ComboBox
+        from ui.menus import _FadeInPlace
+        host = QWidget()
+        cb = ComboBox()
+        cb.addItems(["a", "b", "c"])
+        QVBoxLayout(host).addWidget(cb)
+        host.show()
+        cb._showComboMenu()
+        menu = cb.dropMenu
+        self.assertIsInstance(menu.aniManager, _FadeInPlace)
+        start = menu.pos()
+        deadline = time.time() + 0.4
+        while time.time() < deadline:
+            self._app.processEvents()
+        self.assertEqual(start, menu.pos())
+        self.assertTrue(menu.mask().isEmpty())
+        self.assertAlmostEqual(1.0, menu.windowOpacity(), places=2)
+        menu.actions()[2].trigger()
+        self.assertEqual("c", cb.currentText())
+        host.close()
+
+    def test_main_installs_it(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "main.py"), encoding="utf-8") as f:
+            self.assertIn("install_smooth_menus()", f.read())
+
+
+class ShaderToggleBindingTests(unittest.TestCase):
+    """Ctrl+1 must reach the Lua binding. Newer mpv renames shader-toggle.lua's
+    client to "shader_toggle", so a "shader-toggle/toggle" binding silently died."""
+
+    def test_input_conf_binds_the_name_the_script_registers(self):
+        import re
+        from utils import mpvnet
+        base = mpvnet.bundle_dir()
+        with open(os.path.join(base, "input.conf"), encoding="utf-8") as f:
+            conf = f.read()
+        with open(os.path.join(base, "scripts", "shader-toggle.lua"), encoding="utf-8") as f:
+            lua = f.read()
+        bound = re.search(r"^Ctrl\+1\s+script-binding\s+(\S+)", conf, re.M).group(1)
+        self.assertNotIn("/", bound)
+        self.assertIn(f'add_key_binding(nil, "{bound}"', lua)
 
 
 

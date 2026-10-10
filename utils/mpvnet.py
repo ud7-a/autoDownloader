@@ -270,6 +270,46 @@ def open_videos(files):
     return "default"
 
 
+# ---------------------------------------------------------- watch progress
+#
+# The bundled scripts/aed-progress.lua appends a line per played file to this log;
+# the Watch Later tab reads it to tick episodes off automatically.
+
+PROGRESS_SCRIPT = "aed-progress.lua"
+PROGRESS_LOG = "aed-progress.log"
+
+
+def progress_log_path():
+    """Where mpv.net writes the progress log, or "" when mpv.net isn't installed."""
+    exe = find_mpvnet()[0]
+    return os.path.join(config_dir(exe), PROGRESS_LOG) if exe else ""
+
+
+def ensure_progress_script():
+    """Install (or refresh) only the progress script in mpv.net's scripts folder.
+
+    Lets Watch Later track playback without the user re-applying the whole config,
+    which would also overwrite their mpv.conf and input.conf. Returns True when the
+    script is in place.
+    """
+    exe = find_mpvnet()[0]
+    if not exe:
+        return False
+    data = _read_bytes(os.path.join(bundle_dir(), "scripts", PROGRESS_SCRIPT))
+    if data is None:
+        return False
+    target = os.path.join(config_dir(exe), "scripts", PROGRESS_SCRIPT)
+    if _read_bytes(target) == data:
+        return True
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(data)
+    except OSError:
+        return False
+    return True
+
+
 def run_elevated(exe, args, timeout_ms=180000, show=1):
     """Run exe with admin rights (Windows shows the UAC prompt) and wait for it.
 

@@ -5,6 +5,7 @@ from datetime import datetime
 from utils.config import APP_DIR, DB_FILE
 
 db_lock = threading.RLock()
+HISTORY_ROWS_KEPT = 1000
 
 def init_db():
     os.makedirs(APP_DIR, exist_ok=True)
@@ -32,8 +33,18 @@ def log_history(profile, episodes_str, status, notes):
             c = conn.cursor()
             c.execute("INSERT INTO downloads_v2 (date, profile, episodes, status, notes) VALUES (?, ?, ?, ?, ?)",
                       (date_str, profile, str(episodes_str), status, str(notes)))
+            # Nothing shows this table since the Library replaced the History tab
+            # (each anime keeps its own history), so it only keeps the latest rows.
+            c.execute("DELETE FROM downloads_v2 WHERE id <= (SELECT MAX(id) FROM downloads_v2) - ?",
+                      (HISTORY_ROWS_KEPT,))
             conn.commit()
             conn.close()
+        # The per-anime history in the Library (an anime not there yet is added).
+        try:
+            from utils.watch_later import record_download
+            record_download(profile, episodes_str, status, notes)
+        except Exception as e:
+            print(f"Watch later history error: {e}")
         signals.history_updated.emit()
     except Exception as e:
         print(f"Database Error: {e}")

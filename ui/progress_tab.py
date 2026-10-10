@@ -253,6 +253,17 @@ class ProgressTab(QWidget):
         self.episode_picker = EpisodePicker()
         v.addWidget(self.episode_picker, 1)
 
+        # Takes the picker's place (and its stretch) when every episode has begun.
+        # Without something stretchy here the three rows above were spread down
+        # the whole panel with big gaps between them.
+        self.lbl_paused_empty = QLabel("Every episode has already started, so there's "
+                                       "nothing left to skip.\nPress Resume to carry on.")
+        self.lbl_paused_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_paused_empty.setWordWrap(True)
+        self.lbl_paused_empty.setStyleSheet("color: #999999; font-size: 13px;")
+        self.lbl_paused_empty.hide()
+        v.addWidget(self.lbl_paused_empty, 1)
+
         panel.hide()
         self.paused_panel = panel
         self._paused_task_id = None
@@ -277,6 +288,10 @@ class ProgressTab(QWidget):
         self.chk_paused_auto.setChecked(bool(snap.get("auto")))
         self.spin_paused_limit.setEnabled(not snap.get("auto"))
         self.chk_paused_headless.setChecked(bool(snap.get("headless")))
+        self.chk_paused_headless.setEnabled(True)
+        self.chk_paused_headless.setToolTip(
+            "Run the browser invisibly (headless). It restarts before the next episode; "
+            "downloads already running are not affected.")
 
         pending = snap.get("not_started", [])
         # Episodes skipped on an earlier pause that the engine hasn't reached yet
@@ -285,10 +300,9 @@ class ProgressTab(QWidget):
         self.episode_picker.set_episodes(
             pending, [e for e in pending if e not in already_skipped])
         self._paused_snap = snap
-        self.lbl_paused_eps.setText(
-            "Episodes not started yet" if pending
-            else "Every episode has already started; there is nothing left to skip.")
+        self.lbl_paused_eps.setVisible(bool(pending))
         self.episode_picker.setVisible(bool(pending))
+        self.lbl_paused_empty.setVisible(not pending)
         self._paused_pending = len(pending)
         self._paused_total = snap.get("total", len(pending))
         self._show_paused_panel(True)

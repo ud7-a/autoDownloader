@@ -22,8 +22,10 @@ The desktop application is built with **Python 3.13** and **PyQt6** using **QFlu
   - Allows 1-click following directly to the Watchlist.
 - **Profile Manager (`ui/manager_tab.py`)**:
   - Configurable data-driven site flow definitions (XPaths, delays, and download button navigation).
-- **History Tab (`ui/history_tab.py`)**:
-  - SQLite database (`download_history.db`) recording all completed downloads with search and redownload capabilities.
+- **Watch Later Tab (`ui/watch_later_tab.py`, data in `utils/watch_later.py`)**:
+  - Anime the user plans to watch, is watching, or has finished (`watch_later.json`). Adding one never creates a profile; Download does.
+  - Each anime keeps its own download history (fed from `log_history`) and watched episodes, ticked by hand or automatically from `aed-progress.lua`, which mpv.net runs and which appends a line per played file to `aed-progress.log`.
+  - `utils/library_scan.py` imports what is already on disk on first open (and from "Scan anime folder"): every anime folder and saved profile, with watched episodes from mpv.net's resume files and the progress log. Folders with no known site page are keyed `local://<folder>` and are merged into the real entry when that anime is added from Search.
 
 ---
 

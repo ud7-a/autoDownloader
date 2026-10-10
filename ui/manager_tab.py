@@ -20,6 +20,10 @@ from core.smart_picker import launch_path_picker
 from ui.styles import apply_danger_style
 
 
+# Per-anime facts stored on a profile; dropped when its URL is pointed elsewhere.
+ANIME_SPECIFIC_FIELDS = ("episode_bounds", "skip_filler", "filler_episodes", "filler_source")
+
+
 # --- NATIVE FLUENT DIALOGS ---
 
 class FluentInputDialog(MessageBoxBase):
@@ -230,7 +234,13 @@ class SiteManagerWidget(QWidget):
         self.path_tabs.tabCloseRequested.connect(self.show_tab_menu)
         self.path_tabs.currentChanged.connect(self.update_tab_button_styles)
         self.path_tabs.tabBar().tabMoved.connect(self.mark_dirty)   # reorder = a change
-        
+        # No ‹ › scroll arrows: when the paths don't fit, the tabs shrink instead so
+        # every path stays in view. Trimmed from the LEFT -- the names share an
+        # "FHD - " prefix and differ by host, so "…Mediafire" is the useful part.
+        # The full name is the tab's tooltip.
+        self.path_tabs.setUsesScrollButtons(False)
+        self.path_tabs.setElideMode(Qt.TextElideMode.ElideLeft)
+
         self.path_tabs.setStyleSheet("""
             QTabWidget::pane { 
                 border: none; 
@@ -239,10 +249,10 @@ class SiteManagerWidget(QWidget):
             QTabBar::tab { 
                 background: rgba(255, 255, 255, 0.05); 
                 color: #aaaaaa; 
-                padding: 8px 30px 8px 16px; 
+                padding: 8px 26px 8px 12px;
                 margin-top: 5px;
                 margin-bottom: 5px;
-                margin-right: 6px; 
+                margin-right: 4px;
                 border-radius: 16px; 
                 font-weight: bold; 
                 font-family: "Segoe UI Variable", "Segoe UI", sans-serif; 
@@ -350,6 +360,8 @@ class SiteManagerWidget(QWidget):
         if file_path:
             try:
                 with open(file_path, "r", encoding="utf-8") as f: data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("this file is not a profile")
                 default_name = os.path.splitext(os.path.basename(file_path))[0]
                 dlg = FluentInputDialog("Import Profile", "Enter a name for this profile:", default_name, self)
                 if dlg.exec():
@@ -411,6 +423,7 @@ class SiteManagerWidget(QWidget):
         path_name = name if name else f"Path {self.path_tabs.count() + 1}"
         tab = PathTab()
         self.path_tabs.addTab(tab, path_name)
+        self.path_tabs.setTabToolTip(self.path_tabs.indexOf(tab), path_name)   # if trimmed
 
         url = self.url_entry.text().strip()
         tab.btn_start_picker.clicked.connect(lambda checked=False, t=tab, u=url: threading.Thread(target=launch_path_picker, args=(t, u), daemon=True).start())
@@ -439,7 +452,8 @@ class SiteManagerWidget(QWidget):
             
         if steps:
             for step in steps:
-                self.add_step_to_tab(tab, step.get("xpath", ""), str(step.get("delay", 5.0)))
+                self.add_step_to_tab(tab, step.get("xpath", ""), str(step.get("delay", 5.0)),
+                                     script=step.get("script"))
         elif not name:
             self.add_step_to_tab(tab, "", "5.0")
 
@@ -449,7 +463,10 @@ class SiteManagerWidget(QWidget):
         tab = self.path_tabs.currentWidget()
         if tab: self.add_step_to_tab(tab, "", "5.0")
 
-    def add_step_to_tab(self, tab, xp, dl):
+    def add_step_to_tab(self, tab, xp, dl, script=None):
+        """One step row. A script step (page JavaScript instead of an xpath) gets a
+        hidden row and is saved back unchanged: the editor has no way to edit
+        scripts, and saving used to drop them because their xpath field was empty."""
         card = QFrame()
         card.setFixedHeight(60)
         card.setMinimumWidth(440)
@@ -459,9 +476,15 @@ class SiteManagerWidget(QWidget):
         c_layout.setSpacing(12)
         
         xp_in = LineEdit()
-        xp_in.setText(xp)
         xp_in.setFixedHeight(40)
-        xp_in.setPlaceholderText("Button Text (or XPath)")
+        if script:
+            xp_in.setText("⚙ Script step (kept as is)")
+            xp_in.setReadOnly(True)
+            preview = script if len(script) <= 400 else script[:400] + "…"
+            xp_in.setToolTip(preview)
+        else:
+            xp_in.setText(xp)
+            xp_in.setPlaceholderText("Button Text (or XPath)")
 
         dl_in = LineEdit()
         dl_in.setText(str(dl))
@@ -480,7 +503,11 @@ class SiteManagerWidget(QWidget):
         c_layout.addWidget(btn_del)
         
         tab.s_layout.insertWidget(tab.s_layout.count() - 1, card)
-        obj = {"card": card, "xpath": xp_in, "delay": dl_in}
+        if script:
+            # Hidden, not dropped: it keeps its place among the steps and is saved
+            # back as it was.
+            card.setVisible(False)
+        obj = {"card": card, "xpath": xp_in, "delay": dl_in, "script": script or None}
         tab.step_widgets.append(obj)
         btn_del.clicked.connect(lambda: self.remove_step(tab, obj))
         xp_in.textChanged.connect(self.mark_dirty)
@@ -505,6 +532,7 @@ class SiteManagerWidget(QWidget):
             if dlg.exec():
                 new_name = dlg.result_text
                 self.path_tabs.setTabText(index, new_name)
+                self.path_tabs.setTabToolTip(index, new_name)
                 self.mark_dirty()
 
         def do_delete():
@@ -686,10 +714,23 @@ class SiteManagerWidget(QWidget):
 
         old_episodes = "1"
         with config_lock:
-            if name in sites_data:
-                old_episodes = _episodes_of(sites_data[name])
-            elif self.original_profile_name in sites_data:
+            # Fields this form doesn't edit (episode limits from Search, skip-filler,
+            # the filler cache...) are carried over -- from the profile being edited
+            # only, never from another one that happens to have the target name, and
+            # never its in-memory flags ("_transient").
+            previous = (sites_data.get(self.original_profile_name) or {}) \
+                if self.original_profile_name else {}
+            kept = {k: v for k, v in previous.items()
+                    if not k.startswith("_")
+                    and k not in ("url", "next_btn_xpath", "step_paths", "last_episodes")}
+            if (previous.get("url") or "").strip() != self.url_entry.text().strip():
+                # Pointed at another anime: what was known about the old one is wrong.
+                for k in ANIME_SPECIFIC_FIELDS:
+                    kept.pop(k, None)
+            if self.original_profile_name in sites_data:
                 old_episodes = _episodes_of(sites_data[self.original_profile_name])
+            elif name in sites_data:
+                old_episodes = _episodes_of(sites_data[name])
 
             if self.original_profile_name and self.original_profile_name != name and self.original_profile_name in sites_data:
                 del sites_data[self.original_profile_name]
@@ -699,17 +740,21 @@ class SiteManagerWidget(QWidget):
             tab = self.path_tabs.widget(i)
             steps_list = []
             for obj in tab.step_widgets:
+                try: val = float(obj["delay"].text().strip())
+                except ValueError: val = 5.0
+                if obj.get("script"):
+                    steps_list.append({"script": obj["script"], "delay": val})
+                    continue
                 xp = obj["xpath"].text().strip()
                 if xp:
-                    try: val = float(obj["delay"].text().strip())
-                    except ValueError: val = 5.0
                     steps_list.append({"xpath": xp, "delay": val})
             s_paths[self.path_tabs.tabText(i).strip()] = steps_list
             
         with config_lock:
             sites_data[name] = {
-                "url": self.url_entry.text().strip(), 
-                "next_btn_xpath": self.next_entry.text().strip(), 
+                **kept,
+                "url": self.url_entry.text().strip(),
+                "next_btn_xpath": self.next_entry.text().strip(),
                 "step_paths": s_paths,
                 "last_episodes": old_episodes
             }

@@ -16,7 +16,9 @@
     "www.mp4upload.com",
     "yourupload.com",
     "www.yourupload.com",
-    "mega.nz"
+    "mega.nz",
+    "wahmi.org",
+    "www.wahmi.org"
   ],
   "path_hosts": {
     "4shared": [
@@ -34,6 +36,9 @@
     "mega": [
       "mega.nz",
       "mega.io"
+    ],
+    "wahmi": [
+      "wahmi.org"
     ],
     "workupload": [
       "workupload.com"
@@ -133,6 +138,38 @@
           {
             "delay": 2.0,
             "xpath": "//button[@data-action='download']"
+          }
+        ],
+        "FHD - mp4upload": [
+          {
+            "delay": 2.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]"
+          },
+          {
+            "delay": 5.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mp4upload')]"
+          },
+          {
+            "delay": 3.0,
+            "script": "if (window.location.href.includes('mp4upload.com') && !window.location.href.includes('embed-')) { window.location.href = window.location.href.replace(/mp4upload\\.com\\/([a-zA-Z0-9]+)/, 'mp4upload.com/embed-$1.html'); } return null;"
+          },
+          {
+            "delay": 2.0,
+            "script": "let src = null; let v = document.querySelector('video'); if (v && v.src && !v.src.startsWith('blob:')) return v.src; let scripts = document.querySelectorAll('script'); for (let s of scripts) { let match = s.innerHTML.match(/eval\\((function\\(p,a,c,k,e,d\\)[\\s\\S]*?split\\('\\|'\\).*?)\\)/); if (match) { try { let unpacked = eval(match[1]); let m = unpacked.match(/player\\.src\\(\\\"([^\\\"]+)\\\"\\)/) || unpacked.match(/src:\\\"([^\\\"]+)\\\"/); if (m) src = m[1]; } catch(e) {} } } return src;"
+          }
+        ],
+        "FHD - wahmi": [
+          {
+            "delay": 1.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]"
+          },
+          {
+            "delay": 4.0,
+            "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wahmi')]"
+          },
+          {
+            "delay": 2.0,
+            "script": "let csrf = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content'); let dlId = (typeof downloadId !== 'undefined' ? downloadId : null) || window.location.pathname.split('/')[1]; let base = (typeof config !== 'undefined' && config.baseURL ? config.baseURL : window.location.origin); let url = base + '/' + dlId + '/download/create'; return (async () => { try { let resp = await fetch(url, { method: 'POST', headers: { 'X-CSRF-TOKEN': csrf, 'Content-Type': 'application/json', 'Accept': 'application/json' } }); let data = await resp.json(); if (data && data.download_link) return data.download_link; } catch(e) {} let a = document.querySelector('a.download-link'); if (a && a.href) return a.href; return null; })();"
           }
         ],
         "FHD - wtsrv": [

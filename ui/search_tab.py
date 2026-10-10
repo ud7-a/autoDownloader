@@ -20,6 +20,9 @@ from utils.config import app_settings, sites_data, save_config, config_lock
 from core.site_health import (site_key, lookup as site_lookup, record_landing,
                               record_detection, broken_sites)
 from ui.styles import rounded_pixmap
+# The built-in flows live in core/site_flows.py (shared with the config migration);
+# imported here so `from ui.search_tab import DEFAULT_SITE_FLOWS` keeps working.
+from core.site_flows import DEFAULT_SITE_FLOWS, site_of
 
 # Fixed list of supported websites (domain -> search URL template). The Search tab
 # only allows these; users cannot add arbitrary sites.
@@ -31,69 +34,141 @@ SUPPORTED_SITES = {
 # Built-in download click-flows for supported sites, used when a freshly created
 # search profile has no existing same-domain profile to inherit steps from. Without
 # this a new profile would have empty step_paths and couldn't download.
-DEFAULT_SITE_FLOWS = {
-    # Taken from a hand-tuned working profile ("template witanime.json"). Order is
-    # the fallback order: Mediafire first, then Google Drive, then witanime's own
-    # wtsrv mirror, then Workupload, then gofile.
-    "witanime.site": {
-        "next_btn_xpath": "الحلقة التالية",
-        "step_paths": {
-            "FHD - Mediafire": [
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 1.0},
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mediafire')]", "delay": 5.0},
-                {"xpath": '//*[@id="downloadButton"]', "delay": 2.0},
-            ],
-            "FHD - Google Drive": [
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 2.0},
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]", "delay": 3.0},
-                {"xpath": "Download anyway", "delay": 2.0},
-            ],
-            # An episode can offer wtsrv twice. The page is right-to-left and XPath
-            # counts in source order, so [last()] is the button furthest LEFT on
-            # screen -- checked on Yuusha Party ep 1: wtsrv, mp4upload, wtsrv laid
-            # out right to left, and [last()] picked the left one. With a single
-            # wtsrv button [last()] is simply that button.
-            "FHD - wtsrv": [
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 1.0},
-                {"xpath": "(//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wtsrv')])[last()]", "delay": 5.0},
-                {"xpath": '//*[@id="downloadButton"]', "delay": 2.0},
-            ],
-            "FHD - Workupload": [
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 2.0},
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'workupload')]", "delay": 5.0},
-                {"xpath": '//*[@id="file"]/div[3]/div/a', "delay": 2.0},
-            ],
-            # gofile opens in the same tab (no popup) on a folder page holding the
-            # episode; its Download button is the only [data-action=download] there.
-            "FHD - gofile": [
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 1.0},
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gofile')]", "delay": 5.0},
-                {"xpath": "//button[@data-action='download']", "delay": 2.0},
-            ],
-        },
-    },
-    # animerco shows downloads as a table (رابط/خادم/جودة/لغة); each row's "تحميل"
-    # button opens a /links/<id> redirect that lands directly on the host. We target
-    # the Google Drive row by its favicon domain; the engine then rewrites the Drive
-    # file-preview page to a direct download so the "Download anyway" confirm appears.
-    "eta.animerco.org": {
-        "next_btn_xpath": "الحلقة التالية",
-        "step_paths": {
-            "google drive": [
-                {"xpath": "//tr[.//div[contains(@data-src,'drive.google')]]//a[contains(@class,'labeled')]",
-                 "delay": 5.0},
-                {"xpath": "Download anyway", "delay": 3.0},
-            ],
-            # Fallback: episodes that also offer MediaFire. The engine tries this
-            # path only if the Google Drive one above didn't find its row.
-            "mediafire": [
-                {"xpath": "//tr[.//div[contains(@data-src,'mediafire')]]//a[contains(@class,'labeled')]",
-                 "delay": 5.0},
-                {"xpath": '//*[@id="downloadButton"]', "delay": 3.0},
-            ],
-        },
-    },
-}
+def _template_key(template):
+    """What makes two episode-URL templates the same anime: the site (subdomain
+    dropped -- eta.animerco.org is animerco.org), and the decoded path without a
+    trailing slash. Old witanime domains are migrated first."""
+    from urllib.parse import unquote, urlsplit
+    from utils.config import migrate_witanime_url
+    t = migrate_witanime_url((template or "").strip())
+    parts = urlsplit(t)
+    host = (parts.hostname or "").lower()
+    site = site_of(host)
+    path = unquote(parts.path).rstrip("/").lower()
+    return (site, path) if site and path else None
+
+
+def episode_bounds(profile):
+    """(first, last) episode numbers the site listed for this profile's anime, or
+    None when unknown (profiles not made from Search, or made before this)."""
+    b = profile.get("episode_bounds") if isinstance(profile, dict) else None
+    try:
+        first, last = int(b[0]), int(b[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+    return (first, last) if 1 <= first <= last else None
+
+
+def set_episode_bounds(profile, first, last):
+    """Record (first, last); an existing range only ever widens -- an ongoing show
+    gains episodes, and a glitchy detection must never lock out real ones."""
+    try:
+        first, last = max(1, int(first or 1)), int(last or 0)
+    except (TypeError, ValueError):
+        return
+    if last < first:
+        return
+    old = episode_bounds(profile)
+    if old:
+        first, last = min(first, old[0]), max(last, old[1])
+    profile["episode_bounds"] = [first, last]
+
+
+def raise_episode_bound(profiles, template, latest):
+    """The Watchlist found `latest` for this anime: let its profile reach it.
+    Returns the profile's name when its upper bound moved, else None."""
+    name = find_profile_for_template(profiles, template)
+    if not name:
+        return None
+    old = episode_bounds(profiles[name])
+    try:
+        latest = int(latest or 0)
+    except (TypeError, ValueError):
+        return None
+    if old is None or latest <= old[1]:
+        return None
+    profiles[name]["episode_bounds"] = [old[0], latest]
+    return name
+
+
+def extend_to_new_episodes(profile, max_ep):
+    """If the site now lists episodes past the profile's saved range, point the
+    range at those new ones ("13-24") and return it; otherwise None.
+
+    Re-loading an anime used to create a fresh copy covering 1-max_ep; opening the
+    existing profile instead must not leave the user on an old "1-12".
+    """
+    from ui.downloader_tab import spec_to_ranges
+    try:
+        max_ep = int(max_ep or 0)
+    except (TypeError, ValueError):
+        return None
+    ranges = spec_to_ranges(profile.get("last_episodes", ""))
+    highest = max((b for _a, b in ranges), default=0)
+    if max_ep <= highest:
+        return None
+    start = highest + 1
+    spec = str(max_ep) if start == max_ep else f"{start}-{max_ep}"
+    profile["last_episodes"] = spec
+    return spec
+
+
+def open_existing_profile(template, max_ep, first_ep=1):
+    """The saved profile that already downloads `template`, with its episode range
+    widened to what the site lists now: (name, new range spec or None), or
+    (None, None) when there is no such profile. Saves the config when found."""
+    with config_lock:
+        existing = find_profile_for_template(sites_data, template)
+        new_range = None
+        if existing:
+            set_episode_bounds(sites_data[existing], first_ep, max_ep)
+            new_range = extend_to_new_episodes(sites_data[existing], max_ep)
+    if existing:
+        save_config()
+    return existing, new_range
+
+
+def create_profile(name, url_template, max_ep, domain, first_ep=1):
+    """Create and save a download profile for an anime; returns its final name
+    (de-duplicated). The profile inherits a working click-flow for `domain` (the
+    best same-site profile, else the built-in default)."""
+    inherited_paths, inherited_next = resolve_site_flow(domain)
+    with config_lock:
+        # Sanitize + de-duplicate the profile name.
+        base = re.sub(r'[\\/:*?"<>|]', "", name).strip() or "Anime"
+        final = base
+        n = 2
+        while final in sites_data:
+            final = f"{base} ({n})"
+            n += 1
+
+        first = max(1, min(int(first_ep or 1), int(max_ep or 1)))
+        sites_data[final] = {
+            "url": url_template,
+            "next_btn_xpath": inherited_next,
+            "step_paths": inherited_paths,
+            "last_episodes": f"{first}-{max_ep}" if max_ep > first else str(first),
+        }
+        set_episode_bounds(sites_data[final], first, max_ep)
+    save_config()
+    return final
+
+
+def find_profile_for_template(profiles, template):
+    """Name of the saved profile that downloads the same anime as `template`, or
+    None. The first match in saved order wins (the oldest profile)."""
+    key = _template_key(template)
+    if key is None:
+        return None
+    for name, data in profiles.items():
+        # A running Watchlist download's in-memory profile is not one to open or
+        # update: it is never saved and is deleted when the task ends.
+        if isinstance(data, dict) and not data.get("_transient") \
+                and _template_key(data.get("url", "")) == key:
+            return name
+    return None
+
+
 
 
 def extract_domain(url):
@@ -354,6 +429,8 @@ def _make_headless_driver():
     })
     # "enable-logging" excluded: it makes Chrome open a separate console window.
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
     options.add_argument("--log-level=3")
     # Resolve the supported sites through Google Public DNS rather than the machine's
     # resolver, which on some networks fails to resolve them at all.
@@ -362,6 +439,12 @@ def _make_headless_driver():
     service = Service()
     service.creation_flags = CREATE_NO_WINDOW
     driver = webdriver.Chrome(options=options, service=service)
+    try:
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        })
+    except Exception:
+        pass
     driver.set_page_load_timeout(45)
     return driver
 
@@ -815,6 +898,13 @@ class AnimeSearchThread(QThread):
         self.query = query
         self.search_url_template = search_url_template
         self.page = page
+        # Links whose covers to fetch; None fetches every result's. A caller that
+        # wants one result's poster (the Library) sets it from a finished handler
+        # connected directly, which runs before any cover is fetched.
+        self.cover_links = None
+
+    def _wants_cover(self, link):
+        return self.cover_links is None or link in self.cover_links
 
     def _poll_heuristic(self, driver, timeout, done):
         """Repeatedly run the detector until `done(results)` is true or `timeout`
@@ -847,7 +937,7 @@ class AnimeSearchThread(QThread):
                 search_url += f"&page={self.page}"
             elif "animerco.org" in search_url:
                 search_url = search_url.replace("/?s=", f"/page/{self.page}/?s=")
-        
+
         if "witanime.site" in search_url:
             import urllib.request, os, hashlib
             from PyQt6.QtGui import QImage
@@ -884,8 +974,8 @@ class AnimeSearchThread(QThread):
                 # replies. The only thing pooling would have saved is a DNS lookup and
                 # TLS handshake per page, which measured as noise next to the download
                 # itself. Not worth a crash.
-                targets = entries[:60]
                 self.finished.emit(entries)
+                targets = [e for e in entries[:60] if self._wants_cover(e["link"])]
                 if targets:
                     from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest
                     from PyQt6.QtCore import QUrl, QEventLoop
@@ -1012,9 +1102,6 @@ class AnimeSearchThread(QThread):
             self.error.emit(str(e))
             return
         try:
-            # search_url already carries the page (built at the top of run()).
-            # Rebuilding it from the template here silently dropped /page/N/, so
-            # every animerco page loaded page 1.
             driver.get(search_url)
 
             # Smart wait: poll for result cards to appear instead of a fixed sleep.
@@ -1050,6 +1137,9 @@ class AnimeSearchThread(QThread):
             # of after every poster has downloaded.
             self.finished.emit([{"title": it["title"], "link": it["link"], "cover": ""}
                                 for it in items])
+            items = [it for it in items if self._wants_cover(it["link"])]
+            if not items:
+                return
 
             # Covers are fetched through the browser (same-origin fetch), so this must
             # happen while the driver is still held. download_covers returns paths
@@ -1121,7 +1211,8 @@ class AnimeDetailsThread(QThread):
         
         # Fast path for Witanime movies: they don't have episode lists, just a single watch page.
         if "witanime.site/movie/" in anime_url:
-            return [{"template": anime_url.replace("/movie/", "/watch/movie/"), "max_ep": 1}]
+            return [{"template": anime_url.replace("/movie/", "/watch/movie/"), "max_ep": 1,
+                     "first_ep": 1}]
             
         # --- FAST PATH FOR WITANIME.SITE (Bypasses Cloudflare headless block) ---
         if "witanime.site" in anime_url:
@@ -1129,10 +1220,12 @@ class AnimeDetailsThread(QThread):
                 import re
                 html = fetch_anime_page(anime_url)
                 hrefs = re.findall(r'''href=['"]([^'"]+)['"]''', html, re.IGNORECASE)
+                self._last_first_ep = None
                 template, max_ep = self._derive_from_hrefs(hrefs)
                 if template:
                     record_detection(anime_url, len(hrefs), 1)
-                    return [{"label": "", "template": template, "max_ep": max_ep, "poster": "", "cover": ""}]
+                    return [{"label": "", "template": template, "max_ep": max_ep,
+                             "first_ep": self._last_first_ep or 1, "poster": "", "cover": ""}]
                 return []
             except Exception:
                 return []
@@ -1181,6 +1274,7 @@ class AnimeDetailsThread(QThread):
                         tmpl, mx = self._derive_ready(driver, timeout=4.0)
                         if tmpl:
                             entries.append({"label": label, "template": tmpl, "max_ep": mx,
+                                            "first_ep": self._last_first_ep or 1,
                                             "poster": poster, "cover": ""})
                     except Exception:
                         continue
@@ -1201,7 +1295,7 @@ class AnimeDetailsThread(QThread):
             if template:
                 record_detection(anime_url, len(anchors), 1)
                 return [{"label": "", "template": template, "max_ep": max_ep,
-                         "poster": "", "cover": ""}]
+                         "first_ep": self._last_first_ep or 1, "poster": "", "cover": ""}]
             # A page full of links that yields nothing is a layout change, not an
             # anime with no episodes -- record it so the app can say which it was.
             record_detection(anime_url, len(anchors), 0)
@@ -1233,6 +1327,7 @@ class AnimeDetailsThread(QThread):
         `anchors` lets a caller that already read the page (see detect_entries) share
         one page_anchors() round-trip across both checks instead of paying for two.
         """
+        self._last_first_ep = None       # set by whichever derivation succeeds
         if anchors is None:
             anchors = page_anchors(driver)
         hrefs = [a["href"] for a in anchors if a.get("href")]
@@ -1327,6 +1422,7 @@ class AnimeDetailsThread(QThread):
 
     # URL markers that identify a real episode link (vs movie/series/related noise).
     _EP_MARKERS = ("/episode", "/watch/", "/ep-", "/ep/", "الحلقة", "حلقة")
+    _last_first_ep = None    # first episode number found by the last derivation
 
     @staticmethod
     def _onclick_episode_urls(onclicks):
@@ -1371,7 +1467,9 @@ class AnimeDetailsThread(QThread):
         if m:
             n = int(m.group(0))
             if n >= 1 and not (1990 <= n <= 2035):
+                self._last_first_ep = n
                 return url[:m.start()] + "{x}" + url[m.end():], n
+        self._last_first_ep = 1
         return url, 1
 
     def _derive_from_hrefs(self, hrefs):
@@ -1379,6 +1477,7 @@ class AnimeDetailsThread(QThread):
         the biggest group is the episode list."""
         groups = defaultdict(list)
         decoded_eps = []
+        every_ep_number = []
         for href in hrefs:
             if not href.startswith(("http://", "https://")):
                 continue  # skip javascript:void(0), #, mailto:, etc.
@@ -1399,6 +1498,7 @@ class AnimeDetailsThread(QThread):
                 continue
             template = href[:m.start()] + "{x}" + href[m.end():]
             groups[template].append(int(m.group(0)))
+            every_ep_number.append(int(m.group(0)))
         if not groups:
             return "", 0
         best = max(groups, key=lambda t: len(groups[t]))
@@ -1420,6 +1520,10 @@ class AnimeDetailsThread(QThread):
                 mm = re.match(r'(\d+)', d[len(prefix):])
                 if mm:
                     all_nums.append(int(mm.group(1)))
+        # First episode: the lowest number among ALL episode links, not just the
+        # main group -- some shows list 1-62 under another slug (Bleach). Erring
+        # low only ever allows more, never blocks a real episode.
+        self._last_first_ep = max(1, min(every_ep_number + all_nums))
         return best, max(all_nums)
 
     def _derive_from_onclick(self, driver, onclicks):
@@ -1451,6 +1555,7 @@ class AnimeDetailsThread(QThread):
         # episode index (not a season/year number elsewhere in the URL).
         url, _, s, e = min(decoded, key=lambda d: d[1])
         template = url[:s] + "{x}" + url[e:]
+        self._last_first_ep = max(1, min(nums))
         return template, max(nums)
 
 
@@ -1462,6 +1567,7 @@ class AnimeResultCard(SimpleCardWidget):
     selected = pyqtSignal(str, str, object)   # (title, href, cover)
 
     follow = pyqtSignal(str, str, object)   # (title, href, cover)
+    watch_later = pyqtSignal(str, str, object)   # (title, href, cover)
 
     def __init__(self, title, href, cover_path, parent=None, on_load=None,
                  button_text="Load Anime", followable=False):
@@ -1517,7 +1623,9 @@ class AnimeResultCard(SimpleCardWidget):
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
-        btn = PrimaryPushButton(self._button_text)
+        # With ♥ and + beside it there is room for one word only ("Load Anime" was
+        # cut to "oad Anim"); the whole card loads on click anyway.
+        btn = PrimaryPushButton("Load" if followable else self._button_text)
         btn.setFixedHeight(34)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(self._trigger)
@@ -1532,6 +1640,16 @@ class AnimeResultCard(SimpleCardWidget):
             self.btn_follow.clicked.connect(
                 lambda: self.follow.emit(self.title, self.href, self.cover()))
             btn_row.addWidget(self.btn_follow)
+
+            # Same cards that can be followed can be saved for later; both are
+            # about the anime page, not a downloaded profile.
+            self.btn_watch_later = ToolButton(FIF.LIBRARY)   # the Library tab's icon
+            self.btn_watch_later.setFixedSize(34, 34)
+            self.btn_watch_later.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.btn_watch_later.setToolTip("Add to Library")
+            self.btn_watch_later.clicked.connect(
+                lambda: self.watch_later.emit(self.title, self.href, self.cover()))
+            btn_row.addWidget(self.btn_watch_later)
 
         layout.addLayout(btn_row)
 
@@ -1568,6 +1686,7 @@ class AnimeResultCard(SimpleCardWidget):
     def set_followable(self, followable):
         if self.btn_follow is not None:
             self.btn_follow.setVisible(bool(followable))
+            self.btn_watch_later.setVisible(bool(followable))
 
     def _trigger(self):
         if self._on_load is not None:
@@ -1585,6 +1704,7 @@ class AnimeResultCard(SimpleCardWidget):
 class AnimeSearchWidget(QWidget):
     profile_created_signal = pyqtSignal(str)   # new profile name -> Downloader selects it
     follow_signal = pyqtSignal(str, str, str, object)  # (title, anime_url, domain, cover: QImage|path) -> Watchlist
+    watch_later_signal = pyqtSignal(str, str, str, object)  # same shape -> Watch later tab
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1868,7 +1988,7 @@ class AnimeSearchWidget(QWidget):
         self.btn_next_page.setEnabled(len(results) >= max_per_page)
         
         self.paginator_container.show()
-        
+
         # Completely reveal the grid UI
         self.spinner.setVisible(False)
         self.placeholder.hide()
@@ -1901,6 +2021,7 @@ class AnimeSearchWidget(QWidget):
                 
             card.selected.connect(self.on_result_selected)
             card.follow.connect(self._on_follow)
+            card.watch_later.connect(self._on_watch_later)
             self.grid.addWidget(card)
         self.grid.setEnabled(True)
 
@@ -1929,6 +2050,9 @@ class AnimeSearchWidget(QWidget):
         # Hand off to the Watchlist tab (via the main window), using the current site.
         self.follow_signal.emit(title, href, self._current_domain(), cover)
 
+    def _on_watch_later(self, title, href, cover):
+        self.watch_later_signal.emit(title, href, self._current_domain(), cover)
+
     # ---- handoff ----
     def on_result_selected(self, title, href, cover_path=""):
         self.lbl_status.setText("")
@@ -1954,8 +2078,8 @@ class AnimeSearchWidget(QWidget):
             return
         if len(entries) == 1:
             e = entries[0]
-            name = self._create_profile(title, e["template"], e.get("max_ep", 1))
-            self._go_to_profile(name, f"'{name}' created with {e.get('max_ep', 0)} episode(s). Head to the Downloader.")
+            self._open_or_create_profile(title, e["template"], e.get("max_ep", 1),
+                                         e.get("first_ep", 1))
             return
         # Multiple seasons -> show each as its own result card to pick from.
         self._show_season_cards(title, entries)
@@ -1975,28 +2099,53 @@ class AnimeSearchWidget(QWidget):
             cover = e.get("cover") or default_cover   # season's own poster, else the anime's
             card = AnimeResultCard(f"{label}  ·  {mx} eps", parent_href, cover,
                                    button_text="Load Season", followable=True,
-                                   on_load=lambda n=name, tm=e["template"], m=mx: self._load_season(n, tm, m))
+                                   on_load=lambda n=name, tm=e["template"], m=mx, f=e.get("first_ep", 1):
+                                       self._load_season(n, tm, m, f))
             # Following a season still follows the parent anime -- that is the page
             # the watcher re-reads each check -- so pass the show's real title/URL.
             card.follow.connect(lambda _t, _h, _c, t=title, h=parent_href, cv=cover:
                                 self._on_follow(t, h, cv))
+            # One Watch later entry per anime: a season card adds the whole show.
+            card.watch_later.connect(lambda _t, _h, _c, t=title, h=parent_href, cv=default_cover:
+                                     self._on_watch_later(t, h, cv))
             self.grid.addWidget(card)
         self.grid.setEnabled(True)
 
-    def _load_season(self, name, template, max_ep):
-        created = self._create_profile(name, template, max_ep)
-        self._go_to_profile(created, f"'{created}' created with {max_ep} episode(s). Head to the Downloader.")
+    def _load_season(self, name, template, max_ep, first_ep=1):
+        self._open_or_create_profile(name, template, max_ep, first_ep)
 
-    def _go_to_profile(self, name, msg):
+    def _open_or_create_profile(self, name, template, max_ep, first_ep=1):
+        """Open the profile that already downloads this anime, or create one."""
+        existing, new_range = open_existing_profile(template, max_ep, first_ep)
+        if existing:
+            if new_range:
+                note = (f"It now has {max_ep} episodes, so its range was set to the new "
+                        f"ones: {new_range}.")
+            else:
+                note = ""
+            self._go_to_profile(existing, f"You already have a profile for this anime, "
+                                          f"so '{existing}' was opened instead of making a copy. "
+                                          f"{note}".strip(),
+                                created=False)
+            return existing
+        created = self._create_profile(name, template, max_ep, first_ep=first_ep)
+        self._go_to_profile(created, f"'{created}' created with {max_ep} episode(s). Head to the Downloader.")
+        return created
+
+    def _go_to_profile(self, name, msg, created=True):
         with config_lock:
             app_settings["last_profile"] = name
         save_config()
         # Reset the results area so re-opening Search never shows a stuck spinner.
         self.lbl_status.setText("")
-        self._show_state("✅", "Profile created",
+        self._show_state("✅", "Profile created" if created else "Profile already exists",
                          f"'{name}' opened in the Downloader. Search again anytime.")
-        InfoBar.success("Profile Created", msg,
-                        position=InfoBarPosition.TOP, duration=6000, parent=self.window())
+        if created:
+            InfoBar.success("Profile Created", msg,
+                            position=InfoBarPosition.TOP, duration=6000, parent=self.window())
+        else:
+            InfoBar.info("Opened Existing Profile", msg,
+                         position=InfoBarPosition.TOP, duration=6000, parent=self.window())
         self.profile_created_signal.emit(name)
 
     def on_details_error(self, msg):
@@ -2006,29 +2155,10 @@ class AnimeSearchWidget(QWidget):
         InfoBar.error("Detection Failed", friendly,
                       position=InfoBarPosition.TOP, duration=5000, parent=self.window())
 
-    def _create_profile(self, name, url_template, max_ep, domain=None):
+    def _create_profile(self, name, url_template, max_ep, domain=None, first_ep=1):
         if domain is None:
             domain = self._current_domain()
-        # Give the new profile a working download click-flow (inherit the best
-        # same-domain profile, else a built-in default).
-        inherited_paths, inherited_next = resolve_site_flow(domain)
-        with config_lock:
-            # Sanitize + de-duplicate the profile name.
-            base = re.sub(r'[\\/:*?"<>|]', "", name).strip() or "Anime"
-            final = base
-            n = 2
-            while final in sites_data:
-                final = f"{base} ({n})"
-                n += 1
-
-            sites_data[final] = {
-                "url": url_template,
-                "next_btn_xpath": inherited_next,
-                "step_paths": inherited_paths,
-                "last_episodes": f"1-{max_ep}" if max_ep > 1 else "1",
-            }
-        save_config()
-        return final
+        return create_profile(name, url_template, max_ep, domain, first_ep)
 
     def _show_state(self, icon, title, subtitle="", busy=False):
         """Show the centered placeholder (idle/loading/empty/error); hide the grid."""

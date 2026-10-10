@@ -40,7 +40,13 @@
 - **Ad and popup blocking** in the automation browser (ad requests are blocked natively, no extension needed), so mis-clicks on overlay ads don't derail a download.
 - **Pause with control**: while paused you can change concurrency and hidden/visible browser mode, and skip any episodes that haven't started — from a fast episode grid (click, drag across, Shift+click a range, or type `13-40, 45`).
 - **Resume after a crash or restart**: an unfinished session is offered on the next launch.
-- **History**: every run with its status; re-download or watch from there.
+
+### 📚 Library
+- **Watching / Watch later / Completed**: every anime you download or save from Search, with a **Continue watching** strip that plays the next episode in one click.
+- **Tracks what you watched automatically**: episodes played in mpv.net are ticked off (90% in counts as watched), even when the app is closed — a small mpv.net script notes each episode you play and the Library catches up when it opens.
+- **Brings in what you already have**: on first open it adds every anime in your download folder, with what mpv.net says you've already watched, and looks up their posters.
+- **Per-anime history and sources**: each anime keeps its own download history, and each episode shows the site it was downloaded from.
+- **Continue downloading**: one click downloads the episodes the site has that aren't on disk yet.
 
 ### 📺 Watchlist & release schedule
 - **Follow with one click** from Search; cards show cover, site and new-episode count.
@@ -60,7 +66,7 @@
   - **Anime** — Anime4K (clamp highlights → restore → 2× upscale → thin lines), used for files in your anime download folder.
   - **Series & movies** — FSRCNNX 2× + KrigBilateral + SSimDownscaler + adaptive sharpen.
   - Shortcuts in mpv.net: **F1** anime profile · **F2** series profile · **Ctrl+1** shaders off/on · **P** show active shaders.
-- **Play downloads in mpv.net**: "Start Watching" and History open mpv.net directly, with the whole session queued as a playlist.
+- **Play downloads in mpv.net**: "Start Watching" and the Library open mpv.net directly, with the following episodes queued as a playlist.
 - **Make mpv.net the default player** for `.mp4` and `.mkv` from the same tab.
 - Shaders need a dedicated GPU; see [`assets/mpvnet/THIRD_PARTY.txt`](assets/mpvnet/THIRD_PARTY.txt) for their licenses.
 
@@ -103,7 +109,7 @@ graph TD
 | Path | What lives there |
 |---|---|
 | `main.py` | App entry point; also runs as the background watcher with `--watcher` |
-| `ui/` | Tabs (downloader, search, watchlist, profile manager, history, video player, active tasks), layout and touch helpers |
+| `ui/` | Tabs (downloader, search, watchlist, library, profile manager, video player, active tasks), layout and touch helpers |
 | `core/` | Selenium download engine, concurrency controller, filler detection, ad blocking, watcher, updater |
 | `utils/` | Config/storage, mpv.net integration, Discord sender, crash/error reporting |
 | `service/` | The cloud notification service (FastAPI, Postgres) and its tests |

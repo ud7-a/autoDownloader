@@ -19,6 +19,14 @@ class WorkerSignals(QObject):
     # Settings changed on the paused download screen: {"limit", "auto", "headless"}.
     # The Downloader tab mirrors them so its controls and saved settings agree.
     paused_settings_changed = pyqtSignal(dict)
+    # A run ended on its own (not cancelled by the user), success or not:
+    # {"profile": str, "episodes": [ints actually in the run], "failed": [ints]}.
+    # task_finished only fires when something succeeded, so it can't report a
+    # run where everything failed.
+    run_report = pyqtSignal(dict)
+    # A profile's known episode range grew (a Watchlist check found newer
+    # episodes); carries the profile name so an open Downloader can widen its boxes.
+    profile_limits_changed = pyqtSignal(str)
 
 # We instantiate it here so it's a true global singleton
 signals = WorkerSignals()

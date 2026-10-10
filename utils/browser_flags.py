@@ -40,6 +40,7 @@ DEFAULT_HOSTS = (
     "mp4upload.com", "www.mp4upload.com",
     "yourupload.com", "www.yourupload.com",
     "mega.nz",
+    "wahmi.org", "www.wahmi.org",
 )
 
 _cache = {}
