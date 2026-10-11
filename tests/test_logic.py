@@ -1768,10 +1768,15 @@ class WitAnimeBrowserModeTests(unittest.TestCase):
     def test_create_browser_headless_options(self):
         from unittest import mock
         import core.selenium_engine as eng
+        # Never a real WindowGuard in a test: with a mocked driver it ran its loop
+        # over the user's real desktop for the rest of the run (see WindowGuardTests).
         with mock.patch("selenium.webdriver.Chrome") as mock_chrome, \
-             mock.patch("selenium.webdriver.chrome.service.Service"):
+             mock.patch("selenium.webdriver.chrome.service.Service"), \
+             mock.patch("core.window_guard.WindowGuard") as guard:
             eng.create_browser("C:\\dummy", headless=True)
             self.assertTrue(mock_chrome.called)
+            guard.return_value.start_prelaunch.assert_called_once()
+            guard.return_value.attach_driver.assert_called_once()
             options = mock_chrome.call_args.kwargs.get("options") or mock_chrome.call_args[1].get("options")
             args = options.arguments
             # Must NOT use --headless=new which witanime/Cloudflare blocks
@@ -1877,7 +1882,8 @@ class WitAnimeBrowserModeTests(unittest.TestCase):
         from unittest import mock
         import core.selenium_engine as eng
         with mock.patch("selenium.webdriver.Chrome") as mock_chrome, \
-             mock.patch("selenium.webdriver.chrome.service.Service"):
+             mock.patch("selenium.webdriver.chrome.service.Service"), \
+             mock.patch("core.window_guard.WindowGuard"):
             eng.create_browser("C:\\dummy", headless=False)
             self.assertTrue(mock_chrome.called)
             options = mock_chrome.call_args.kwargs.get("options") or mock_chrome.call_args[1].get("options")
@@ -2054,6 +2060,80 @@ class WindowGuardTests(unittest.TestCase):
         # Window 4 (our popup that stole FG): suppressed AND restored user's previous foreground!
         self.assertIn(4, set_styles)
         self.assertIn(1234, restored_fgs)
+
+    def test_other_apps_windows_are_never_touched(self):
+        """Electron apps (Claude, Discord, VS Code...) use Chrome's window class, and
+        every minimized window sits at (-32000, -32000). Before the session's own
+        processes are known -- and when looking them up comes back empty -- the
+        guard hid such windows and took them off the taskbar; they could not be
+        brought back without restarting the app."""
+        from unittest import mock
+        import core.window_guard as wg
+
+        procs = {  # pid -> (exe, command line)
+            100: ("Claude.exe", "Claude.exe --type=browser"),
+            200: ("Discord.exe", "Discord.exe"),
+            300: ("chrome.exe", "chrome.exe --profile-directory=Default"),          # the user's
+            400: ("chrome.exe", "chrome.exe --test-type=webdriver --remote-debugging-port=0"),
+        }
+        windows = {1: 100, 2: 200, 3: 300, 4: 400, 5: 100}
+        rects = {5: (-32000, -32000)}                                              # minimized
+
+        class FakeProcess:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def name(self):
+                return procs[self.pid][0]
+
+            def cmdline(self):
+                return procs[self.pid][1].split()
+
+        touched = set()
+
+        class FakeUser32:
+            def GetForegroundWindow(self):
+                return 0
+
+            def GetWindowThreadProcessId(self, hwnd, pid_ref):
+                pid_ref._obj.value = windows[hwnd]
+                return 1
+
+            def GetClassNameW(self, hwnd, buf, n):
+                buf.value = "Chrome_WidgetWin_1"
+                return len(buf.value)
+
+            def GetWindowRect(self, hwnd, rect_ref):
+                rect_ref._obj.left, rect_ref._obj.top = rects.get(hwnd, (100, 100))
+
+            def SetWindowPos(self, hwnd, *a):
+                touched.add(hwnd)
+
+            def IsWindowVisible(self, hwnd):
+                return True
+
+            def ShowWindow(self, hwnd, cmd):
+                touched.add(hwnd)
+
+            def EnumWindows(self, cb, lparam):
+                for h in windows:
+                    cb(h, lparam)
+                return True
+
+        wg._automation_cache.clear()
+        with mock.patch.object(wg, "user32", FakeUser32()), \
+                mock.patch.object(wg, "GetWindowLongPtrW", lambda h, i: 0), \
+                mock.patch.object(wg, "SetWindowLongPtrW", lambda h, i, v: touched.add(h)), \
+                mock.patch.object(wg, "restore_foreground", lambda h: None), \
+                mock.patch("psutil.Process", FakeProcess):
+            for prelaunch, target in ((True, set()), (False, set())):     # unknown / lookup empty
+                touched.clear()
+                guard = wg.WindowGuard(headless=True)
+                guard.headless = True
+                guard.prelaunch, guard.target_pids, guard.existing_pids = prelaunch, target, {300}
+                guard.suppress_windows()
+                self.assertEqual({4}, touched, (prelaunch, target))     # only Selenium's Chrome
+        wg._automation_cache.clear()
 
     def test_window_guard_driver_wrapping(self):
         from unittest import mock

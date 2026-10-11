@@ -94,6 +94,41 @@ def restore_foreground(target_hwnd):
         return False
 
 
+_AUTOMATION_FLAGS = ("--test-type=webdriver", "--remote-debugging-port", "--headless")
+_automation_cache = {}
+
+
+def is_automation_chrome(pid, profile_dir=None):
+    """True only for a chrome.exe that Selenium started: chromedriver launches it
+    with --test-type=webdriver / --remote-debugging-port (and --headless or our
+    profile folder for this app's sessions).
+
+    Never by window class or position alone. Electron apps -- Claude, Discord,
+    VS Code, Slack, Spotify -- use Chrome's window class (Chrome_WidgetWin_1),
+    and every minimized window in Windows sits at (-32000, -32000); judging by
+    those hid such apps' windows and took them off the taskbar until restarted.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    key = (pid, str(profile_dir or "").lower())
+    if key in _automation_cache:
+        return _automation_cache[key]
+    result = False
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        if (proc.name() or "").lower() == "chrome.exe":
+            cmdline = " ".join(proc.cmdline()).lower()
+            result = (any(flag in cmdline for flag in _AUTOMATION_FLAGS)
+                      or bool(profile_dir and str(profile_dir).lower() in cmdline))
+    except Exception:
+        result = False
+    if len(_automation_cache) > 2048:
+        _automation_cache.clear()
+    _automation_cache[key] = result
+    return result
+
+
 def get_chrome_pids():
     """Returns set of all currently running chrome/chromedriver PIDs."""
     pids = set()
@@ -275,58 +310,63 @@ class WindowGuard:
                 existing_pids = set(self.existing_pids)
                 prelaunch = self.prelaunch
 
+            profile_dir = self.profile_dir
+
             def _enum_cb(hwnd, _):
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 w_pid = pid.value
 
-                is_ours = False
-                if not prelaunch and target_pids:
-                    is_ours = (w_pid in target_pids)
+                user32.GetClassNameW(hwnd, buf, 256)
+                cls = buf.value
+                if "Chrome_WidgetWin" not in cls:
+                    return True
+                # Ours = a process of this browser session. Before its processes
+                # are known (prelaunch), or if looking them up came back empty,
+                # only a chrome.exe that Selenium started and that wasn't running
+                # when the guard started -- checked by the process itself, never
+                # by window class or position (see is_automation_chrome).
+                if w_pid in target_pids:
+                    is_ours = True
+                elif not prelaunch and target_pids:
+                    is_ours = False
                 else:
+                    is_ours = (w_pid not in existing_pids
+                               and is_automation_chrome(w_pid, profile_dir))
+
+                if not is_ours:
+                    return True
+
+                # 1. Non-activating and tool window styles (removes taskbar & Alt+Tab entry)
+                if GetWindowLongPtrW and SetWindowLongPtrW:
+                    try:
+                        ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+                        if not (ex & WS_EX_NOACTIVATE):
+                            new_ex = (ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+                            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex)
+                            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE)
+                    except Exception:
+                        pass
+
+                # 2. Position offscreen (-32000, -32000) if on or near screen
+                try:
                     user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                    if rect.left <= -5000 and rect.top <= -5000:
-                        is_ours = True
-                    elif w_pid not in existing_pids:
-                        user32.GetClassNameW(hwnd, buf, 256)
-                        if "Chrome_WidgetWin" in buf.value:
-                            is_ours = True
+                    if rect.left > -5000 or rect.top > -5000:
+                        user32.SetWindowPos(hwnd, 0, -32000, -32000, 1920, 1080,
+                                            SWP_NOACTIVATE | SWP_NOZORDER)
+                except Exception:
+                    pass
 
-                if is_ours:
-                    user32.GetClassNameW(hwnd, buf, 256)
-                    cls = buf.value
-                    if "Chrome_WidgetWin" in cls:
-                        # 1. Non-activating and tool window styles (removes taskbar & Alt+Tab entry)
-                        if GetWindowLongPtrW and SetWindowLongPtrW:
-                            try:
-                                ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-                                if not (ex & WS_EX_NOACTIVATE):
-                                    new_ex = (ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
-                                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex)
-                                    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
-                                                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE)
-                            except Exception:
-                                pass
+                # 3. Hide window completely
+                try:
+                    if user32.IsWindowVisible(hwnd):
+                        user32.ShowWindow(hwnd, SW_HIDE)
+                except Exception:
+                    pass
 
-                        # 2. Position offscreen (-32000, -32000) if on or near screen
-                        try:
-                            user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                            if rect.left > -5000 or rect.top > -5000:
-                                user32.SetWindowPos(hwnd, 0, -32000, -32000, 1920, 1080,
-                                                    SWP_NOACTIVATE | SWP_NOZORDER)
-                        except Exception:
-                            pass
-
-                        # 3. Hide window completely
-                        try:
-                            if user32.IsWindowVisible(hwnd):
-                                user32.ShowWindow(hwnd, SW_HIDE)
-                        except Exception:
-                            pass
-
-                        # 4. Restore user active window if Chrome stole foreground
-                        if fg == hwnd and self.last_user_fg and self.last_user_fg != hwnd:
-                            restore_foreground(self.last_user_fg)
-
+                # 4. Restore user active window if Chrome stole foreground
+                if fg == hwnd and self.last_user_fg and self.last_user_fg != hwnd:
+                    restore_foreground(self.last_user_fg)
                 return True
 
             cb = WNDENUMPROC(_enum_cb)
