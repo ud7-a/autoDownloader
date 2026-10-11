@@ -49,6 +49,30 @@ if os.environ.get("AED_STARTUP_LOG"):
 else:
     _startup_mark("python reached main.py")
 
+# The "Play next episode" shortcut: start it in mpv.net and leave, no window.
+# Nothing to play -> fall through to the Library, which shows why.
+if "--play-next" in sys.argv:
+    try:
+        from utils.quick_play import play_next
+        _played, _ = play_next()
+    except Exception:
+        _played = False
+    _startup_mark(f"play next: {'started' if _played else 'nothing to play'}")
+    if _played:
+        sys.exit(0)
+    sys.argv.append("--library")
+
+# The Library shortcut with the app already open: hand over to its window and
+# leave, before Qt is even imported -- the open window shows the Library at once.
+if "--library" in sys.argv and sys.platform == "win32":
+    try:
+        from utils.instance import forward_open_library
+        _handed_over = forward_open_library()
+    except Exception:
+        _handed_over = False
+    if _handed_over:
+        sys.exit(0)
+
 # Before anything else can fail: without this, an error inside any Qt callback made
 # PyQt abort the installed app (0xC0000409 in Qt6Core.dll) with no record of why.
 # See utils/error_report.py. Covers the background watcher as well.
@@ -299,6 +323,13 @@ if __name__ == "__main__":
                 user32.EnumWindows(_cb, 0)
             except Exception:
                 pass
+            if "--library" in sys.argv:
+                # The early hand-over found no window yet (it was still opening).
+                try:
+                    from utils.instance import forward_open_library
+                    forward_open_library()
+                except Exception:
+                    pass
             sys.exit(0)
 
     # Fresh logs every session, so they never accumulate. Placed after the instance
@@ -330,8 +361,10 @@ if __name__ == "__main__":
     # Now import and instantiate the main app window
     from ui.app_window import AppWindow
     _startup_mark("ui.app_window imported")
-    window = AppWindow(autostart_commands=initial_commands)
+    window = AppWindow(autostart_commands=initial_commands, open_library="--library" in sys.argv)
     _startup_mark("AppWindow built")
+    if os.environ.get("AED_STARTUP_LOG"):
+        window.tabs_built_hook = lambda: _startup_mark("remaining tabs built")
     # Finger drags scroll the pages and lists (Qt treats them as mouse drags otherwise).
     from ui.touch import install as _install_touch
     _install_touch(app)
@@ -351,14 +384,6 @@ if __name__ == "__main__":
         # Paint and the deferred tabs happen once the event loop runs.
         from PyQt6.QtCore import QTimer as _QTimer
         _QTimer.singleShot(0, lambda: _startup_mark("event loop running"))
-        _orig_build = window._build_tabs
-
-        def _marked_build():
-            first = not window._tabs_built
-            _orig_build()
-            if first:
-                _startup_mark("remaining tabs built")
-        window._build_tabs = _marked_build
 
     # Opt-in freeze recorder (AED_UI_WATCHDOG=1 or --watchdog). Does nothing otherwise.
     #
@@ -381,6 +406,30 @@ if __name__ == "__main__":
     # Check for updates in the background ONLY after the window is fully initialized and listening!
     from core.updater import check_for_updates_silently
     threading.Thread(target=check_for_updates_silently, daemon=True).start()
+
+    # Keyboard shortcuts: check each still works -- still launches this copy (an
+    # update or a move changes the path) and Windows still holds its keys -- and
+    # repair it if not (utils.shortcut.health). Background: it may wait for
+    # Explorer. Anything the user must act on comes up in the window.
+    def _check_shortcuts():
+        try:
+            from utils.shortcut import ACTIONS, health
+            from utils.config import config_lock, save_config
+            keys = [k for info in ACTIONS.values() for k in (info["setting"], info["target_setting"])]
+            with config_lock:
+                settings = {k: app_settings.get(k) for k in keys if app_settings.get(k)}
+            changed, warnings = health(settings)
+            if changed:
+                with config_lock:
+                    for k in keys:
+                        if settings.get(k):
+                            app_settings[k] = settings[k]
+                save_config()
+            for message in warnings:
+                window.shortcut_warning.emit(message)
+        except Exception:
+            pass
+    threading.Thread(target=_check_shortcuts, daemon=True).start()
 
     # Start the watcher NOW rather than on the way out. It is what reports this PC as
     # online, and launching it only after app.exec() returned meant a crash -- or a

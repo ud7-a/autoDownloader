@@ -7,6 +7,7 @@ Layout: a Continue watching strip on top (the next episode of everything you're
 watching, one click to play), then Watching / Watch later / Completed.
 """
 import os
+import sys
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -171,6 +172,434 @@ class PosterThread(QThread):
                 self.updated.emit()
             if new_url != entry["url"] and not template:
                 self.linked.emit(new_url)
+
+
+class ShortcutThread(QThread):
+    """Writes (or removes) shortcuts off the GUI thread: replacing one waits for
+    Explorer to let go of the old keys and register the new ones."""
+    done = pyqtSignal(object)         # {action: (ok, hotkey or "", message)}
+
+    def __init__(self, changes):
+        super().__init__()
+        self.changes = changes        # {action: new hotkey, "" removes it}
+
+    def run(self):
+        from utils import shortcut
+        results = {}
+        for action, hotkey in self.changes.items():
+            title = shortcut.ACTIONS[action]["title"]
+            try:
+                if hotkey:
+                    ok, message = shortcut.install(hotkey, action=action)
+                else:
+                    ok = shortcut.remove(action)
+                    message = (f"The “{title}” shortcut was removed." if ok
+                               else "Couldn't delete the shortcut from the Start menu.")
+            except Exception as e:
+                ok, message = False, str(e)
+            results[action] = (ok, hotkey, message)
+        self.done.emit(results)
+
+
+class KeyCaptureEdit(QLabel):
+    """Shows the key combination pressed while it has focus.
+
+    Keys are read by their virtual-key code (QKeyEvent.nativeVirtualKey), never
+    by the character they type, so any layout works -- on an Arabic layout
+    Ctrl+Alt+L types "م" and Qt reports that, not L -- and so do Space, arrows,
+    punctuation, the numpad and F13-F24. Tab and Esc are captured too instead
+    of moving focus or closing the dialog."""
+    captured = pyqtSignal(str, str)       # (combination or "", error or "")
+
+    PLACEHOLDER = "Click here and press the keys"
+    _MODIFIER_VKS = {0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
+    _MODIFIER_OF_VK = {0x11: "Ctrl", 0xA2: "Ctrl", 0xA3: "Ctrl", 0x12: "Alt", 0xA4: "Alt",
+                       0xA5: "Alt", 0x10: "Shift", 0xA0: "Shift", 0xA1: "Shift"}
+    _WIN_VKS = {0x5B, 0x5C}
+    # Text colour per state: the placeholder is dimmed, keys being held are
+    # bright, a finished combination is white, one that can't be used is red.
+    _COLORS = {"placeholder": "#7a7a7a", "live": "#9ad9ff", "done": "#ffffff",
+               "error": "#ff8a80"}
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMinimumHeight(40)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        self._focused = False
+        # What stays shown once the keys are let go: the last finished attempt.
+        self._kept = (text, "done") if text else (self.PLACEHOLDER, "placeholder")
+        self._finished_this_hold = False
+        self._show(*self._kept)
+        # While focused, Ctrl/Alt combinations come through a keyboard hook, so
+        # one another program (or a shortcut) has registered is seen here instead
+        # of firing there (utils/keyhook.py). pass_through lets the dialog's live
+        # test combination reach Windows.
+        self.pass_through = None
+        self._hook = None
+        if sys.platform == "win32":
+            from utils.keyhook import ComboHook
+            self._hook = ComboHook(
+                lambda c, a, s, vk: QTimer.singleShot(0, lambda: self.capture_vk(c, a, s, vk)),
+                lambda c, a, s, vk: bool(self.pass_through and self.pass_through(c, a, s, vk)))
+        self.destroyed.connect(lambda *_: self._hook and self._hook.remove())
+
+    def _show(self, text, state):
+        self.setText(text)
+        self._state = state
+        self._style()
+
+    def _style(self):
+        border = "#4cc2ff" if self._focused else "rgba(255,255,255,0.10)"
+        self.setStyleSheet(
+            f"QLabel {{ background: rgba(255,255,255,0.06); color: {self._COLORS[self._state]};"
+            f" font-size: 15px; border: 1px solid {border}; border-radius: 6px;"
+            f" padding: 6px 12px; }}")
+
+    def focusInEvent(self, e):
+        super().focusInEvent(e)
+        self._focused = True
+        if self._hook is not None:
+            self._hook.install()
+        self._style()
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        self._focused = False
+        if self._hook is not None:
+            self._hook.remove()
+        self._finished_this_hold = False
+        self._show(*self._kept)           # a half-held combination is dropped
+        self._style()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        if self._hook is not None:
+            self._hook.remove()
+
+    def capture_vk(self, ctrl, alt, shift, vk):
+        """A combination finished (from the keyboard hook or a key press)."""
+        from utils.shortcut import from_vk, key_name
+        held = "+".join(m for m, on in (("Ctrl", ctrl), ("Alt", alt), ("Shift", shift)) if on)
+        try:
+            combo = from_vk(ctrl, alt, shift, vk)
+        except ValueError as err:
+            self._finish("+".join(p for p in (held, key_name(vk)) if p), "", str(err))
+            return
+        self._finish(combo, combo, "")
+
+    @staticmethod
+    def _held(mods, add=None, without=None):
+        """The modifiers held, in Ctrl+Alt+Shift order. `add` / `without` correct
+        for the key this very event is about: whether the event's own modifier
+        state already counts it differs between press and release."""
+        names = [m for m, flag in (("Ctrl", Qt.KeyboardModifier.ControlModifier),
+                                   ("Alt", Qt.KeyboardModifier.AltModifier),
+                                   ("Shift", Qt.KeyboardModifier.ShiftModifier))
+                 if (mods & flag or m == add) and m != without]
+        return "+".join(names)
+
+    def keyReleaseEvent(self, e):
+        """Letting go of a modifier updates the display at once. Once a combination
+        was finished during this hold it stays; a hold that never got its key goes
+        back to what was shown before."""
+        vk = e.nativeVirtualKey()
+        if vk not in self._MODIFIER_VKS:
+            return
+        held = self._held(e.modifiers(), without=self._MODIFIER_OF_VK.get(vk))
+        if held:
+            if not self._finished_this_hold:
+                self._show(f"{held}+…", "live")
+            return
+        self._finished_this_hold = False
+        if self._state == "live":
+            self._show(*self._kept)
+
+    def mousePressEvent(self, e):
+        self.setFocus()
+
+    def event(self, e):
+        # Tab / Shift+Tab would move focus before keyPressEvent ever ran.
+        from PyQt6.QtCore import QEvent
+        if e.type() == QEvent.Type.KeyPress:
+            if e.key() == Qt.Key.Key_Escape and not e.modifiers():
+                return super().event(e)       # plain Esc still closes the dialog
+            self.keyPressEvent(e)
+            return True
+        return super().event(e)
+
+    def keyPressEvent(self, e):
+        """Every key going down updates the display: modifiers show live as they
+        are held ("Ctrl+Alt+…"); the first other key finishes the combination."""
+        mods = e.modifiers()
+        vk = e.nativeVirtualKey()
+        if e.isAutoRepeat() and self._finished_this_hold and vk not in self._MODIFIER_VKS:
+            return                        # the finishing key held down repeats
+        held = self._held(mods, add=self._MODIFIER_OF_VK.get(vk))
+        if vk in self._WIN_VKS or mods & Qt.KeyboardModifier.MetaModifier:
+            self._finish(f"{held}+Win" if held else "Win", "",
+                         "The Windows key can't be part of a shortcut. Use Ctrl and Alt.")
+            return
+        if vk in self._MODIFIER_VKS or vk == 0:
+            if e.isAutoRepeat():
+                return                    # a held modifier repeats: nothing new
+            # A modifier going down always starts a fresh attempt, even right
+            # after one was finished with keys still held.
+            self._finished_this_hold = False
+            if held:
+                self._show(f"{held}+…", "live")
+            else:
+                self._show(*self._kept)
+            return
+        self.capture_vk(bool(mods & Qt.KeyboardModifier.ControlModifier),
+                        bool(mods & Qt.KeyboardModifier.AltModifier),
+                        bool(mods & Qt.KeyboardModifier.ShiftModifier), vk)
+
+    def mark_unusable(self):
+        """The dialog found the finished combination taken: show it in red too."""
+        self._kept = (self._kept[0], "error")
+        if self._state != "live":
+            self._show(*self._kept)
+
+    def _finish(self, text, combo, error):
+        self._finished_this_hold = True
+        self._kept = (text, "error" if error else "done")
+        self._show(*self._kept)
+        self.captured.emit(combo, error)
+
+
+class _HotkeyProbe:
+    """Holds a combination for the dialog's live test: while it is registered,
+    pressing it reaches the app as WM_HOTKEY -- unless another program caught the
+    keys first, which is the conflict Windows can't report on its own."""
+    HOTKEY_ID = 0xBFF0
+    WM_HOTKEY = 0x0312
+
+    def __init__(self, on_press):
+        from PyQt6.QtCore import QAbstractNativeEventFilter
+        probe = self
+
+        class Filter(QAbstractNativeEventFilter):
+            def nativeEventFilter(self, event_type, message):
+                try:
+                    if bytes(event_type) in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+                        import ctypes.wintypes
+                        msg = ctypes.wintypes.MSG.from_address(int(message))
+                        if msg.message == probe.WM_HOTKEY and msg.wParam == probe.HOTKEY_ID:
+                            QTimer.singleShot(0, on_press)
+                            return True, 0
+                except Exception:
+                    pass          # an exception in a native filter aborts the app
+                return False, 0
+
+        self._filter = Filter()
+        self.hotkey = None
+
+    def hold(self, hotkey):
+        """Register `hotkey` for the test. False when it can't be registered."""
+        self.release()
+        if sys.platform != "win32":
+            return False
+        import ctypes
+        from PyQt6.QtCore import QCoreApplication
+        from utils.shortcut import to_win32, MOD_NOREPEAT
+        mods, vk = to_win32(hotkey)
+        if not ctypes.windll.user32.RegisterHotKey(None, self.HOTKEY_ID, mods | MOD_NOREPEAT, vk):
+            return False
+        QCoreApplication.instance().installNativeEventFilter(self._filter)
+        self.hotkey = hotkey
+        return True
+
+    def release(self):
+        if self.hotkey is None:
+            return
+        import ctypes
+        from PyQt6.QtCore import QCoreApplication
+        ctypes.windll.user32.UnregisterHotKey(None, self.HOTKEY_ID)
+        QCoreApplication.instance().removeNativeEventFilter(self._filter)
+        self.hotkey = None
+
+
+class _ShortcutRow(QWidget):
+    """One action in the shortcuts dialog: its key box, what the checks found,
+    the live-test line and a Remove button."""
+
+    DESCRIPTIONS = {
+        "library": "Opens the app straight on the Library.",
+        "play_next": "Starts the next episode of what you're watching in mpv.net — no "
+                     "window opens. With nothing downloaded to continue, the Library opens.",
+    }
+
+    def __init__(self, action, current, parent=None):
+        super().__init__(parent)
+        from utils.shortcut import ACTIONS
+        self.action = action
+        self.current = current or ""
+        self.choice = self.current     # what Save will apply ("" = no shortcut)
+        self.usable = True             # the choice passed every check
+        self.setStyleSheet("background: transparent;")
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+        head = QHBoxLayout()
+        title = BodyLabel(ACTIONS[action]["title"])
+        title.setFont(QFont("Segoe UI Variable", 11, QFont.Weight.Bold))
+        head.addWidget(title)
+        head.addStretch(1)
+        self.btn_remove = PushButton(FIF.DELETE, "Remove")
+        self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_remove.setVisible(bool(self.current))
+        head.addWidget(self.btn_remove)
+        col.addLayout(head)
+        col.addWidget(_muted(self.DESCRIPTIONS.get(action, ""), 12, wrap=True))
+        self.keys = KeyCaptureEdit(self.current)
+        col.addWidget(self.keys)
+        self.lbl_check = _muted("", 12, wrap=True)
+        col.addWidget(self.lbl_check)
+        self.lbl_test = _muted("", 12, wrap=True)
+        col.addWidget(self.lbl_test)
+
+    @property
+    def changed(self):
+        return self.choice != self.current
+
+
+class ShortcutDialog(MessageBoxBase):
+    """Keyboard shortcuts that work from anywhere in Windows: one row per action
+    (utils.shortcut.ACTIONS).
+
+    Each combination is checked against everything Windows can tell: its own
+    reserved keys, the other action's shortcut, other shortcuts using the same
+    keys, and programs that have registered it. Overlays and games read the
+    keyboard directly, which Windows can't report -- so a free combination is
+    held for a live test: pressing it must reach this dialog, or something else
+    took it."""
+
+    def __init__(self, current, parent=None):
+        super().__init__(parent)
+        from utils.shortcut import ACTIONS
+        if isinstance(current, str):               # the Library's alone
+            current = {"library": current}
+        self.results = None            # set on Save: {action: hotkey or ""}
+        self._probe = _HotkeyProbe(self._on_test_press)
+        self._probe_row = None
+        self.viewLayout.addWidget(SubtitleLabel("Keyboard shortcuts"))
+        info = BodyLabel("Press the keys you want for each. They work from anywhere in "
+                         "Windows, whether the app is open or not.")
+        info.setWordWrap(True)
+        self.viewLayout.addWidget(info)
+        self.rows = []
+        for action in ACTIONS:
+            row = _ShortcutRow(action, (current or {}).get(action, ""))
+            row.keys.captured.connect(lambda combo, err, r=row: self._on_captured(r, combo, err))
+            row.keys.pass_through = self._is_test_press
+            row.btn_remove.clicked.connect(lambda _c=False, r=row: self._remove(r))
+            self.viewLayout.addSpacing(6)
+            self.viewLayout.addWidget(row)
+            self.rows.append(row)
+            self._on_captured(row, row.current, "", initial=True)
+        self.yesButton.setText("Save")
+        self.cancelButton.setText("Cancel")
+        self.widget.setMinimumWidth(540)
+        self.finished.connect(lambda _r: self._probe.release())
+        self._update_save()
+        self.rows[0].keys.setFocus()
+
+    def row(self, action):
+        return next(r for r in self.rows if r.action == action)
+
+    @staticmethod
+    def _paint(label, text, color):
+        label.setText(text)
+        label.setStyleSheet(f"color: {color}; background: transparent; font-size: 12px;")
+
+    def _update_save(self):
+        self.yesButton.setEnabled(any(r.changed for r in self.rows)
+                                  and all(r.usable for r in self.rows))
+
+    def _on_captured(self, row, combo, error, initial=False):
+        from utils.shortcut import ACTIONS, conflicts, app_warnings
+        if self._probe_row is row:
+            self._probe.release()
+            self._probe_row = None
+        row.lbl_test.setText("")
+        row.usable = True
+        if error:
+            row.choice, row.usable = row.current, False
+            self._paint(row.lbl_check, error, "#e74c3c")
+            self._update_save()
+            return
+        if not combo:
+            row.choice = ""
+            self._paint(row.lbl_check, "No shortcut. For example Ctrl+Alt+L.", "#999999")
+            self._update_save()
+            return
+        row.choice = combo
+        # The other rows as they will be after Save, not as they are on disk.
+        found = [m for m in conflicts(combo, row.current, row.action)
+                 if not any(m.startswith(f"Your “{ACTIONS[o.action]['title']}”") and o.changed
+                            for o in self.rows if o is not row)]
+        for other in self.rows:
+            if other is not row and other.choice == combo and other.changed:
+                found.append(f"You picked {combo} for “{ACTIONS[other.action]['title']}” too.")
+        if found:
+            row.usable = False
+            self._paint(row.lbl_check, " ".join(dict.fromkeys(found)) + " Pick another one.",
+                        "#e74c3c")
+            row.keys.mark_unusable()
+            self._update_save()
+            return
+        if combo == row.current:
+            self._paint(row.lbl_check, f"{combo} is set.", "#2ecc71")
+            self._update_save()
+            return
+        warnings = app_warnings(combo)
+        if warnings:
+            self._paint(row.lbl_check, " ".join(warnings) + " You can still use it.", "#f39c12")
+        else:
+            self._paint(row.lbl_check, f"Nothing else in Windows uses {combo}.", "#2ecc71")
+        self._update_save()
+        if not initial and self._probe.hold(combo):
+            self._probe_row = row
+            self._paint(row.lbl_test, f"Press {combo} now to test it. If nothing turns green, "
+                                      "another app (a game, Discord, an overlay) caught the keys.",
+                        "#cccccc")
+
+    def _is_test_press(self, ctrl, alt, shift, vk):
+        """The combination being live-tested must reach Windows (as WM_HOTKEY),
+        not be taken by the key box's hook."""
+        from utils.shortcut import from_vk
+        if not self._probe.hotkey:
+            return False
+        try:
+            return from_vk(ctrl, alt, shift, vk) == self._probe.hotkey
+        except ValueError:
+            return False
+
+    def _on_test_press(self):
+        row = self._probe_row
+        if row is not None and row.choice:
+            self._paint(row.lbl_test, f"✓ Tested: {row.choice} reaches the app — no other "
+                                      "app caught it.", "#2ecc71")
+
+    def _remove(self, row):
+        if self._probe_row is row:
+            self._probe.release()
+            self._probe_row = None
+        row.choice, row.usable = "", True
+        row.keys._kept = ("Removed — press Save", "placeholder")
+        row.keys._show(*row.keys._kept)
+        row.lbl_test.setText("")
+        self._paint(row.lbl_check, "This shortcut is removed when you press Save.", "#999999")
+        row.btn_remove.hide()
+        self._update_save()
+
+    def validate(self):
+        if not (any(r.changed for r in self.rows) and all(r.usable for r in self.rows)):
+            return False
+        self._probe.release()         # Explorer must be able to register it
+        self.results = {r.action: r.choice for r in self.rows if r.changed}
+        return True
 
 
 class WatchedGrid(EpisodeGrid):
@@ -549,6 +978,11 @@ class WatchLaterWidget(QWidget):
                             "you've watched in mpv.net")
         btn_scan.clicked.connect(lambda: self.scan_folder(announce=True))
         header.addWidget(btn_scan)
+        self.btn_shortcut = PushButton(FIF.LINK, "")
+        self.btn_shortcut.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_shortcut.clicked.connect(self.edit_shortcut)
+        self._update_shortcut_button()
+        header.addWidget(self.btn_shortcut)
         btn_add = PushButton(FIF.SEARCH, "Add from Search")
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add.setToolTip("Press the Library button on any Search result to add it here")
@@ -732,6 +1166,81 @@ class WatchLaterWidget(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         self._log_timer.stop()
+
+    # ---- keyboard shortcuts (utils/shortcut.py)
+    def _current_shortcuts(self):
+        """{action: combination} in effect. The shortcut file is what Windows acts
+        on, so it wins and the setting is brought in line; without a file, the
+        setting -- the next start re-creates the shortcut from it (health)."""
+        from utils.shortcut import ACTIONS, current_hotkey
+        out, changed = {}, False
+        for action, info in ACTIONS.items():
+            saved = app_settings.get(info["setting"], "")
+            try:
+                on_file = current_hotkey(action)
+            except Exception:
+                on_file = ""
+            out[action] = on_file or saved
+            if on_file and on_file != saved:
+                with config_lock:
+                    app_settings[info["setting"]] = on_file
+                changed = True
+        if changed:
+            save_config()
+        return out
+
+    def _current_shortcut(self):
+        return self._current_shortcuts().get("library", "")
+
+    def _update_shortcut_button(self):
+        from utils.shortcut import ACTIONS
+        current = {a: k for a, k in self._current_shortcuts().items() if k}
+        if not current:
+            self.btn_shortcut.setText("Add shortcuts")
+        elif len(current) == 1:
+            self.btn_shortcut.setText(f"Shortcut: {next(iter(current.values()))}")
+        else:
+            self.btn_shortcut.setText("Shortcuts: " + ", ".join(current.values()))
+        lines = [f"{ACTIONS[a]['title']}: {current.get(a, 'not set')}" for a in ACTIONS]
+        self.btn_shortcut.setToolTip("Keys that work from anywhere in Windows, whether the "
+                                     "app is open or not\n" + "\n".join(lines))
+
+    def edit_shortcut(self):
+        dlg = ShortcutDialog(self._current_shortcuts(), self.window())
+        if not dlg.exec() or not dlg.results:
+            return
+        th = ShortcutThread(dlg.results)
+        th.done.connect(self._on_shortcuts_saved)
+        th.finished.connect(lambda: self._thread_done(th))
+        self._threads.append(th)
+        self.spinner.show()
+        self.btn_shortcut.setEnabled(False)
+        th.start()
+
+    def _on_shortcuts_saved(self, results):
+        from utils.shortcut import ACTIONS, target_signature
+        self.btn_shortcut.setEnabled(True)
+        with config_lock:
+            for action, (ok, hotkey, _msg) in results.items():
+                if not ok:
+                    continue
+                info = ACTIONS[action]
+                if hotkey:
+                    app_settings[info["setting"]] = hotkey
+                    app_settings[info["target_setting"]] = target_signature(action)
+                else:
+                    app_settings.pop(info["setting"], None)
+                    app_settings.pop(info["target_setting"], None)
+        save_config()
+        self._update_shortcut_button()
+        failed = [msg for ok, _hk, msg in results.values() if not ok]
+        done = [msg for ok, _hk, msg in results.values() if ok]
+        if failed:
+            InfoBar.error("Shortcut not saved", " ".join(failed),
+                          position=InfoBarPosition.TOP, duration=8000, parent=self.window())
+        if done:
+            InfoBar.success("Keyboard shortcuts", " ".join(done),
+                            position=InfoBarPosition.TOP, duration=6000, parent=self.window())
 
     def _install_progress_script(self):
         try:

@@ -25,6 +25,15 @@ turns that heading into the version number when the release is made.
   press **Done** to save or **Close** to discard.
 - Every download now shows up in the Library, including ones from a profile you
   never added there.
+- **Keyboard shortcuts** (button next to *Scan anime folder*), working from
+  anywhere in Windows:
+  - **Open the Library** — jumps there instantly when the app is open, starts
+    on it when it isn't.
+  - **Play the next episode** — starts the next episode of what you're
+    watching in mpv.net without opening the app at all.
+  - Any key with Ctrl, Alt or Shift; the app checks it against Windows, other
+    shortcuts and running apps, lets you test it live, and repairs a shortcut
+    that stopped working when it starts.
 
 ### ⚡ Opens faster
 - The window appears about a third sooner: it no longer waits for the cloud

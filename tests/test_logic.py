@@ -5285,6 +5285,551 @@ class LibraryEdgeCaseTests(unittest.TestCase):
         self.assertEqual(["P3", "P4", "P5"], rows)
 
 
+class LibraryShortcutTests(unittest.TestCase):
+    """The key combination that opens the app on the Library (utils/shortcut.py,
+    utils/instance.py, AppWindow open_library / show_library)."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_only_combinations_a_windows_shortcut_can_hold(self):
+        from utils.shortcut import normalize, to_win32, to_lnk_hotkey
+        self.assertEqual("Ctrl+Alt+L", normalize("alt+ctrl+l"))
+        self.assertEqual("Ctrl+Shift+F5", normalize("Shift+Ctrl+F5"))
+        self.assertEqual("Ctrl+Alt+Space", normalize("Ctrl+Alt+space"))
+        self.assertEqual("Ctrl+Alt+Shift+F20", normalize("Ctrl+Alt+Shift+F20"))
+        self.assertEqual("Ctrl+Alt+Num+", normalize("Ctrl+Alt+Num+"))
+        self.assertEqual("Alt+Shift+;", normalize("Alt+Shift+;"))
+        self.assertEqual((0x2 | 0x1, ord("L")), to_win32("Ctrl+Alt+L"))
+        self.assertEqual((0x2 | 0x4, 0x74), to_win32("Ctrl+Shift+F5"))
+        self.assertEqual((0x2 | 0x1, 0x6B), to_win32("Ctrl+Alt+Num+"))
+        # .lnk header: HOTKEYF_CONTROL|ALT = 0x06 in the high byte.
+        self.assertEqual(0x0600 | ord("L"), to_lnk_hotkey("Ctrl+Alt+L"))
+        self.assertEqual(0x0300 | 0x20, to_lnk_hotkey("Ctrl+Shift+Space"))
+        # One modifier is allowed (it only comes with a warning, see below).
+        self.assertEqual("Ctrl+L", normalize("ctrl+l"))
+        self.assertEqual("Alt+7", normalize("Alt+7"))
+        self.assertEqual("Shift+F5", normalize("Shift+F5"))
+        self.assertEqual((0x4, 0x74), to_win32("Shift+F5"))
+        self.assertEqual(0x0100 | 0x74, to_lnk_hotkey("Shift+F5"))
+        for bad in ("", "L", "F5", "Meta+L", "Ctrl+Alt", "Ctrl+A+B",
+                    "Alt+Tab", "Alt+Shift+Tab", "Ctrl+Shift+Escape", "Ctrl+Alt+م"):
+            with self.assertRaises(ValueError, msg=bad):
+                normalize(bad)
+
+    def test_one_modifier_combinations_warn_what_they_take_away(self):
+        from utils.shortcut import app_warnings, conflicts
+        none = set()
+        self.assertIn("couldn't type it anywhere", app_warnings("Shift+L", running=none)[0])
+        self.assertIn("Copy", app_warnings("Ctrl+C", running=none)[0])
+        self.assertIn("menu", app_warnings("Alt+F", running=none)[0])
+        self.assertIn("Some apps use Ctrl+F7", app_warnings("Ctrl+F7", running=none)[0])
+        self.assertEqual([], app_warnings("Ctrl+F22", running=none))     # no keyboard has it
+        self.assertEqual([], app_warnings("Ctrl+Alt+K", running=none))
+        self.assertIn("closing windows", conflicts("Alt+F4")[0])          # Windows owns it
+
+    def test_keys_are_read_by_position_not_by_the_character_typed(self):
+        from utils.shortcut import from_vk
+        # Ctrl+Alt+L on an Arabic layout types "م"; its virtual key is still L.
+        self.assertEqual("Ctrl+Alt+L", from_vk(True, True, False, ord("L")))
+        self.assertEqual("Ctrl+Alt+Space", from_vk(True, True, False, 0x20))
+        self.assertEqual("Ctrl+Shift+Left", from_vk(True, False, True, 0x25))
+        self.assertEqual("Ctrl+Alt+Num5", from_vk(True, True, False, 0x65))
+        self.assertEqual("Ctrl+Alt+F13", from_vk(True, True, False, 0x7C))
+        self.assertEqual("Ctrl+Alt+/", from_vk(True, True, False, 0xBF))
+        with self.assertRaises(ValueError):
+            from_vk(True, True, False, 0xAD)                # volume mute: not a shortcut key
+
+    def test_conflicts_name_what_already_uses_the_keys(self):
+        from unittest import mock
+        from utils import shortcut
+        tmp = tempfile.mkdtemp(prefix="aed_lnk_")
+        import shutil
+        self.addCleanup(shutil.rmtree, tmp, True)
+        other = os.path.join(tmp, "Notepad.lnk")
+        header = bytearray(0x4C)
+        header[:4] = b"\x4c\x00\x00\x00"
+        value = shortcut.to_lnk_hotkey("Ctrl+Alt+N")
+        header[0x40], header[0x41] = value & 0xFF, value >> 8
+        with open(other, "wb") as f:
+            f.write(bytes(header))
+        self.assertEqual(value, shortcut.read_lnk_hotkey(other))
+        ours = os.path.join(tmp, "ours")
+        os.makedirs(ours)
+        with mock.patch.object(shortcut, "_shortcut_folders", return_value=[tmp]), \
+                mock.patch.object(shortcut, "shortcut_path",
+                                  side_effect=lambda action="library": os.path.join(ours, f"{action}.lnk")), \
+                mock.patch.object(shortcut, "is_taken", side_effect=lambda hk: hk == "Ctrl+Alt+T"):
+            self.assertEqual(["The shortcut “Notepad” already uses Ctrl+Alt+N."],
+                             shortcut.conflicts("Ctrl+Alt+N"))
+            self.assertIn("Windows already uses", shortcut.conflicts("Ctrl+Alt+Delete")[0])
+            self.assertEqual(["Another program has already claimed Ctrl+Alt+T."],
+                             shortcut.conflicts("Ctrl+Alt+T"))
+            self.assertEqual([], shortcut.conflicts("Ctrl+Alt+T", current="Ctrl+Alt+T"))  # ours
+            self.assertEqual([], shortcut.conflicts("Ctrl+Alt+L"))
+            # Our other action's shortcut is named as such, not as "a program".
+            value = shortcut.to_lnk_hotkey("Ctrl+Alt+P")
+            header[0x40], header[0x41] = value & 0xFF, value >> 8
+            with open(os.path.join(ours, "play_next.lnk"), "wb") as f:
+                f.write(bytes(header))
+            self.assertEqual(["Your “Play the next episode” shortcut already uses Ctrl+Alt+P."],
+                             shortcut.conflicts("Ctrl+Alt+P", action="library"))
+            self.assertEqual([], shortcut.conflicts("Ctrl+Alt+P", action="play_next"))
+        self.assertEqual(["AMD Radeon Software uses Ctrl+Shift+E for start/stop recording by default."],
+                         shortcut.app_warnings("Ctrl+Shift+E", running={"radeonsoftware.exe"}))
+        self.assertEqual([], shortcut.app_warnings("Ctrl+Shift+E", running=set()))
+
+    def test_shell_link_saves_any_key_and_the_target(self):
+        """Written by Windows' ShellLink object (what Explorer registers hotkeys from)."""
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        from utils import shortcut
+        tmp = tempfile.mkdtemp(prefix="aed_lnk_")
+        import shutil
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "x.lnk")
+        cmd = os.path.join(os.environ["SystemRoot"], "System32", "cmd.exe")
+        for hk in ("Ctrl+Alt+Space", "Ctrl+Shift+Num5", "Ctrl+Alt+Shift+F22", "Alt+Shift+/"):
+            shortcut._save_shell_link(path, cmd, "--library", tmp, f"{cmd},0", hk)
+            self.assertEqual(shortcut.to_lnk_hotkey(hk), shortcut.read_lnk_hotkey(path), hk)
+        with open(path, "rb") as f:
+            data = f.read()
+        self.assertIn("--library".encode("utf-16-le"), data)
+        bad = os.path.join(tmp, "bad.lnk")
+        with open(bad, "wb") as f:
+            f.write(b"not a link" * 10)
+        self.assertEqual(0, shortcut.read_lnk_hotkey(bad))
+
+    def test_shortcut_launches_this_copy_with_library(self):
+        from utils import shortcut
+        program, args, cwd, _icon = shortcut.launch_target()
+        self.assertTrue(args.endswith("--library"))
+        self.assertTrue(os.path.isdir(cwd))
+        self.assertTrue(shortcut.shortcut_path().endswith(
+            os.path.join("Start Menu", "Programs", shortcut.SHORTCUT_NAME)))
+        self.assertEqual(f"{program}|{args}", shortcut.target_signature())
+
+    def test_refresh_rewrites_only_a_stale_shortcut(self):
+        from unittest import mock
+        from utils import shortcut
+        self.assertFalse(shortcut.refresh({}))                       # no hotkey set
+        with mock.patch.object(shortcut, "install", return_value=(True, "")) as install, \
+                mock.patch("os.path.exists", return_value=True):
+            fresh = {shortcut.SETTING: "Ctrl+Alt+L",
+                     shortcut.TARGET_SETTING: shortcut.target_signature()}
+            self.assertFalse(shortcut.refresh(fresh))
+            install.assert_not_called()
+            moved = {shortcut.SETTING: "Ctrl+Alt+L", shortcut.TARGET_SETTING: "C:\\old.exe|--library"}
+            self.assertTrue(shortcut.refresh(moved))
+            self.assertEqual(shortcut.target_signature(), moved[shortcut.TARGET_SETTING])
+
+    def test_play_next_shortcut_launches_with_its_own_argument(self):
+        from utils import shortcut
+        program, args, _cwd, _icon = shortcut.launch_target("play_next")
+        self.assertTrue(args.endswith("--play-next"))
+        self.assertTrue(shortcut.shortcut_path("play_next").endswith(
+            "Auto Episodes Downloader - Play next.lnk"))
+        self.assertNotEqual(shortcut.shortcut_path("library"), shortcut.shortcut_path("play_next"))
+
+    def _health_env(self, files, taken):
+        """shortcut.health against fake files {action: hotkey} and a fake 'taken' set."""
+        from unittest import mock
+        from utils import shortcut
+        tmp = tempfile.mkdtemp(prefix="aed_health_")
+        import shutil
+        self.addCleanup(shutil.rmtree, tmp, True)
+        installs = []
+
+        def write(action, hotkey):
+            header = bytearray(0x4C)
+            header[:4] = b"\x4c\x00\x00\x00"
+            value = shortcut.to_lnk_hotkey(hotkey)
+            header[0x40], header[0x41] = value & 0xFF, value >> 8
+            with open(os.path.join(tmp, f"{action}.lnk"), "wb") as f:
+                f.write(bytes(header))
+
+        def install(hotkey, wait_for_explorer=3.0, action="library"):
+            installs.append((action, hotkey))
+            write(action, hotkey)
+            return True, "ok"
+        for action, hotkey in files.items():
+            write(action, hotkey)
+        patches = [mock.patch.object(shortcut, "shortcut_path",
+                                     side_effect=lambda action="library": os.path.join(tmp, f"{action}.lnk")),
+                   mock.patch.object(shortcut, "install", side_effect=install),
+                   mock.patch.object(shortcut, "is_taken", side_effect=lambda hk: hk in taken),
+                   mock.patch.object(shortcut.sys, "platform", "win32")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return installs
+
+    def test_health_check_repairs_and_reports(self):
+        from utils import shortcut
+        sig = shortcut.target_signature
+        # Healthy: in place, launches this copy, Windows holds the key -> nothing done.
+        installs = self._health_env({"library": "Ctrl+Alt+L"}, taken={"Ctrl+Alt+L"})
+        settings = {"library_hotkey": "Ctrl+Alt+L", "library_hotkey_target": sig("library")}
+        self.assertEqual((False, []), shortcut.health(settings, wait=0))
+        self.assertEqual([], installs)
+
+    def test_health_check_follows_the_file_and_rewrites_what_slipped(self):
+        from utils import shortcut
+        sig = shortcut.target_signature
+        installs = self._health_env({"library": "Ctrl+Alt+K"}, taken=set())
+        settings = {"library_hotkey": "Ctrl+Alt+L", "library_hotkey_target": sig("library"),
+                    "play_next_hotkey": "Ctrl+Alt+P"}                  # its file is gone
+        changed, warnings = shortcut.health(settings, wait=0)
+        self.assertTrue(changed)
+        self.assertEqual("Ctrl+Alt+K", settings["library_hotkey"])     # the file wins
+        # The Library key isn't held by Windows -> rewritten; Play next re-created.
+        self.assertEqual([("library", "Ctrl+Alt+K"), ("play_next", "Ctrl+Alt+P")], installs)
+        self.assertEqual(sig("play_next"), settings["play_next_hotkey_target"])
+        # Still not held after rewriting -> the user is told what to do.
+        self.assertEqual(2, len(warnings))
+        self.assertIn("Sign out of Windows and back in", warnings[0])
+
+    def _window(self, **kw):
+        from unittest import mock
+        from utils import watch_later as wl
+        from ui.app_window import AppWindow
+        tmp = tempfile.mkdtemp(prefix="aed_short_")
+        import shutil
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for p in (mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json")),
+                  mock.patch("ui.app_window.get_watchlist", return_value=[])):
+            p.start()
+            self.addCleanup(p.stop)
+        w = AppWindow(**kw)
+
+        def dispose():
+            w._tabs_built = True
+            w.hide()
+            w.deleteLater()
+        self.addCleanup(dispose)
+        return w
+
+    def test_started_by_the_shortcut_the_library_comes_first(self):
+        w = self._window(open_library=True)
+        lib = w.watch_later_interface
+        self.assertIsNotNone(lib)
+        self.assertIs(lib, w.stackedWidget.currentWidget())
+        self.assertIsNone(w.search_interface)                       # the rest still deferred
+        w._build_tabs()
+        self.assertIs(lib, w.watch_later_interface)                 # not built twice
+        self.assertEqual(1, sum(1 for i in range(w.stackedWidget.view.count())
+                                if w.stackedWidget.view.widget(i) is lib))
+        lib.search_requested.emit()
+        self.assertIs(w.search_interface, w.stackedWidget.currentWidget())
+
+    def test_the_hand_over_message_shows_the_library(self):
+        import ctypes.wintypes
+        from PyQt6.QtCore import QByteArray
+        w = self._window()
+        w.raise_to_front = lambda: None
+        self.assertIs(w.downloader_interface, w.stackedWidget.currentWidget())
+        msg = ctypes.wintypes.MSG()
+        msg.message = w._open_library_msg
+        handled = w.nativeEvent(QByteArray(b"windows_generic_MSG"), ctypes.addressof(msg))
+        self.assertEqual((True, 0), tuple(handled))
+        self._app.processEvents()
+        self.assertIs(w.watch_later_interface, w.stackedWidget.currentWidget())
+        # During a download the window only comes forward.
+        w.switchTo(w.downloader_interface)
+        w._download_running = True
+        w.show_library()
+        self.assertIs(w.downloader_interface, w.stackedWidget.currentWidget())
+
+    def test_library_tab_has_the_shortcut_button(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        from ui import watch_later_tab as tab
+        tmp = tempfile.mkdtemp(prefix="aed_short_")
+        import shutil
+        self.addCleanup(shutil.rmtree, tmp, True)
+        from utils import shortcut
+        lnk = os.path.join(tmp, "library.lnk")              # never this PC's real Start menu
+        with mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json")), \
+                mock.patch.object(shortcut, "shortcut_path",
+                                  side_effect=lambda action="library": os.path.join(tmp, f"{action}.lnk")), \
+                mock.patch.object(tab, "save_config"), \
+                mock.patch.dict(tab.app_settings, {"library_hotkey": "Ctrl+Alt+L"}):
+            w = tab.WatchLaterWidget()
+            self.addCleanup(w.deleteLater)
+            self.assertEqual("Shortcut: Ctrl+Alt+L", w.btn_shortcut.text())   # from the setting
+            tab.app_settings["play_next_hotkey"] = "Ctrl+Alt+P"
+            w._update_shortcut_button()
+            self.assertEqual("Shortcuts: Ctrl+Alt+L, Ctrl+Alt+P", w.btn_shortcut.text())
+            tab.app_settings.pop("library_hotkey")
+            tab.app_settings.pop("play_next_hotkey")
+            w._update_shortcut_button()
+            self.assertEqual("Add shortcuts", w.btn_shortcut.text())
+            # The shortcut file is what Windows uses: it wins over a lost setting.
+            header = bytearray(0x4C)
+            header[:4] = b"\x4c\x00\x00\x00"
+            value = shortcut.to_lnk_hotkey("Ctrl+Alt+K")
+            header[0x40], header[0x41] = value & 0xFF, value >> 8
+            with open(lnk, "wb") as f:
+                f.write(bytes(header))
+            w._update_shortcut_button()
+            self.assertEqual("Shortcut: Ctrl+Alt+K", w.btn_shortcut.text())
+            self.assertEqual("Ctrl+Alt+K", tab.app_settings.get("library_hotkey"))   # synced
+            self.assertEqual([], shortcut.conflicts("Ctrl+Alt+K"))   # our own: no conflict
+
+    @staticmethod
+    def _press(widget, vk, ctrl=True, alt=True, shift=False, key=0, text=""):
+        from PyQt6.QtCore import QEvent, Qt
+        from PyQt6.QtGui import QKeyEvent
+        from PyQt6.QtWidgets import QApplication
+        mods = Qt.KeyboardModifier.NoModifier
+        for on, m in ((ctrl, Qt.KeyboardModifier.ControlModifier),
+                      (alt, Qt.KeyboardModifier.AltModifier),
+                      (shift, Qt.KeyboardModifier.ShiftModifier)):
+            if on:
+                mods |= m
+        ev = QKeyEvent(QEvent.Type.KeyPress, key, mods, 0, vk, 0, text)
+        QApplication.sendEvent(widget, ev)
+
+    def test_dialog_reads_any_layout_and_flags_conflicts(self):
+        from unittest import mock
+        from PyQt6.QtWidgets import QWidget
+        from ui import watch_later_tab as tab
+        host = QWidget()
+        host.show()
+        self.addCleanup(host.close)
+        with mock.patch("utils.shortcut.conflicts",
+                        side_effect=lambda hk, cur="", action="library": [
+                            "Another program has already claimed Ctrl+Alt+T."]
+                        if hk == "Ctrl+Alt+T" else []), \
+                mock.patch("utils.shortcut.app_warnings", return_value=[]), \
+                mock.patch.object(tab._HotkeyProbe, "hold", return_value=True):
+            dlg = tab.ShortcutDialog({}, host)
+            lib, nxt = dlg.row("library"), dlg.row("play_next")
+            dlg.show()
+            lib.keys.setFocus()
+            self.assertFalse(dlg.yesButton.isEnabled())
+            self._press(lib.keys, ord("L"), ctrl=False, alt=False)
+            self.assertFalse(dlg.yesButton.isEnabled())             # needs a modifier
+            self._press(lib.keys, ord("T"))
+            self.assertFalse(dlg.yesButton.isEnabled())             # taken
+            self.assertIn("already claimed", lib.lbl_check.text())
+            # Arabic layout: Qt's key is the typed letter, the virtual key is L.
+            self._press(lib.keys, ord("L"), key=0x0645, text="م")
+            self.assertEqual("Ctrl+Alt+L", lib.keys.text())
+            self.assertTrue(dlg.yesButton.isEnabled())
+            self.assertIn("Press Ctrl+Alt+L now to test it", lib.lbl_test.text())
+            dlg._on_test_press()                                   # the WM_HOTKEY arrived
+            self.assertIn("Tested", lib.lbl_test.text())
+            self._press(lib.keys, 0x09, ctrl=True, alt=True)        # Tab: captured, not focus
+            self.assertIn("belongs to Windows", lib.lbl_check.text())
+            self._press(lib.keys, ord("L"), ctrl=True, alt=False)   # one modifier is allowed
+            self.assertEqual("Ctrl+L", lib.keys.text())
+            self.assertTrue(dlg.yesButton.isEnabled())
+            # The same keys for both actions is refused.
+            self._press(nxt.keys, ord("L"), ctrl=True, alt=False)
+            self.assertIn("for “Open the Library” too", nxt.lbl_check.text())
+            self.assertFalse(dlg.yesButton.isEnabled())
+            self._press(nxt.keys, ord("P"))                          # Ctrl+Alt+P
+            self.assertTrue(dlg.yesButton.isEnabled())
+            dlg.yesButton.click()
+            self.assertEqual({"library": "Ctrl+L", "play_next": "Ctrl+Alt+P"}, dlg.results)
+            # Unchanged: nothing to save; Remove applies on Save.
+            dlg = tab.ShortcutDialog({"library": "Ctrl+Alt+L"}, host)
+            self.assertFalse(dlg.yesButton.isEnabled())
+            self.assertFalse(dlg.row("play_next").btn_remove.isVisibleTo(dlg.row("play_next")))
+            dlg.row("library").btn_remove.click()
+            self.assertTrue(dlg.yesButton.isEnabled())
+            dlg.yesButton.click()
+            self.assertEqual({"library": ""}, dlg.results)
+
+    @staticmethod
+    def _key(widget, kind, vk, mods=(), key=0, repeat=False):
+        from PyQt6.QtCore import QEvent, Qt
+        from PyQt6.QtGui import QKeyEvent
+        from PyQt6.QtWidgets import QApplication
+        flags = Qt.KeyboardModifier.NoModifier
+        for m in mods:
+            flags |= {"Ctrl": Qt.KeyboardModifier.ControlModifier,
+                      "Alt": Qt.KeyboardModifier.AltModifier,
+                      "Shift": Qt.KeyboardModifier.ShiftModifier}[m]
+        t = QEvent.Type.KeyPress if kind == "down" else QEvent.Type.KeyRelease
+        QApplication.sendEvent(widget, QKeyEvent(t, key, flags, 0, vk, 0, "", repeat))
+
+    def test_the_keyboard_hook_takes_only_combinations(self):
+        """While the picker has focus: Ctrl / Alt / Shift combinations are swallowed
+        and handed to it (so another program's hotkey can't fire); plain keys pass."""
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        from unittest import mock
+        from utils import keyhook
+        got = []
+        hook = keyhook.ComboHook(lambda *a: got.append(a),
+                                 pass_through=lambda c, a, s, vk: vk == ord("T"))
+        hook._u = mock.MagicMock()
+        hook._u.CallNextHookEx.return_value = 0
+        held = set()
+        hook._u.GetAsyncKeyState.side_effect = lambda vk: -32768 if vk in held else 0
+
+        def send(msg, vk):
+            kb = keyhook.KBDLLHOOKSTRUCT(vkCode=vk)
+            return hook._handle(0, msg, ctypes.addressof(kb))
+        import ctypes
+        D, U = keyhook.WM_KEYDOWN, keyhook.WM_KEYUP
+        self.assertEqual(0, send(D, 0x11))                  # modifiers pass
+        held |= {0x11, 0x12}
+        self.assertEqual(1, send(D, ord("L")))              # Ctrl+Alt+L: taken
+        self.assertEqual(1, send(D, ord("L")))              # its auto-repeat too
+        self.assertEqual(1, send(U, ord("L")))              # and its key-up
+        self.assertEqual([(True, True, False, ord("L"))], got)
+        self.assertEqual(0, send(D, ord("T")))              # the live-test combo goes on
+        held.clear()
+        self.assertEqual(0, send(D, ord("L")))              # plain typing untouched
+        held.add(0x10)
+        self.assertEqual(1, send(D, ord("K")))              # Shift+K: a combination too
+        self.assertEqual([(False, False, True, ord("K"))], got[1:])
+
+    def test_key_box_follows_the_keys_as_they_are_held(self):
+        from ui.watch_later_tab import KeyCaptureEdit
+        box = KeyCaptureEdit("")
+        self.addCleanup(box.deleteLater)
+        got = []
+        box.captured.connect(lambda combo, err: got.append((combo, err)))
+        self.assertEqual(KeyCaptureEdit.PLACEHOLDER, box.text())
+        self.assertIn("color: #7a7a7a", box.styleSheet())                # dimmed placeholder
+        CTRL, ALT, SHIFT = 0x11, 0x12, 0x10
+        self._key(box, "down", CTRL, ["Ctrl"])
+        self.assertEqual("Ctrl+…", box.text())
+        self._key(box, "down", ALT, ["Ctrl", "Alt"])
+        self.assertEqual("Ctrl+Alt+…", box.text())
+        self._key(box, "up", ALT, ["Ctrl"])                               # let go of Alt
+        self.assertEqual("Ctrl+…", box.text())
+        self._key(box, "down", ALT, ["Ctrl", "Alt"])
+        self._key(box, "down", ALT, ["Ctrl", "Alt"], repeat=True)         # held: auto-repeat
+        self.assertEqual("Ctrl+Alt+…", box.text())
+        self._key(box, "down", ord("L"), ["Ctrl", "Alt"])
+        self.assertEqual("Ctrl+Alt+L", box.text())
+        self.assertEqual([("Ctrl+Alt+L", "")], got)
+        self.assertIn("color: #ffffff", box.styleSheet())
+        for vk, left in ((ord("L"), ["Ctrl", "Alt"]), (ALT, ["Ctrl"]), (CTRL, [])):
+            self._key(box, "up", vk, left)
+        self.assertEqual("Ctrl+Alt+L", box.text())                       # kept after letting go
+        self._key(box, "down", SHIFT, ["Shift"])                          # a new try, abandoned
+        self.assertEqual("Shift+…", box.text())
+        self._key(box, "up", SHIFT, [])
+        self.assertEqual("Ctrl+Alt+L", box.text())                       # back to the kept one
+        self._key(box, "down", SHIFT, ["Shift"])
+        self._key(box, "down", 0x09, ["Shift"])                           # Shift+Tab: Windows'
+        self.assertEqual("Shift+Tab", box.text())
+        self.assertIn("color: #ff8a80", box.styleSheet())
+        self.assertEqual("", got[-1][0])
+        self.assertTrue(got[-1][1])
+        self._key(box, "down", ord("K"), ["Shift"])                       # Shift+K: allowed
+        self.assertEqual(("Shift+K", ""), got[-1])
+
+    def test_live_test_catches_the_real_key_press(self):
+        """The probe really registers the keys and sees the press (Windows only)."""
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        import ctypes
+        import time
+        from PyQt6.QtWidgets import QApplication
+        from utils.shortcut import is_taken, to_win32
+        from ui.watch_later_tab import _HotkeyProbe
+        hotkey = "Ctrl+Alt+Shift+F22"                  # no keyboard has F22: nothing else uses it
+        if is_taken(hotkey):
+            self.skipTest(f"{hotkey} is taken on this PC")
+        hits = []
+        probe = _HotkeyProbe(lambda: hits.append(1))
+        self.assertTrue(probe.hold(hotkey))
+        self.addCleanup(probe.release)
+        self.assertTrue(is_taken(hotkey))                         # held while testing
+        mods, vk = to_win32(hotkey)
+        u = ctypes.windll.user32
+        for k in (0x11, 0x12, 0x10):
+            u.keybd_event(k, 0, 0, 0)
+        u.keybd_event(vk, 0, 0, 0)
+        u.keybd_event(vk, 0, 2, 0)
+        for k in (0x10, 0x12, 0x11):
+            u.keybd_event(k, 0, 2, 0)
+        end = time.time() + 3
+        while not hits and time.time() < end:
+            QApplication.processEvents()
+            time.sleep(0.02)
+        self.assertEqual([1], hits[:1])
+        probe.release()
+        self.assertFalse(is_taken(hotkey))                        # let go afterwards
+
+
+class QuickPlayTests(unittest.TestCase):
+    """The Play next episode shortcut (utils/quick_play.py): no window, straight
+    to mpv.net with the episode the Continue watching strip would show first."""
+
+    T = "https://witanime.site/episode/{slug}-الحلقة-{{x}}/"
+
+    def setUp(self):
+        from unittest import mock
+        from utils import watch_later as wl
+        self.wl = wl
+        self.tmp = tempfile.mkdtemp(prefix="aed_qp_")
+        import shutil
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        p = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
+        p.start()
+        self.addCleanup(p.stop)
+        self.downloads = os.path.join(self.tmp, "animes")
+
+    def _anime(self, title, eps_on_disk, watched, status, played_ts=None, max_ep=12):
+        wl = self.wl
+        url = f"https://witanime.site/anime/{title.lower().replace(' ', '-')}/"
+        wl.add(title, url, "witanime.site")
+        wl.set_parts(url, [{"template": self.T.format(slug=title.lower()), "max_ep": max_ep}])
+        wl.link_profile(url, 0, title)
+        wl.set_watched(url, 0, watched)
+        wl.update(url, status=status,
+                  last_played={"profile": title, "ep": 1, "ts": played_ts} if played_ts else None)
+        folder = os.path.join(self.downloads, title)
+        os.makedirs(folder, exist_ok=True)
+        for ep in eps_on_disk:
+            open(os.path.join(folder, f"{title} Ep{ep}.mp4"), "wb").close()
+        return url
+
+    def test_picks_the_most_recently_played_with_its_next_episode_on_disk(self):
+        from utils.quick_play import pick_next
+        wl = self.wl
+        self._anime("Old Show", [3, 4], [1, 2], wl.WATCHING, played_ts=100)
+        self._anime("Recent Show", [5, 6, 7], [1, 2, 3, 4], wl.WATCHING, played_ts=200)
+        self._anime("Not Downloaded", [], [1], wl.WATCHING, played_ts=300)   # ep 2 not on disk
+        self._anime("Saved For Later", [1], [], wl.LATER, played_ts=400)    # not being watched
+        entry, part, ep, files = pick_next(wl.entries(), self.downloads)
+        self.assertEqual(("Recent Show", 0, 5), (entry["title"], part, ep))
+        self.assertEqual(["Recent Show Ep5.mp4", "Recent Show Ep6.mp4", "Recent Show Ep7.mp4"],
+                         [os.path.basename(f) for f in files])               # the rest queued
+        self.assertIsNone(pick_next([], self.downloads))
+
+    def test_plays_in_mpvnet_or_says_there_is_nothing(self):
+        from unittest import mock
+        from utils import quick_play
+        wl = self.wl
+        settings = {"download_dir": self.downloads, "play_in_mpvnet": True}
+        with mock.patch.object(quick_play, "_settings", return_value=settings), \
+                mock.patch("utils.mpvnet.find_mpvnet", return_value=(r"C:\mpv\mpvnet.exe", "7")), \
+                mock.patch.object(quick_play.subprocess, "Popen") as popen:
+            played, message = quick_play.play_next()
+            self.assertFalse(played)                                # nothing to continue
+            popen.assert_not_called()
+            self._anime("Recent Show", [5, 6], [1, 2, 3, 4], wl.WATCHING, played_ts=200)
+            played, message = quick_play.play_next()
+            self.assertTrue(played)
+            args = popen.call_args[0][0]
+            self.assertEqual(r"C:\mpv\mpvnet.exe", args[0])
+            self.assertEqual(["Recent Show Ep5.mp4", "Recent Show Ep6.mp4"],
+                             [os.path.basename(a) for a in args[1:]])
+            self.assertIn("episode 5", message)
+
+
 class ReleaseNotesTests(unittest.TestCase):
     """CHANGELOG.md's section for a version is the GitHub release's text
     (tools/release_notes.py, used by publish.py and the Release workflow)."""

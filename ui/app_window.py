@@ -1,4 +1,4 @@
-from PyQt6.QtCore import Qt, QTimer, QEvent
+from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import (FluentWindow, FluentIcon as FIF, MessageBoxBase,
                             SubtitleLabel, BodyLabel, PushButton)
@@ -117,8 +117,15 @@ def _play_first_video(folder, parent=None, episodes=None):
 
 
 class AppWindow(FluentWindow):
-    def __init__(self, autostart_commands: list | None = None):
+    # A keyboard shortcut needs the user (from main.py's startup check thread).
+    shortcut_warning = pyqtSignal(str)
+
+    def __init__(self, autostart_commands: list | None = None, open_library: bool = False):
         super().__init__()
+        self.shortcut_warning.connect(self._show_shortcut_warning)
+        # The Library shortcut's message from a second launch (utils/instance.py).
+        from utils.instance import open_library_message_id
+        self._open_library_msg = open_library_message_id()
 
         self.setWindowTitle(f"Auto Episodes Downloader | Version {APP_VERSION}")
 
@@ -177,6 +184,11 @@ class AppWindow(FluentWindow):
         self.progress_added = False
 
         self.init_navigation()
+        # Started by the Library shortcut (--library): the Library is built now and
+        # shown first; every other tab still waits for the first paint.
+        self._first_page = self._ensure_library() if open_library else self.downloader_interface
+        if open_library:
+            self.switchTo(self._first_page)
 
         # Transparency (Mica/Acrylic) is forced OFF, regardless of system settings.
         self.setMicaEffectEnabled(False)
@@ -226,7 +238,7 @@ class AppWindow(FluentWindow):
         # The rest of the tabs: once the window is on screen (first paint), with a
         # fallback in case no paint arrives (minimised, off-screen).
         self._first_paint_seen = False
-        self.downloader_interface.installEventFilter(self)    # the page shown first
+        self._first_page.installEventFilter(self)             # the page shown first
         QTimer.singleShot(1500, self._build_tabs)
 
         # Silent background sync of watchlist & seen episodes with Cloud Service on launch
@@ -582,11 +594,60 @@ class AppWindow(FluentWindow):
         # super().__init__(), before this attribute exists -- and an exception in
         # a Qt callback aborts the app.
         if (not getattr(self, "_first_paint_seen", True) and event.type() == QEvent.Type.Paint
-                and obj is self.downloader_interface):
+                and obj is self._first_page):
             self._first_paint_seen = True
-            self.downloader_interface.removeEventFilter(self)
+            self._first_page.removeEventFilter(self)
             QTimer.singleShot(0, self._build_tabs)
         return super().eventFilter(obj, event)
+
+    def nativeEvent(self, eventType, message):
+        """A second launch by the Library shortcut posts this window a registered
+        message (utils/instance.py): come to the front on the Library."""
+        msg_id = getattr(self, "_open_library_msg", 0)
+        if msg_id:
+            try:
+                if bytes(eventType) == b"windows_generic_MSG":
+                    import ctypes.wintypes
+                    msg = ctypes.wintypes.MSG.from_address(int(message))
+                    if msg.message == msg_id:
+                        QTimer.singleShot(0, self.show_library)
+                        return True, 0
+            except Exception:
+                pass          # an exception here would abort the app
+        return super().nativeEvent(eventType, message)
+
+    def _show_shortcut_warning(self, message):
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        InfoBar.warning("Keyboard shortcut", message, position=InfoBarPosition.TOP,
+                        duration=12000, parent=self)
+
+    def show_library(self):
+        """The Library shortcut, with the app already open. While a download runs
+        the window only comes forward: the sidebar is locked to Active Tasks then,
+        and leaving it would strand the user away from the running download."""
+        self.raise_to_front()
+        if self._download_running:
+            return
+        self.switchTo(self._ensure_library())
+
+    def _ensure_library(self):
+        """The Library tab, built (and wired) the first time it is needed: at
+        startup with --library, otherwise with the other deferred tabs."""
+        if self.watch_later_interface is not None:
+            return self.watch_later_interface
+        from ui.responsive import cap_width
+        from ui.watch_later_tab import WatchLaterWidget
+        key = "watch_later_interface"
+        page = WatchLaterWidget()
+        page.setObjectName(key)
+        page.setProperty("isStackedTransparent", False)   # as addSubInterface sets it
+        self.stackedWidget.addWidget(page)
+        self._width_caps.append(cap_width(page, self.DEFERRED_WIDTHS[key]))
+        page.profile_ready.connect(self.on_search_profile_created)
+        page.search_requested.connect(lambda: self.open_tab("search_interface"))
+        page.player_requested.connect(lambda: self.open_tab("player_interface"))
+        self.watch_later_interface = page
+        return page
 
     def open_tab(self, key):
         """Switch to a tab by its route key, building the deferred tabs first if
@@ -603,15 +664,16 @@ class AppWindow(FluentWindow):
         from ui.responsive import cap_width
         from ui.search_tab import AnimeSearchWidget
         from ui.manager_tab import SiteManagerWidget
-        from ui.watch_later_tab import WatchLaterWidget
         from ui.watchlist_tab import WatchlistWidget
         from ui.player_tab import PlayerWidget
         self.search_interface = AnimeSearchWidget(self)
         self.watchlist_interface = WatchlistWidget()
-        self.watch_later_interface = WatchLaterWidget()
         self.manager_interface = SiteManagerWidget()
         self.player_interface = PlayerWidget()
+        self._ensure_library()            # already built when started with --library
         for key, _icon, _text in self.DEFERRED_TABS:
+            if key == "watch_later_interface":
+                continue
             page = getattr(self, key)
             page.setObjectName(key)
             page.setProperty("isStackedTransparent", False)   # as addSubInterface sets it
@@ -621,9 +683,6 @@ class AppWindow(FluentWindow):
         # Wire up the profile manager modifications to automatically update the downloader tab's dropdown list!
         self.manager_interface.profile_saved_signal.connect(self.downloader_interface.refresh_dropdown)
         self.search_interface.profile_created_signal.connect(self.on_search_profile_created)
-        self.watch_later_interface.profile_ready.connect(self.on_search_profile_created)
-        self.watch_later_interface.search_requested.connect(lambda: self.switchTo(self.search_interface))
-        self.watch_later_interface.player_requested.connect(lambda: self.switchTo(self.player_interface))
         self.search_interface.watch_later_signal.connect(self.on_watch_later_add)
 
         # Watchlist wiring: follow from Search, and download-new -> Downloader.
@@ -645,6 +704,10 @@ class AppWindow(FluentWindow):
             self._watchlist_timer = QTimer(self)
             self._watchlist_timer.timeout.connect(self.watchlist_interface.check_today)
             self._watchlist_timer.start(30 * 60 * 1000)  # Check today's releases every 30 minutes
+
+        hook = getattr(self, "tabs_built_hook", None)     # main.py's startup log
+        if hook:
+            hook()
 
     def hide_active_tasks(self, switch_away=True):
         """Hides the Active Tasks tab completely"""
