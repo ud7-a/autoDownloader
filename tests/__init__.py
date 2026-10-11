@@ -13,3 +13,8 @@ import tempfile
 _ISOLATED_DIR = os.path.join(tempfile.gettempdir(), "AutoEpisodesDownloader-tests")
 os.makedirs(_ISOLATED_DIR, exist_ok=True)
 os.environ["AED_APP_DIR"] = _ISOLATED_DIR
+# The keyboard shortcuts live in the user's Start menu: tests get their own
+# folder, so they never read -- let alone write -- the real ones (utils/shortcut.py).
+_SHORTCUT_DIR = os.path.join(_ISOLATED_DIR, "shortcuts")
+os.makedirs(_SHORTCUT_DIR, exist_ok=True)
+os.environ["AED_SHORTCUT_DIR"] = _SHORTCUT_DIR

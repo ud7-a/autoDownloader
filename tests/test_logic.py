@@ -21,6 +21,8 @@ import unittest
 os.environ.setdefault("AED_APP_DIR",
                       os.path.join(tempfile.gettempdir(), "AutoEpisodesDownloader-tests"))
 os.makedirs(os.environ["AED_APP_DIR"], exist_ok=True)
+os.environ.setdefault("AED_SHORTCUT_DIR", os.path.join(os.environ["AED_APP_DIR"], "shortcuts"))
+os.makedirs(os.environ["AED_SHORTCUT_DIR"], exist_ok=True)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -56,6 +58,15 @@ class IsolationGuardTests(unittest.TestCase):
         for path in (config.CONFIG_FILE, config.DB_FILE, config.PROFILE_DIR):
             self.assertTrue(path.startswith(config.APP_DIR), path)
             self.assertNotIn(config.DEFAULT_APP_DIR, path)
+
+    def test_keyboard_shortcuts_never_touch_the_real_start_menu(self):
+        from utils import shortcut
+        start_menu = os.path.join("Microsoft", "Windows", "Start Menu").lower()
+        for action in shortcut.ACTIONS:
+            self.assertNotIn(start_menu, shortcut.shortcut_path(action).lower(), action)
+        for folder in shortcut._shortcut_folders():
+            self.assertNotIn(start_menu, folder.lower())
+            self.assertNotIn("desktop", folder.lower())
 
 
 class EpisodeSpecTests(unittest.TestCase):
@@ -5408,9 +5419,15 @@ class LibraryShortcutTests(unittest.TestCase):
         program, args, cwd, _icon = shortcut.launch_target()
         self.assertTrue(args.endswith("--library"))
         self.assertTrue(os.path.isdir(cwd))
-        self.assertTrue(shortcut.shortcut_path().endswith(
-            os.path.join("Start Menu", "Programs", shortcut.SHORTCUT_NAME)))
+        self.assertEqual(shortcut.SHORTCUT_NAME, os.path.basename(shortcut.shortcut_path()))
         self.assertEqual(f"{program}|{args}", shortcut.target_signature())
+        from unittest import mock
+        # Outside the tests (patch.dict puts the variable back afterwards):
+        with mock.patch.dict(os.environ, {"APPDATA": r"C:\Users\x\AppData\Roaming"}):
+            os.environ.pop("AED_SHORTCUT_DIR")
+            self.assertEqual(os.path.join(r"C:\Users\x\AppData\Roaming", "Microsoft", "Windows",
+                                          "Start Menu", "Programs", shortcut.SHORTCUT_NAME),
+                             shortcut.shortcut_path())
 
     def test_refresh_rewrites_only_a_stale_shortcut(self):
         from unittest import mock

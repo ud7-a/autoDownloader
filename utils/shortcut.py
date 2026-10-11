@@ -267,6 +267,8 @@ def current_hotkey(action="library"):
 
 def _shortcut_folders():
     env = os.environ
+    if env.get("AED_SHORTCUT_DIR"):                      # tests: never the real ones
+        return [env["AED_SHORTCUT_DIR"]]
     return [p for p in (
         os.path.join(env.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu"),
         os.path.join(env.get("ProgramData", ""), "Microsoft", "Windows", "Start Menu"),
@@ -385,9 +387,14 @@ def app_warnings(hotkey, running=None):
 # --------------------------------------------------------------- the .lnk file
 
 def shortcut_path(action="library"):
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "Microsoft", "Windows", "Start Menu", "Programs",
-                        ACTIONS[action]["file"])
+    """Where `action`'s shortcut lives: the Start menu (Explorer registers hotkeys
+    there). AED_SHORTCUT_DIR moves it -- the test suite always sets it, so no test
+    can read or change the user's real shortcuts."""
+    folder = os.environ.get("AED_SHORTCUT_DIR")
+    if not folder:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        folder = os.path.join(base, "Microsoft", "Windows", "Start Menu", "Programs")
+    return os.path.join(folder, ACTIONS[action]["file"])
 
 
 def launch_target(action="library"):
