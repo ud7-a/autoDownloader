@@ -87,9 +87,10 @@ blocked.
 
 ## Desktop configuration
 
-1. Open **Watchlist** in AED.
-2. Open the cloud notification settings.
-3. Enter the service URL and Discord webhook URL, then enable cloud notifications.
+1. Open **Settings → Discord** in AED.
+2. Enter the service URL and Discord webhook URL, then enable cloud notifications.
+3. Use **Save Discord settings** after editing an existing configuration. Manage
+   followed shows in **Watchlist**.
 
 The desktop synchronizes followed shows. Its initial episode counts seed
 notification baselines; first server discovery also establishes a baseline

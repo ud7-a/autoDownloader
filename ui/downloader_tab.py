@@ -1,28 +1,21 @@
 import os
 import threading
-import sys
 from urllib.parse import unquote
 
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui import QIntValidator
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog)
 
 # THE UPGRADE: We are using Fluent Widgets for everything!
 from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, CheckBox,
-                            ComboBox, Slider, SmoothScrollArea, SpinBox, FluentIcon as FIF, ToolButton,
+                            ComboBox, SmoothScrollArea, SpinBox, ToolButton, FluentIcon as FIF,
                             InfoBar, InfoBarPosition)
 
 from utils.config import app_settings, sites_data, save_config, config_lock
 from core.signals import signals
-from core.selenium_engine import run_selenium_task, launch_visible_browser
+from core.selenium_engine import run_selenium_task
+from utils.sounds import builtin_sound_path
 from ui.styles import apply_danger_style
-from ui.secret_field import SecretLineEdit
 from utils.naming import safe_folder_name
-
-
-# Sentinel stored in selected_sound to mean "no finish sound". Distinct from ""
-# (unset), which falls back to the built-in default.
-SOUND_NONE = "__none__"
 
 
 class FillerLookupThread(QThread):
@@ -139,15 +132,6 @@ class FillerLookupThread(QThread):
         import re
         found = re.search(r'''href=['"]([^'"]*/episodes/[^'"]+)['"]''', html or "", re.I)
         return found.group(1) if found else ""
-
-
-def builtin_sound_path():
-    """Absolute path to the app's bundled default finish sound (frozen or source)."""
-    base = getattr(sys, "_MEIPASS", None)
-    if base:
-        return os.path.join(base, "assets", "finishingDownloadSound.wav")
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "assets", "finishingDownloadSound.wav")
 
 
 def compact_episode_spec(nums):
@@ -435,7 +419,7 @@ class ConnectionCheckThread(QThread):
 
 class DownloaderWidget(QWidget):
     goto_profiles_signal = pyqtSignal()   # asks the main window to open Profile Manager
-    webhook_changed = pyqtSignal(str)     # notifies when Discord webhook is edited
+    settings_requested = pyqtSignal()     # opens the app preferences page
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -472,13 +456,18 @@ class DownloaderWidget(QWidget):
         main_layout.setSpacing(15) 
         main_layout.setContentsMargins(30, 20, 30, 20)
 
-        # Fluent Button
-        self.btn_profile = PushButton(FIF.GLOBE, "Open Browser (Extensions / Login)")
-        self.btn_profile.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_profile.clicked.connect(lambda: threading.Thread(target=launch_visible_browser, daemon=True).start())
-        main_layout.addWidget(self.btn_profile)
+        header = QHBoxLayout()
+        title = QLabel("Download episodes")
+        title.setStyleSheet("font-size: 22px; font-weight: bold; background: transparent;")
+        header.addWidget(title)
+        header.addStretch()
+        self.btn_settings = PushButton(FIF.SETTING, "Settings")
+        self.btn_settings.setToolTip("Notification preferences and download defaults")
+        self.btn_settings.clicked.connect(self.settings_requested.emit)
+        header.addWidget(self.btn_settings)
+        main_layout.addLayout(header)
 
-        main_layout.addWidget(QLabel("Download Location:", styleSheet="font-weight: bold; margin-top: 10px;"))
+        main_layout.addWidget(QLabel("Destination folder", styleSheet="font-weight: bold; margin-top: 10px;"))
         dir_layout = QHBoxLayout()
         
         # Fluent LineEdit
@@ -495,7 +484,7 @@ class DownloaderWidget(QWidget):
         dir_layout.addWidget(btn_browse_dir)
         main_layout.addLayout(dir_layout)
 
-        main_layout.addWidget(QLabel("Active Website Profile:", styleSheet="font-weight: bold; margin-top: 5px;"))
+        main_layout.addWidget(QLabel("Anime / download profile", styleSheet="font-weight: bold; margin-top: 5px;"))
         
         # Profile dropdown + a "Create Profile" button shown only when there are none.
         site_row = QHBoxLayout()
@@ -513,114 +502,9 @@ class DownloaderWidget(QWidget):
         main_layout.addLayout(site_row)
         
         self.lbl_url = QLabel("No profile selected")
+        self.lbl_url.setWordWrap(True)
         self.lbl_url.setStyleSheet("color: #888888; font-size: 12px;")
         main_layout.addWidget(self.lbl_url)
-
-        # Fluent CheckBox
-        self.chk_headless = CheckBox("Run Invisibly (Headless)")
-        self.chk_headless.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.chk_headless.setChecked(app_settings.get("headless", True))
-        self.chk_headless.toggled.connect(self.save_settings)
-        main_layout.addWidget(self.chk_headless)
-
-
-        main_layout.addWidget(QLabel("Concurrent Downloads (Max Active Episode Downloading):", styleSheet="font-weight: bold; margin-top: 5px; background: transparent;"))
-        self.chk_auto_concurrency = CheckBox("Choose automatically from my connection speed")
-        self.chk_auto_concurrency.setChecked(app_settings.get("concurrency_auto", True))
-        self.chk_auto_concurrency.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.chk_auto_concurrency.stateChanged.connect(self.on_auto_concurrency_toggled)
-        main_layout.addWidget(self.chk_auto_concurrency)
-
-        self.spin_concurrency = SpinBox()
-        self.spin_concurrency.setRange(1, 6) # Allow 1 to 6 simultaneous downloads
-        self.spin_concurrency.setValue(app_settings.get("concurrency", 3)) # Default to 3
-        self.spin_concurrency.valueChanged.connect(self.save_settings)
-        self.spin_concurrency.setFocusPolicy(Qt.FocusPolicy.StrongFocus) # Click and Tab focus only, no Wheel focus!
-        self.spin_concurrency.wheelEvent = lambda e: e.ignore() # Pass scroll events to parent
-        main_layout.addWidget(self.spin_concurrency)
-
-        self.lbl_concurrency_hint = QLabel("")
-        self.lbl_concurrency_hint.setWordWrap(True)
-        self.lbl_concurrency_hint.setStyleSheet("color: #888888; font-size: 11px; background: transparent;")
-        main_layout.addWidget(self.lbl_concurrency_hint)
-
-        main_layout.addWidget(QLabel("Notification Sound:", styleSheet="font-weight: bold; margin-top: 5px;"))
-        sound_layout = QHBoxLayout()
-        
-        self.combo_sound = ComboBox()
-        self.combo_sound.currentTextChanged.connect(self.on_sound_change)
-        self.combo_sound.setFixedHeight(40)
-        sound_layout.addWidget(self.combo_sound, 1) 
-        
-        self.btn_play_sound = PushButton(FIF.PLAY, "Play")
-        self.btn_play_sound.setFixedHeight(40)
-        self.btn_play_sound.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_play_sound.clicked.connect(self.preview_sound)
-        sound_layout.addWidget(self.btn_play_sound)
-        
-        self.btn_add_sound = PushButton(FIF.ADD, "Add Sound")
-        self.btn_add_sound.setFixedHeight(40)
-        self.btn_add_sound.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_add_sound.clicked.connect(self.browse_custom_sound)
-        sound_layout.addWidget(self.btn_add_sound)
-        
-        self.btn_delete_sound = ToolButton(FIF.DELETE, self)
-        self.btn_delete_sound.setObjectName("Danger")
-        apply_danger_style(self.btn_delete_sound)
-        self.btn_delete_sound.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_delete_sound.setFixedSize(40, 40)
-        self.btn_delete_sound.clicked.connect(self.delete_custom_sound)
-        sound_layout.addWidget(self.btn_delete_sound)
-        
-        main_layout.addLayout(sound_layout)
-        
-        self.volume_container = QWidget()
-        vol_layout = QHBoxLayout(self.volume_container)
-        vol_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.unmute_volume = app_settings.get("volume", 100)
-        
-        self.btn_mute = ToolButton(FIF.VOLUME, self)
-        self.btn_mute.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_mute.setFixedSize(40, 32)
-        self.btn_mute.clicked.connect(self.toggle_mute)
-        vol_layout.addWidget(self.btn_mute)
-        
-        # Fluent Slider
-        self.slider_vol = Slider(Qt.Orientation.Horizontal)
-        self.slider_vol.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.slider_vol.setRange(0, 100)
-        self.slider_vol.setValue(app_settings.get("volume", 100))
-        self.slider_vol.valueChanged.connect(self.on_volume_change)
-        vol_layout.addWidget(self.slider_vol, 1)
-        
-        self.txt_vol = LineEdit()
-        self.txt_vol.setText(str(self.slider_vol.value()))
-        self.txt_vol.setValidator(QIntValidator(0, 100))
-        self.txt_vol.setFixedWidth(50) 
-        self.txt_vol.textEdited.connect(self.on_volume_typed)
-        vol_layout.addWidget(self.txt_vol)
-        
-        main_layout.addWidget(self.volume_container)
-
-        self.chk_win_notify = CheckBox("Show Windows notifications")
-        self.chk_win_notify.setToolTip("When downloads finish or new episodes are found, "
-                                       "while the app isn't the window you're using.")
-        self.chk_win_notify.setChecked(bool(app_settings.get("windows_notifications", True)))
-        self.chk_win_notify.toggled.connect(self._on_win_notify_toggled)
-        main_layout.addWidget(self.chk_win_notify)
-
-        self.refresh_sound_dropdown()
-        self.on_volume_change(self.slider_vol.value())
-
-        main_layout.addWidget(QLabel("Discord Webhook:", styleSheet="font-weight: bold; margin-top: 5px;"))
-        # Masked, with an eye button that toggles it visible: anyone holding this URL
-        # can post to the channel, and it used to sit in plain text in every screenshot.
-        self.txt_webhook = SecretLineEdit()
-        self.txt_webhook.setText(app_settings.get("discord_webhook", ""))
-        self.txt_webhook.setPlaceholderText("https://discord.com/api/webhooks/...")
-        self.txt_webhook.textChanged.connect(self.save_settings)
-        main_layout.addWidget(self.txt_webhook)
 
         main_layout.addWidget(QLabel("Episodes", styleSheet="font-weight: bold; margin-top: 5px;"))
         self.ep_picker = EpisodeRangePicker()
@@ -656,12 +540,10 @@ class DownloaderWidget(QWidget):
         outer_layout.addWidget(self.scroll)
 
         signals.update_buttons.connect(self.set_buttons)
-        signals.concurrency_changed.connect(self.on_concurrency_changed)
         signals.paused_settings_changed.connect(self.on_paused_settings_changed)
         signals.profile_limits_changed.connect(self.on_profile_limits_changed)
         self.refresh_dropdown()
         self._update_episode_feedback()   # populate the live preview for the initial value
-        self.on_auto_concurrency_toggled()   # sync the spin box + hint to the saved mode
 
         # The session to offer is the one left over from the LAST run, captured now,
         # before anything in this run can start a download. Reading it a second
@@ -712,173 +594,48 @@ class DownloaderWidget(QWidget):
             if site in [self.combo_site.itemText(i) for i in range(self.combo_site.count())]:
                 self.combo_site.setCurrentText(site)
             self.txt_dir.setText(target_dir)
-            self.chk_headless.setChecked(headless)
-            self.txt_webhook.setText(webhook)
-            self.spin_concurrency.setValue(concurrency)
-            self.slider_vol.setValue(volume)
-            
-            signals.update_buttons.emit(False, True, False)
-            signals.task_started.emit()
-            threading.Thread(
-                target=run_selenium_task, 
-                args=(site, episodes, target_dir, headless, webhook, selected_sound, volume, concurrency), 
-                daemon=True
-            ).start()
+            self._begin_download({
+                "site": site, "episodes_list": episodes, "target_dir": target_dir,
+                "headless": headless, "webhook": webhook,
+                "selected_sound": selected_sound, "volume": volume,
+                "concurrency": concurrency,
+                "concurrency_auto": session.get("concurrency_auto", app_settings.get("concurrency_auto", True)),
+            })
         else:
             with config_lock:
                 app_settings.pop("unfinished_session", None)
                 save_config()
 
-    # KEEP ALL YOUR EXISTING FUNCTIONS BELOW HERE EXACTLY THE SAME!
-    # (refresh_sound_dropdown, browse_folder, save_settings, start_task, etc.)
-    # I have omitted them here to save space, but DO NOT delete your functions!
-
-    def on_sound_change(self, text):
-        data = self.combo_sound.currentData()   # file path, or SOUND_NONE, for None
-        app_settings["selected_sound"] = data if data else ""
-        save_config()
-        self._update_sound_controls()
-
-    def browse_custom_sound(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Audio File", "", "Audio Files (*.mp3 *.wav *.ogg)")
-        if file_path:
-            file_path = os.path.normpath(file_path)
-            sounds = app_settings.get("custom_sounds", [])
-            if file_path not in sounds:
-                sounds.append(file_path)
-                app_settings["custom_sounds"] = sounds
-                app_settings["selected_sound"] = file_path
-                save_config()
-                self.refresh_sound_dropdown()
-
-    def delete_custom_sound(self):
-        selected = app_settings.get("selected_sound", "")
-        sounds = app_settings.get("custom_sounds", [])
-        if selected not in sounds:
-            # The built-in default can't be deleted.
-            InfoBar.info("Built-in Sound", "The default sound can't be removed.",
-                         orient=Qt.Orientation.Horizontal, isClosable=True,
-                         position=InfoBarPosition.TOP, duration=3000, parent=self)
-            return
-        sounds.remove(selected)
-        app_settings["custom_sounds"] = sounds
-        app_settings["selected_sound"] = sounds[0] if sounds else builtin_sound_path()
-        save_config()
-        self.refresh_sound_dropdown()
-
-    def preview_sound(self):
-        selected = app_settings.get("selected_sound", "")
-        if selected and os.path.exists(selected):
-            vol = app_settings.get("volume", 100)
-            def play_preview():
-                try:
-                    import ctypes
-                    mci_vol = int(vol * 10)
-                    mci_path = selected.replace("\\", "/")
-                    ctypes.windll.winmm.mciSendStringW('close custom_audio', None, 0, None)
-                    # Always open via mpegvideo: the waveaudio device rejects
-                    # "setaudio volume" (so the slider had no effect on .wav files).
-                    ctypes.windll.winmm.mciSendStringW(f'open "{mci_path}" type mpegvideo alias custom_audio', None, 0, None)
-                    ctypes.windll.winmm.mciSendStringW(f'setaudio custom_audio volume to {mci_vol}', None, 0, None)
-                    ctypes.windll.winmm.mciSendStringW('play custom_audio', None, 0, None)
-                except Exception:
-                    pass
-            import threading
-            threading.Thread(target=play_preview, daemon=True).start()
-    def toggle_mute(self):
-        if self.slider_vol.value() > 0:
-            self.unmute_volume = self.slider_vol.value()
-            self.slider_vol.setValue(0)
-        else:
-            target = self.unmute_volume if hasattr(self, 'unmute_volume') and self.unmute_volume > 0 else 100
-            self.slider_vol.setValue(target)
-    def on_volume_typed(self, text):
-        if text:
-            try:
-                val = int(text)
-                self.slider_vol.setValue(val)
-            except ValueError: pass
-    def on_volume_change(self, value):
-        if self.txt_vol.text() != str(value):
-            self.txt_vol.setText(str(value))
-        if value == 0: self.btn_mute.setIcon(FIF.MUTE)
-        else: self.btn_mute.setIcon(FIF.VOLUME)
-        self.save_settings()
     def save_settings(self):
-        app_settings["headless"] = self.chk_headless.isChecked()
-
-        if hasattr(self, 'txt_webhook'):
-            new_wh = self.txt_webhook.text().strip()
-            if app_settings.get("discord_webhook") != new_wh:
-                app_settings["discord_webhook"] = new_wh
-                self.webhook_changed.emit(new_wh)
-
-        if hasattr(self, 'slider_vol'):
-            app_settings["volume"] = self.slider_vol.value()
-
-        # Everything below used to sit inside on_webhook_updated (a method had been
-        # pasted into the middle of this one), so the concurrency number, auto mode
-        # and the episode range were only kept in memory -- and nothing here ever
-        # wrote to disk -- unless the webhook happened to change in the same session.
+        """Save this anime's episode selection independently of app defaults."""
         site = self.combo_site.currentText()
-        app_settings["concurrency"] = self.spin_concurrency.value()
-        if hasattr(self, 'chk_auto_concurrency'):
-            app_settings["concurrency_auto"] = self.chk_auto_concurrency.isChecked()
-
         with config_lock:
-            if site and site != "No Profiles" and site in sites_data:
-                if hasattr(self, 'ep_picker'):
-                    sites_data[site]["last_episodes"] = self.ep_picker.spec()
-        # Debounce the disk write: rapid edits (e.g. holding a spinbox arrow) update
-        # memory instantly but coalesce into a single save ~400ms after the last change.
+            if site in sites_data:
+                sites_data[site]["last_episodes"] = self.ep_picker.spec()
         self._save_timer.start(400)
 
-    def on_webhook_updated(self, webhook_url: str):
-        """The webhook was changed elsewhere (the Watchlist's cloud dialog): show it here."""
-        if hasattr(self, 'txt_webhook') and self.txt_webhook.text().strip() != (webhook_url or "").strip():
-            self.txt_webhook.blockSignals(True)
-            self.txt_webhook.setText(webhook_url or "")
-            self.txt_webhook.blockSignals(False)
-
     def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", app_settings["download_dir"])
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Download Folder", app_settings["download_dir"])
         if folder:
-            self.txt_dir.setText(os.path.normpath(folder))
-            app_settings["download_dir"] = os.path.normpath(folder)
+            folder = os.path.normpath(folder)
+            self.txt_dir.setText(folder)
+            with config_lock:
+                app_settings["download_dir"] = folder
             save_config()
-    def refresh_sound_dropdown(self):
-        self.combo_sound.blockSignals(True)
-        self.combo_sound.clear()
-        builtin = builtin_sound_path()
-        self.combo_sound.addItem("🔕 None", userData=SOUND_NONE)
-        self.combo_sound.addItem("🔔 Default (Built-in)", userData=builtin)
-        sounds = app_settings.get("custom_sounds", [])
-        for s in sounds:
-            self.combo_sound.addItem(os.path.basename(s), userData=s)
 
-        all_paths = [SOUND_NONE, builtin] + sounds
-        selected = app_settings.get("selected_sound", "")
-        if selected in all_paths:
-            self.combo_sound.setCurrentIndex(all_paths.index(selected))
-        else:
-            self.combo_sound.setCurrentIndex(1)   # unset -> default to built-in
-            app_settings["selected_sound"] = builtin
+    def _download_defaults(self):
+        """Snapshot the saved preferences when a new download is requested."""
+        with config_lock:
+            return {
+                "headless": bool(app_settings.get("headless", True)),
+                "webhook": app_settings.get("discord_webhook", "").strip(),
+                "selected_sound": app_settings.get("selected_sound") or builtin_sound_path(),
+                "volume": app_settings.get("volume", 100),
+                "concurrency": app_settings.get("concurrency", 3),
+                "concurrency_auto": bool(app_settings.get("concurrency_auto", True)),
+            }
 
-        self._update_sound_controls()
-        self.combo_sound.blockSignals(False)
-
-    def _update_sound_controls(self):
-        # Hide preview/volume when "None" is selected -- there is nothing to play.
-        selected = app_settings.get("selected_sound", "")
-        is_none = selected == SOUND_NONE
-        if hasattr(self, 'btn_play_sound'): self.btn_play_sound.setVisible(not is_none)
-        if hasattr(self, 'volume_container'): self.volume_container.setVisible(not is_none)
-        # Delete only applies to user-added sounds. Disable it for None and the
-        # built-in default so it can't be spam-clicked (which stacked InfoBars).
-        if hasattr(self, 'btn_delete_sound'):
-            deletable = selected in app_settings.get("custom_sounds", [])
-            self.btn_delete_sound.setVisible(not is_none)
-            self.btn_delete_sound.setEnabled(deletable)
     def _profile_filler(self):
         """(cached filler numbers, whether they have ever been looked up) for the
         selected profile."""
@@ -1003,66 +760,25 @@ class DownloaderWidget(QWidget):
             self._update_episode_feedback()
 
     def on_paused_settings_changed(self, values):
-        """Mirror what was changed on the paused screen, so these controls -- and the
-        next download -- agree with what the running one now uses."""
-        for widget, value in ((self.spin_concurrency, values.get("limit")),
-                              (self.chk_auto_concurrency, values.get("auto")),
-                              (self.chk_headless, values.get("headless"))):
-            if value is None:
-                continue
-            widget.blockSignals(True)
-            if hasattr(widget, "setChecked"):
-                widget.setChecked(bool(value))
-            else:
-                widget.setValue(int(value))
-            widget.blockSignals(False)
-        # Signals were blocked above, so refresh what the auto toggle normally drives.
-        self.spin_concurrency.setEnabled(not self.chk_auto_concurrency.isChecked()
-                                         and not self._inputs_locked)
-
-        # The resume-after-restart record and "retry failed episodes" re-run with
-        # the launch settings -- carry the new ones into both.
-        updates = {k: values[src] for k, src in (("headless", "headless"),
-                                                 ("concurrency", "limit"))
-                   if values.get(src) is not None}
+        """Keep defaults, session recovery, and retry settings in sync."""
+        updates = {key: values[source] for key, source in (
+            ("headless", "headless"), ("concurrency", "limit"),
+            ("concurrency_auto", "auto")) if values.get(source) is not None}
         with config_lock:
-            for k, v in updates.items():
-                app_settings[k] = v
+            app_settings.update(updates)
             session = app_settings.get("unfinished_session")
             if session:
                 session.update(updates)
-        if getattr(self, "last_download_params", None):
+        if self.last_download_params:
             self.last_download_params.update(updates)
-        self.save_settings()
-
-    def on_auto_concurrency_toggled(self, _state=None):
-        """Auto mode owns the value, so the spin box becomes a starting point only."""
-        auto = self.chk_auto_concurrency.isChecked()
-        self.spin_concurrency.setEnabled(not auto and not self._inputs_locked)
-        self.lbl_concurrency_hint.setText(
-            "Starts here, then adjusts during the download to keep each episode "
-            "around a minute to a minute and a half."
-            if auto else
-            "Fixed at this value for every download."
-        )
-        self.save_settings()
-
-    def on_concurrency_changed(self, text):
-        """Live state from the running task (e.g. 'Concurrent: 3 (auto · ~72s/episode)')."""
-        self.lbl_concurrency_hint.setText(text)
+        self._save_timer.start(400)
 
     def set_inputs_enabled(self, enabled):
         self._inputs_locked = not enabled
         self.btn_start.setEnabled(enabled)
         self.ep_picker.setEnabled(enabled)
-        # In auto mode the controller owns the value, so the box stays read-only.
-        self.spin_concurrency.setEnabled(enabled and not self.chk_auto_concurrency.isChecked())
-        self.chk_auto_concurrency.setEnabled(enabled)
-        self.txt_webhook.setEnabled(enabled)
-        self.chk_headless.setEnabled(enabled)
-        self.btn_profile.setEnabled(enabled)
         if enabled:
-            self._update_episode_feedback()   # re-apply the invalid-spec Start gate
+            self._update_episode_feedback()
 
     def refresh_dropdown(self):
         self.combo_site.blockSignals(True)
@@ -1120,13 +836,8 @@ class DownloaderWidget(QWidget):
             else: 
                 self.lbl_url.setText("No profile selected")
 
-    def set_buttons(self, start_en, _close_en, prof_en):
-        if self.combo_site.currentText() == "No Profiles":
-            self.btn_start.setEnabled(False)
-            self.btn_profile.setEnabled(False)
-        else:
-            self.btn_start.setEnabled(start_en)
-            self.btn_profile.setEnabled(prof_en)
+    def set_buttons(self, start_en, _close_en, _prof_en):
+        self.set_inputs_enabled(start_en and self.combo_site.currentText() != "No Profiles")
 
     def retry_episodes(self, episodes):
         """Re-download just `episodes` from the most recent task.
@@ -1240,11 +951,7 @@ class DownloaderWidget(QWidget):
             "site": site_key,
             "episodes_list": episodes_list,
             "target_dir": target_dir,
-            "headless": self.chk_headless.isChecked(),
-            "webhook": self.txt_webhook.text().strip(),
-            "selected_sound": app_settings.get("selected_sound", ""),
-            "volume": app_settings.get("volume", 100),
-            "concurrency": app_settings.get("concurrency", 3),
+            **self._download_defaults(),
             "step_paths_override": pinned_flow,
         })
 
@@ -1368,11 +1075,7 @@ class DownloaderWidget(QWidget):
             "site": site,
             "episodes_list": episodes_list,
             "target_dir": target_dir,
-            "headless": self.chk_headless.isChecked(),
-            "webhook": self.txt_webhook.text().strip(),
-            "selected_sound": app_settings.get("selected_sound", ""),
-            "volume": app_settings.get("volume", 100),
-            "concurrency": app_settings.get("concurrency", 3),
+            **self._download_defaults(),
         }
 
         self._checking = True
@@ -1410,11 +1113,6 @@ class DownloaderWidget(QWidget):
             return
         self._begin_download(params)
 
-    def _on_win_notify_toggled(self, on):
-        with config_lock:
-            app_settings["windows_notifications"] = bool(on)
-        save_config()
-
     def _confirm_disk_space(self, p):
         """Before a Start: warn when the run likely won't fit on the drive.
         True to go ahead. (Watchlist and Discord downloads aren't asked -- nobody
@@ -1425,7 +1123,7 @@ class DownloaderWidget(QWidget):
         from core.concurrency import ConcurrencyController
         safe = safe_folder_name(p["site"])
         # Auto concurrency may climb to its maximum, so plan for that many at once.
-        parallel = (ConcurrencyController.MAX_LIMIT if app_settings.get("concurrency_auto", True)
+        parallel = (ConcurrencyController.MAX_LIMIT if p.get("concurrency_auto", app_settings.get("concurrency_auto", True))
                     else int(p.get("concurrency") or 1))
         per_ep, short = check_space(p["target_dir"], os.path.join(p["target_dir"], safe),
                                     len(p["episodes_list"]), temp_dir=tempfile.gettempdir(),
@@ -1468,6 +1166,7 @@ class DownloaderWidget(QWidget):
                 "selected_sound": p["selected_sound"],
                 "volume": p["volume"],
                 "concurrency": p["concurrency"],
+                "concurrency_auto": p.get("concurrency_auto", app_settings.get("concurrency_auto", True)),
             }
             save_config()
 
@@ -1478,5 +1177,6 @@ class DownloaderWidget(QWidget):
             args=(p["site"], p["episodes_list"], p["target_dir"], p["headless"],
                   p["webhook"], p["selected_sound"], p["volume"], p["concurrency"],
                   p.get("step_paths_override")),
+            kwargs={"concurrency_auto": p.get("concurrency_auto")},
             daemon=True
         ).start()

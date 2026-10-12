@@ -1388,7 +1388,7 @@ def aria2c_downloader(ep, url, final_name, cookies, ua, temp_dir, cancel_event, 
     else:
         on_failed(ep)
 
-def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_url, selected_sound, volume , concurrency, step_paths_override=None):
+def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_url, selected_sound, volume , concurrency, step_paths_override=None, *, concurrency_auto=None):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -1414,7 +1414,8 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
     # mode pins it to the user's value. Either way the throttle reads controller.limit.
     from core.concurrency import ConcurrencyController
     with config_lock:
-        auto_concurrency = bool(app_settings.get("concurrency_auto", True))
+        auto_concurrency = (bool(app_settings.get("concurrency_auto", True))
+                            if concurrency_auto is None else bool(concurrency_auto))
     controller = ConcurrencyController(start=concurrency, enabled=auto_concurrency)
     signals.concurrency_changed.emit(controller.describe())
     with _run_lock:

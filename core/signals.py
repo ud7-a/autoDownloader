@@ -20,7 +20,7 @@ class WorkerSignals(QObject):
     concurrency_changed = pyqtSignal(str)   # human-readable auto-concurrency state
     remote_commands_received = pyqtSignal(list)
     # Settings changed on the paused download screen: {"limit", "auto", "headless"}.
-    # The Downloader tab mirrors them so its controls and saved settings agree.
+    # Downloader keeps resume/retry settings in sync; Settings refreshes the defaults.
     paused_settings_changed = pyqtSignal(dict)
     # A run ended on its own (not cancelled by the user), success or not:
     # {"profile": str, "episodes": [ints actually in the run], "failed": [ints]}.

@@ -11,10 +11,9 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from qfluentwidgets import (PushButton, PrimaryPushButton, SimpleCardWidget, SmoothScrollArea,
                             ToolButton, FluentIcon as FIF, InfoBar, InfoBarPosition,
                             IndeterminateProgressRing, MessageBoxBase, SubtitleLabel,
-                            BodyLabel, CheckBox, SwitchButton)
+                            BodyLabel, CheckBox)
 
-from utils.config import (get_watchlist, remove_watch, update_watch, app_settings, APP_DIR,
-                          cloud_register_and_sync, cloud_unsubscribe, save_config)
+from utils.config import get_watchlist, remove_watch, update_watch, app_settings, APP_DIR
 from ui.styles import apply_danger_style, apply_tinted_style, rounded_pixmap, show_undo
 from ui.search_tab import extract_domain, site_display_name, site_icon, is_movie_link
 
@@ -382,40 +381,6 @@ class EpisodeSelectDialog(MessageBoxBase):
         self.selected = [ep for ep, cb in self._boxes.items() if cb.isChecked()]
 
 
-class CloudSettingsDialog(MessageBoxBase):
-    """Modal dialog for configuring Discord Webhook for cloud notifications."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.titleLabel = SubtitleLabel("Cloud Discord Notifications", self)
-        self.descLabel = BodyLabel(
-            "Enter your Discord Webhook URL to receive automatic release alerts\n"
-            "on Discord even when your PC is turned off.", self)
-        self.descLabel.setStyleSheet("color: #888888; font-size: 12px;")
-
-        self.wh_label = BodyLabel("Discord Webhook URL:", self)
-        # Masked like the Downloader's copy: the URL alone is enough to post there.
-        from ui.secret_field import SecretLineEdit
-        self.wh_input = SecretLineEdit(self)
-        self.wh_input.setPlaceholderText("https://discord.com/api/webhooks/...")
-        self.wh_input.setText(app_settings.get("discord_webhook", ""))
-
-        self.hintLabel = BodyLabel(
-            "💡 How to get one: Discord Channel Settings ➔ Integrations ➔ Webhooks ➔ Copy Webhook URL", self)
-        self.hintLabel.setStyleSheet("color: #666666; font-size: 11px;")
-
-        self.viewLayout.addWidget(self.titleLabel)
-        self.viewLayout.addWidget(self.descLabel)
-        self.viewLayout.addSpacing(8)
-        self.viewLayout.addWidget(self.wh_label)
-        self.viewLayout.addWidget(self.wh_input)
-        self.viewLayout.addSpacing(4)
-        self.viewLayout.addWidget(self.hintLabel)
-
-        self.widget.setMinimumWidth(480)
-        self.yesButton.setText("Save & Connect")
-        self.cancelButton.setText("Cancel")
-
-
 class WatchCard(SimpleCardWidget):
     check_one = pyqtSignal(str)                  # url
     remove_one = pyqtSignal(str)                 # url
@@ -551,7 +516,6 @@ class WatchlistWidget(QWidget):
     download_new_signal = pyqtSignal(str, str, str, int, str)
     download_all_signal = pyqtSignal(list)  # [(title, template, domain, max_ep, episodes_str), ...]
     new_episodes_found = pyqtSignal(int)   # total new episodes -> main window opens this tab
-    webhook_changed = pyqtSignal(str)     # notifies when Discord webhook is edited
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -594,43 +558,6 @@ class WatchlistWidget(QWidget):
         sub.setStyleSheet("color: #999999; background: transparent;")
         root.addWidget(sub)
 
-        # Cloud Notification Settings Card (syncs with cloud service for alerts when PC is off)
-        self.cloud_card = SimpleCardWidget()
-        self.cloud_card.setFixedHeight(54)
-        c_layout = QHBoxLayout(self.cloud_card)
-        c_layout.setContentsMargins(14, 6, 14, 6)
-        c_layout.setSpacing(12)
-
-        lbl_cloud_ico = QLabel("☁️")
-        lbl_cloud_ico.setStyleSheet("font-size: 18px; background: transparent;")
-        c_layout.addWidget(lbl_cloud_ico)
-
-        c_info = QVBoxLayout()
-        c_info.setSpacing(1)
-        lbl_cloud_t = QLabel("Cloud Discord Notifications (When PC is off)")
-        lbl_cloud_t.setFont(QFont("Segoe UI Variable", 10, QFont.Weight.Bold))
-        lbl_cloud_t.setStyleSheet("color: #ffffff; background: transparent;")
-        c_info.addWidget(lbl_cloud_t)
-
-        self.lbl_cloud_status = QLabel("Disabled")
-        self.lbl_cloud_status.setStyleSheet("color: #888888; font-size: 11px; background: transparent;")
-        c_info.addWidget(self.lbl_cloud_status)
-        c_layout.addLayout(c_info, 1)
-
-        self.btn_cloud_cfg = ToolButton(FIF.SETTING, self.cloud_card)
-        self.btn_cloud_cfg.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cloud_cfg.setToolTip("Configure Cloud Service URL & Discord Webhook")
-        self.btn_cloud_cfg.clicked.connect(self._open_cloud_config)
-        c_layout.addWidget(self.btn_cloud_cfg)
-
-        self.switch_cloud = SwitchButton(self.cloud_card)
-        self.switch_cloud.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.switch_cloud.setChecked(bool(app_settings.get("cloud_notify_enabled", False)))
-        self.switch_cloud.checkedChanged.connect(self._on_cloud_toggle)
-        c_layout.addWidget(self.switch_cloud)
-
-        root.addWidget(self.cloud_card)
-
         self.scroll = SmoothScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
@@ -649,11 +576,9 @@ class WatchlistWidget(QWidget):
         self.col.addWidget(self.empty)
 
         self.refresh_cards()
-        self._update_cloud_ui()
 
     # ---- data <-> cards ----
     def refresh_cards(self):
-        self._update_cloud_ui()
         # Drop old cards.
         for c in self._cards.values():
             c.setParent(None)
@@ -954,109 +879,3 @@ class WatchlistWidget(QWidget):
         InfoBar.success("Queued", f"Downloading new episodes for {len(items)} anime.",
                         position=InfoBarPosition.TOP, duration=4000, parent=self.window())
         self.download_all_signal.emit([i for _, i in items])
-
-    # ---- Cloud sync handlers ----
-    def _update_cloud_ui(self):
-        enabled = bool(app_settings.get("cloud_notify_enabled", False))
-        sub_id = app_settings.get("cloud_subscriber_id", "")
-        self.switch_cloud.blockSignals(True)
-        self.switch_cloud.setChecked(enabled)
-        self.switch_cloud.blockSignals(False)
-
-        if enabled and sub_id:
-            n = len(get_watchlist())
-            self.lbl_cloud_status.setText(f"✓ Active — {n} anime synced to cloud (checks even when PC is off)")
-            self.lbl_cloud_status.setStyleSheet("color: #51cf66; font-size: 11px; background: transparent;")
-        elif enabled:
-            self.lbl_cloud_status.setText("Connecting / Registering with cloud...")
-            self.lbl_cloud_status.setStyleSheet("color: #f39c12; font-size: 11px; background: transparent;")
-        else:
-            self.lbl_cloud_status.setText("Disabled (PC must be on to check)")
-            self.lbl_cloud_status.setStyleSheet("color: #888888; font-size: 11px; background: transparent;")
-
-    def _open_cloud_config(self):
-        from utils.config import DEFAULT_CLOUD_SERVICE_URL
-        dlg = CloudSettingsDialog(self.window())
-        if not dlg.exec():
-            # If user cancelled and cloud is not actively registered, turn switch back off
-            if not app_settings.get("cloud_subscriber_id"):
-                self.switch_cloud.blockSignals(True)
-                self.switch_cloud.setChecked(False)
-                self.switch_cloud.blockSignals(False)
-            self._update_cloud_ui()
-            return
-
-        new_wh = dlg.wh_input.text().strip()
-        if not new_wh:
-            # User submitted an empty webhook
-            if not app_settings.get("cloud_subscriber_id"):
-                self.switch_cloud.blockSignals(True)
-                self.switch_cloud.setChecked(False)
-                self.switch_cloud.blockSignals(False)
-            self._update_cloud_ui()
-            InfoBar.warning("Webhook Required", "A Discord Webhook URL is required to enable cloud notifications.",
-                            position=InfoBarPosition.TOP, duration=4000, parent=self.window())
-            return
-
-        s_url = app_settings.get("cloud_service_url") or DEFAULT_CLOUD_SERVICE_URL
-        app_settings["cloud_service_url"] = s_url
-        app_settings["discord_webhook"] = new_wh
-        save_config()
-        self.webhook_changed.emit(new_wh)
-
-        self._connect_cloud(s_url, new_wh)
-
-    def on_webhook_updated(self, webhook_url: str):
-        self._update_cloud_ui()
-
-    def _on_cloud_toggle(self, checked):
-        from utils.config import DEFAULT_CLOUD_SERVICE_URL
-        if checked:
-            s_url = app_settings.get("cloud_service_url") or DEFAULT_CLOUD_SERVICE_URL
-            wh_url = app_settings.get("discord_webhook", "")
-            if not wh_url:
-                self._open_cloud_config()
-                return
-            self._connect_cloud(s_url, wh_url)
-        else:
-            import threading
-            def _bg_unsub():
-                from utils.config import set_windows_autostart
-                cloud_unsubscribe()
-                set_windows_autostart(False)
-            threading.Thread(target=_bg_unsub, daemon=True).start()
-            self._update_cloud_ui()
-            InfoBar.info("Cloud Sync Disabled", "Removed registration from cloud service.",
-                         position=InfoBarPosition.TOP, duration=3000, parent=self.window())
-
-    def _connect_cloud(self, service_url, webhook_url):
-        import threading
-        self.lbl_cloud_status.setText("Registering with cloud service...")
-        self.lbl_cloud_status.setStyleSheet("color: #f39c12; font-size: 11px; background: transparent;")
-
-        def _bg_reg():
-            ok, msg = cloud_register_and_sync(service_url, webhook_url)
-            from PyQt6.QtCore import QTimer
-            if ok:
-                QTimer.singleShot(0, lambda: self._on_reg_success(msg))
-            else:
-                QTimer.singleShot(0, lambda: self._on_reg_failed(msg))
-
-        threading.Thread(target=_bg_reg, daemon=True).start()
-
-    def _on_reg_success(self, msg):
-        self._update_cloud_ui()
-        # Startup entry AND a watcher right now -- registering alone left nothing
-        # to react to a Discord click until the next launch or login.
-        from utils.config import start_background_watcher
-        start_background_watcher()
-        InfoBar.success("Cloud Notifications & Remote Queue Active", msg,
-                        position=InfoBarPosition.TOP, duration=4000, parent=self.window())
-
-    def _on_reg_failed(self, msg):
-        self.switch_cloud.blockSignals(True)
-        self.switch_cloud.setChecked(False)
-        self.switch_cloud.blockSignals(False)
-        self._update_cloud_ui()
-        InfoBar.error("Cloud Connection Failed", msg,
-                      position=InfoBarPosition.TOP, duration=5000, parent=self.window())
