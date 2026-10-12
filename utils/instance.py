@@ -2,8 +2,9 @@
 very top of main.py, before Qt is imported, so a second launch that only has to
 hand something over costs the interpreter's start and nothing else.
 
-The running app's window listens for a registered window message (see
-AppWindow.nativeEvent); a launch with --library posts it and exits.
+The running app's window listens for registered window messages (see
+AppWindow.nativeEvent); a launch with --library, or a Play next launch whose
+episode isn't downloaded, posts one and exits.
 """
 import sys
 
@@ -13,6 +14,7 @@ MUTEX_NAME = "Local\\AED_Main_App_Running_Mutex"
 # titled "Auto Episodes Downloader" too.
 WINDOW_TITLE_PREFIX = "Auto Episodes Downloader | "
 OPEN_LIBRARY_MESSAGE = "AED_OPEN_LIBRARY"
+DOWNLOAD_NEXT_MESSAGE = "AED_DOWNLOAD_NEXT"
 
 SYNCHRONIZE = 0x00100000
 SW_RESTORE = 9
@@ -41,11 +43,16 @@ def _user32():
     return u
 
 
-def open_library_message_id():
-    """The registered message the main window treats as "show the Library"."""
+def message_id(name):
+    """A registered window message (the same number in every process)."""
     if sys.platform != "win32":
         return 0
-    return _user32().RegisterWindowMessageW(OPEN_LIBRARY_MESSAGE)
+    return _user32().RegisterWindowMessageW(name)
+
+
+def open_library_message_id():
+    """The registered message the main window treats as "show the Library"."""
+    return message_id(OPEN_LIBRARY_MESSAGE)
 
 
 def app_is_running():
@@ -97,6 +104,19 @@ def find_main_window():
 def forward_open_library():
     """If the app is already running, bring its window up on the Library and
     return True (this launch can exit). False when there is nothing to hand to."""
+    return forward(OPEN_LIBRARY_MESSAGE)
+
+
+def forward_download_next():
+    """The Play next shortcut found the next episode isn't downloaded: the
+    running app sets the Downloader up for it (AppWindow.download_next works out
+    which anime from the Library, as this launch did)."""
+    return forward(DOWNLOAD_NEXT_MESSAGE)
+
+
+def forward(name):
+    """Bring the running app's window up and post it the registered message
+    `name`. True when handed over; False when there is nothing to hand to."""
     if not app_is_running():
         return False
     hwnd = find_main_window()
@@ -108,4 +128,4 @@ def forward_open_library():
     if u.IsIconic(hwnd):
         u.ShowWindow(hwnd, SW_RESTORE)
     u.SetForegroundWindow(hwnd)
-    return bool(u.PostMessageW(hwnd, open_library_message_id(), 0, 0))
+    return bool(u.PostMessageW(hwnd, message_id(name), 0, 0))

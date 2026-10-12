@@ -12,7 +12,10 @@ class WorkerSignals(QObject):
     remove_active_download = pyqtSignal(int)
     task_started = pyqtSignal()
     task_cancelled = pyqtSignal()
-    update_available = pyqtSignal(str, str)
+    # A newer release (core/updater.py): {"version", "url", "size", "sha256", "manual"}.
+    update_available = pyqtSignal(dict)
+    # A check from the "Check for updates" button that found no update: (level, message).
+    update_check_result = pyqtSignal(str, str)
     add_picked_step = pyqtSignal(object, str)
     concurrency_changed = pyqtSignal(str)   # human-readable auto-concurrency state
     remote_commands_received = pyqtSignal(list)

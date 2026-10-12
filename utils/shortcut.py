@@ -1,15 +1,20 @@
 """Global keyboard shortcuts: key combinations that work from anywhere in Windows,
 whether the app is running or not.
 
-  * Library   -- opens the app straight on the Library;
-  * Play next -- plays the next episode of what you're watching in mpv.net,
-                 without opening the app window at all (utils/quick_play.py).
+  * Library           -- opens the app straight on the Library;
+  * Continue watching -- continues what you're watching in mpv.net (an episode
+                         left part-way resumes, else the next one starts),
+                         without opening the app window (utils/quick_play.py).
 
 Windows does the listening. Each action is a Start-menu shortcut with a hotkey
-("Auto Episodes Downloader - Library", "... - Play next"); Explorer registers
-hotkeys of Start-menu shortcuts itself, so nothing of ours has to stay running.
-The shortcut starts the app with that action's argument (--library,
+("Auto Episodes Downloader - Library", "... - Continue watching"); Explorer
+registers hotkeys of Start-menu shortcuts itself, so nothing of ours has to stay
+running. The shortcut starts the app with that action's argument (--library,
 --play-next), which main.py handles before even importing Qt.
+
+Continue watching was first called "Play next": its action key, argument and
+settings keep that name, so existing shortcuts and settings still work, and the
+startup check moves an old "... - Play next" shortcut to the new name.
 
 Keys are named by their virtual-key code, not the character they type, so a
 combination works the same on every keyboard layout (on an Arabic layout the L
@@ -33,13 +38,14 @@ ACTIONS = {
         "done": "opens the Library from anywhere.",
     },
     "play_next": {
-        "title": "Play the next episode",
-        "file": "Auto Episodes Downloader - Play next.lnk",
+        "title": "Continue watching",
+        "file": "Auto Episodes Downloader - Continue watching.lnk",
+        "old_files": ["Auto Episodes Downloader - Play next.lnk"],
         "arg": "--play-next",
         "setting": "play_next_hotkey",
         "target_setting": "play_next_hotkey_target",
-        "description": "Play the next episode of what you're watching",
-        "done": "plays your next episode from anywhere.",
+        "description": "Continue watching where you left off",
+        "done": "continues what you're watching from anywhere.",
     },
 }
 
@@ -316,6 +322,8 @@ def conflicts(hotkey, current="", action="library"):
     ours = {}
     for name, info in ACTIONS.items():
         ours[os.path.normcase(shortcut_path(name))] = info["title"]
+        for old in info.get("old_files", ()):          # not yet moved by health()
+            ours[os.path.normcase(os.path.join(os.path.dirname(shortcut_path(name)), old))] = info["title"]
         if name != action and current_hotkey(name) == hotkey:
             out.append(f"Your “{info['title']}” shortcut already uses {hotkey}.")
     for name in shortcuts_using(hotkey, skip=list(ours)):
@@ -573,6 +581,31 @@ def refresh(settings):
     return wrote
 
 
+def _retire_old_names(action, info, settings, wait):
+    """A shortcut still saved under an earlier name ("... - Play next.lnk"):
+    delete it and carry its key over, so health() writes it under the current
+    name. Not renamed in place -- a moved .lnk's hotkey is never registered."""
+    changed = False
+    folder = os.path.dirname(shortcut_path(action))
+    for name in info.get("old_files", ()):
+        old = os.path.join(folder, name)
+        if not os.path.exists(old):
+            continue
+        hotkey = from_lnk_hotkey(read_lnk_hotkey(old))
+        try:
+            os.remove(old)
+        except OSError:
+            continue
+        _notify_shell(old)
+        changed = True
+        if hotkey:
+            _wait(lambda: not is_taken(hotkey), wait)    # Explorer lets go of it first
+            if not os.path.exists(shortcut_path(action)):
+                settings[info["setting"]] = hotkey
+            settings.pop(info["target_setting"], None)  # written again below
+    return changed
+
+
 def health(settings, wait=3.0):
     """The startup check of every shortcut. Returns (settings changed, warnings).
 
@@ -590,6 +623,7 @@ def health(settings, wait=3.0):
     if sys.platform != "win32":
         return changed, warnings
     for action, info in ACTIONS.items():
+        changed |= _retire_old_names(action, info, settings, wait)
         path = shortcut_path(action)
         on_file = current_hotkey(action) if os.path.exists(path) else ""
         if on_file and on_file != settings.get(info["setting"]):

@@ -29,8 +29,11 @@ turns that heading into the version number when the release is made.
   anywhere in Windows:
   - **Open the Library** — jumps there instantly when the app is open, starts
     on it when it isn't.
-  - **Play the next episode** — starts the next episode of what you're
-    watching in mpv.net without opening the app at all.
+  - **Continue watching** — continues the anime you watched last in mpv.net,
+    without opening the app at all: an episode you stopped part-way resumes
+    where you left off, otherwise the next one starts. If it isn't downloaded
+    yet, the app opens on the Downloader with that anime and its missing
+    episodes already selected.
   - Any key with Ctrl, Alt or Shift; the app checks it against Windows, other
     shortcuts and running apps, lets you test it live, and repairs a shortcut
     that stopped working when it starts.
@@ -66,3 +69,18 @@ turns that heading into the version number when the release is made.
 - Every hint now uses the app's own Fluent tooltip, and dropdowns open smoothly
   instead of stuttering.
 - mpv.net: **Ctrl+1** (shaders off/on) works again on newer mpv.net versions.
+
+### 🔄 Updates
+- **Check for updates** button at the bottom of the sidebar.
+- The update download can be cancelled, and a stalled connection no longer
+  freezes the app.
+- The downloaded setup is checked against the release before it runs, and the
+  app closes normally to install it (your settings are saved first). You're
+  warned if a download is still running.
+- If an update fails, you can try again right away, and the reason is shown
+  and written to `updater.log`.
+- Updating works for Windows user names with an apostrophe or non-English
+  letters.
+- An update now replaces the app's files cleanly instead of copying the new
+  ones over the old (old files were left behind), and leftover update
+  downloads are deleted.

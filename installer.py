@@ -4,6 +4,16 @@ import shutil
 import subprocess
 import ctypes
 
+def fill_template(ps_content, values):
+    """Put each value into its '{name}' slot. Every slot sits inside a
+    single-quoted PowerShell string, where the only special character is ' --
+    written ''. Unescaped, a profile like C:\\Users\\O'Brien ended the string
+    early and the whole helper failed to parse, so nothing was installed."""
+    for name, value in values.items():
+        ps_content = ps_content.replace("{" + name + "}", str(value).replace("'", "''"))
+    return ps_content
+
+
 def main():
     # 1. Determine where PyInstaller extracted the bundled directory
     if not getattr(sys, 'frozen', False):
@@ -264,16 +274,18 @@ try {
 Log "Step 9: Finalizing and deleting helper script..."
 try { Remove-Item -LiteralPath $PSCommandPath -Force } catch {}
 """
-        # Cleanly replace all template placeholders safely
-        ps_content = (ps_content
-                      .replace("{is_silent_update}", str(is_silent_update))
-                      .replace("{dest_dir}", dest_dir)
-                      .replace("{temp_extract_dir}", temp_extract_dir)
-                      .replace("{launcher_dir}", launcher_dir)
-                      .replace("{launcher_name}", launcher_name)
-                      .replace("{launcher_exe}", launcher_exe))
+        ps_content = fill_template(ps_content, {
+            "is_silent_update": str(is_silent_update),
+            "dest_dir": dest_dir,
+            "temp_extract_dir": temp_extract_dir,
+            "launcher_dir": launcher_dir,
+            "launcher_name": launcher_name,
+            "launcher_exe": launcher_exe,
+        })
 
-        with open(ps1_path, "w", encoding="utf-8") as f:
+        # With a BOM: Windows PowerShell 5.1 reads a .ps1 without one as the ANSI
+        # code page, which garbles an Arabic or accented user name in the paths.
+        with open(ps1_path, "w", encoding="utf-8-sig") as f:
             f.write(ps_content)
 
         # Launch the helper detached and headless via PowerShell. -ExecutionPolicy Bypass
@@ -282,6 +294,9 @@ try { Remove-Item -LiteralPath $PSCommandPath -Force } catch {}
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-WindowStyle", "Hidden", "-File", ps1_path],
             close_fds=True,
+            # Not the inherited directory: during an update that was the app
+            # folder, and a process sitting in it stops the helper deleting it.
+            cwd=temp_dir,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         )
 

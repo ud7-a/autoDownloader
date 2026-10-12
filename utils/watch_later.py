@@ -81,7 +81,10 @@ def _load():
 
 def _save(data):
     os.makedirs(os.path.dirname(FILE), exist_ok=True)
-    tmp = FILE + ".tmp"
+    # Per process: the Play next shortcut (utils/quick_play.py) saves from its
+    # own process while the app may be saving too; a shared temp name let one
+    # write over the other's half-written file.
+    tmp = f"{FILE}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, FILE)

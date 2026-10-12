@@ -2550,10 +2550,14 @@ class ShippedImportTests(unittest.TestCase):
                 if name in self.DIST_TO_MODULE:
                     declared.add(self.DIST_TO_MODULE[name])
         local = {"ui", "core", "utils", "main", "tools"}
+        # Bundled only into the sandbox update test's build, imported under
+        # `except ImportError` (core/updater.py): never in a release, on purpose.
+        test_build_only = {"aed_update_test"}
         missing = []
         for p in self.client_files():
             for line, mod in self.imports(p):
-                if mod in sys.stdlib_module_names or mod in local or mod in declared:
+                if (mod in sys.stdlib_module_names or mod in local or mod in declared
+                        or mod in test_build_only):
                     continue
                 missing.append(f"{os.path.relpath(p, root)}:{line} imports {mod!r}")
         self.assertEqual(missing, [], "not installed in the release build")
@@ -5386,7 +5390,7 @@ class LibraryShortcutTests(unittest.TestCase):
             header[0x40], header[0x41] = value & 0xFF, value >> 8
             with open(os.path.join(ours, "play_next.lnk"), "wb") as f:
                 f.write(bytes(header))
-            self.assertEqual(["Your “Play the next episode” shortcut already uses Ctrl+Alt+P."],
+            self.assertEqual(["Your “Continue watching” shortcut already uses Ctrl+Alt+P."],
                              shortcut.conflicts("Ctrl+Alt+P", action="library"))
             self.assertEqual([], shortcut.conflicts("Ctrl+Alt+P", action="play_next"))
         self.assertEqual(["AMD Radeon Software uses Ctrl+Shift+E for start/stop recording by default."],
@@ -5448,7 +5452,7 @@ class LibraryShortcutTests(unittest.TestCase):
         program, args, _cwd, _icon = shortcut.launch_target("play_next")
         self.assertTrue(args.endswith("--play-next"))
         self.assertTrue(shortcut.shortcut_path("play_next").endswith(
-            "Auto Episodes Downloader - Play next.lnk"))
+            "Auto Episodes Downloader - Continue watching.lnk"))
         self.assertNotEqual(shortcut.shortcut_path("library"), shortcut.shortcut_path("play_next"))
 
     def _health_env(self, files, taken):
@@ -5508,6 +5512,30 @@ class LibraryShortcutTests(unittest.TestCase):
         # Still not held after rewriting -> the user is told what to do.
         self.assertEqual(2, len(warnings))
         self.assertIn("Sign out of Windows and back in", warnings[0])
+
+    def test_an_old_play_next_shortcut_moves_to_continue_watching(self):
+        """The action was renamed; a shortcut saved as "... - Play next.lnk" is
+        deleted and written again under the new name with the same key (a renamed
+        .lnk would never have its key registered)."""
+        from utils import shortcut
+        installs = self._health_env({}, taken=set())
+        folder = os.path.dirname(shortcut.shortcut_path("play_next"))
+        old = os.path.join(folder, "Auto Episodes Downloader - Play next.lnk")
+        header = bytearray(0x4C)
+        header[:4] = b"\x4c\x00\x00\x00"
+        value = shortcut.to_lnk_hotkey("Ctrl+Alt+N")
+        header[0x40], header[0x41] = value & 0xFF, value >> 8
+        with open(old, "wb") as f:
+            f.write(bytes(header))
+        settings = {"play_next_hotkey": "Ctrl+Alt+N",
+                    "play_next_hotkey_target": shortcut.target_signature("play_next")}
+        changed, _warnings = shortcut.health(settings, wait=0)
+        self.assertTrue(changed)
+        self.assertFalse(os.path.exists(old))
+        self.assertEqual([("play_next", "Ctrl+Alt+N")], installs)    # under the new name
+        self.assertTrue(os.path.exists(shortcut.shortcut_path("play_next")))
+        self.assertEqual("Ctrl+Alt+N", settings["play_next_hotkey"])
+        self.assertEqual(shortcut.target_signature("play_next"), settings["play_next_hotkey_target"])
 
     def _window(self, **kw):
         from unittest import mock
@@ -5814,37 +5842,484 @@ class QuickPlayTests(unittest.TestCase):
         return url
 
     def test_picks_the_most_recently_played_with_its_next_episode_on_disk(self):
-        from utils.quick_play import pick_next
+        from utils.quick_play import pick_next, decide
         wl = self.wl
         self._anime("Old Show", [3, 4], [1, 2], wl.WATCHING, played_ts=100)
         self._anime("Recent Show", [5, 6, 7], [1, 2, 3, 4], wl.WATCHING, played_ts=200)
-        self._anime("Not Downloaded", [], [1], wl.WATCHING, played_ts=300)   # ep 2 not on disk
+        self._anime("All Watched", [1, 2], [1, 2], wl.WATCHING, played_ts=300, max_ep=2)
         self._anime("Saved For Later", [1], [], wl.LATER, played_ts=400)    # not being watched
         entry, part, ep, files = pick_next(wl.entries(), self.downloads)
+        # Nothing left of "All Watched": the next most recent one plays.
         self.assertEqual(("Recent Show", 0, 5), (entry["title"], part, ep))
         self.assertEqual(["Recent Show Ep5.mp4", "Recent Show Ep6.mp4", "Recent Show Ep7.mp4"],
                          [os.path.basename(f) for f in files])               # the rest queued
         self.assertIsNone(pick_next([], self.downloads))
+        self.assertIsNone(decide([], self.downloads))
 
-    def test_plays_in_mpvnet_or_says_there_is_nothing(self):
+    def test_a_missing_next_episode_is_downloaded_not_swapped_for_another_anime(self):
+        """You watched A Ep3, then B Ep5. B Ep6 isn't on disk: Play next doesn't
+        quietly play A Ep4 -- B's episodes from 6 are to be downloaded."""
+        from utils.quick_play import decide, pick_next
+        wl = self.wl
+        self._anime("Show A", [4, 5], [1, 2, 3], wl.WATCHING, played_ts=100)
+        self._anime("Show B", [5, 9], [1, 2, 3, 4, 5], wl.WATCHING, played_ts=200)
+        kind, entry, part, ep = decide(wl.entries(), self.downloads)
+        self.assertEqual(("download", "Show B", 0, 6), (kind, entry["title"], part, ep))
+        self.assertIsNone(pick_next(wl.entries(), self.downloads))
+        # The Downloader's range: from the missing one to the last, skipping
+        # what's already on disk.
+        self.assertEqual([6, 7, 8, 10, 11, 12],
+                         wl.missing_from(entry, part, ep, self.downloads))
+
+    def test_an_anime_that_cant_be_downloaded_is_passed_over(self):
+        from utils.quick_play import decide
+        wl = self.wl
+        self._anime("Show A", [4], [1, 2, 3], wl.WATCHING, played_ts=100)
+        url = self._anime("Folder Only", [], [1], wl.WATCHING, played_ts=200)
+        wl.set_parts(url, [{"template": "", "max_ep": 12}])                 # no site page
+        wl.link_profile(url, 0, "Folder Only")
+        kind, entry, _part, ep = decide(wl.entries(), self.downloads)[:4]
+        self.assertEqual(("play", "Show A", 4), (kind, entry["title"], ep))
+
+    def test_play_next_plays_asks_for_a_download_or_says_there_is_nothing(self):
         from unittest import mock
         from utils import quick_play
         wl = self.wl
         settings = {"download_dir": self.downloads, "play_in_mpvnet": True}
         with mock.patch.object(quick_play, "_settings", return_value=settings), \
                 mock.patch("utils.mpvnet.find_mpvnet", return_value=(r"C:\mpv\mpvnet.exe", "7")), \
+                mock.patch.object(quick_play, "catch_up") as catch_up, \
                 mock.patch.object(quick_play.subprocess, "Popen") as popen:
-            played, message = quick_play.play_next()
-            self.assertFalse(played)                                # nothing to continue
+            status, message, request = quick_play.play_next()
+            self.assertEqual(("nothing", None), (status, request))
             popen.assert_not_called()
-            self._anime("Recent Show", [5, 6], [1, 2, 3, 4], wl.WATCHING, played_ts=200)
-            played, message = quick_play.play_next()
-            self.assertTrue(played)
+            catch_up.assert_called_with(r"C:\mpv\mpvnet.exe")      # the log first, every time
+
+            url = self._anime("Recent Show", [5, 6], [1, 2, 3, 4], wl.WATCHING, played_ts=200)
+            status, message, request = quick_play.play_next()
+            self.assertEqual("played", status)
             args = popen.call_args[0][0]
             self.assertEqual(r"C:\mpv\mpvnet.exe", args[0])
             self.assertEqual(["Recent Show Ep5.mp4", "Recent Show Ep6.mp4"],
                              [os.path.basename(a) for a in args[1:]])
             self.assertIn("episode 5", message)
+
+            popen.reset_mock()
+            wl.set_watched(url, 0, [1, 2, 3, 4, 5, 6])
+            status, message, request = quick_play.play_next()
+            self.assertEqual("download", status)
+            popen.assert_not_called()
+            self.assertEqual({"url": url, "part": 0, "ep": 7, "title": "Recent Show"}, request)
+            self.assertIn("episode 7 isn't downloaded", message)
+
+    def test_play_next_catches_up_on_what_mpvnet_logged_first(self):
+        """The gap: the progress log was only read while the Library tab was open,
+        so after watching with the app closed Play next picked from stale data."""
+        from unittest import mock
+        from utils import quick_play
+        wl = self.wl
+        self._anime("Show A", [4, 5], [1, 2, 3], wl.WATCHING, played_ts=100)
+        self._anime("Show B", [5, 6], [1, 2, 3, 4], wl.WATCHING, played_ts=50)
+        mpv_dir = os.path.join(self.tmp, "mpvnet")
+        os.makedirs(mpv_dir)
+        # Watched B Ep5 to the end since the Library last looked.
+        b5 = os.path.join(self.downloads, "Show B", "Show B Ep5.mp4")
+        with open(os.path.join(mpv_dir, "aed-progress.log"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"path": b5, "percent": 100, "eof": True}) + "\n")
+        settings = {"download_dir": self.downloads, "play_in_mpvnet": True}
+        with mock.patch.object(quick_play, "_settings", return_value=settings), \
+                mock.patch("utils.mpvnet.find_mpvnet", return_value=(r"C:\mpv\mpvnet.exe", "7")), \
+                mock.patch("utils.mpvnet.config_dir", return_value=mpv_dir), \
+                mock.patch.object(quick_play.subprocess, "Popen") as popen:
+            status, message, _request = quick_play.play_next()
+        self.assertEqual("played", status)
+        self.assertEqual("Show B Ep6.mp4", os.path.basename(popen.call_args[0][0][1]))
+
+
+class UpdaterTests(unittest.TestCase):
+    """core/updater.py: which release is offered, and the download that must
+    never hang, run a damaged file, or install over the real app from source."""
+
+    RELEASE = {"tag_name": "v5.0.1", "assets": [
+        {"name": "AutoDownloader_Portable.zip", "browser_download_url": "https://x/p.zip",
+         "size": 9, "digest": "sha256:" + "0" * 64},
+        {"name": "AutoDownloader_Setup.exe", "browser_download_url": "https://x/s.exe",
+         "size": 11, "digest": "sha256:" + "AB" * 32},
+    ]}
+
+    def setUp(self):
+        from core import updater
+        self.up = updater
+        self.tmp = tempfile.mkdtemp(prefix="aed_up_")
+        import shutil
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_only_a_strictly_newer_release_counts(self):
+        newer = self.up.is_newer
+        self.assertTrue(newer("v5.0.1", "5.0.0"))
+        self.assertTrue(newer("v5.1", "5.0.9"))
+        self.assertTrue(newer("release-v5.0.1", "5.0.0"))     # was read as 0.0.0
+        self.assertFalse(newer("v4.9.0", "4.9"))               # same version, was offered
+        self.assertFalse(newer("v5.0", "5.0.0"))
+        self.assertFalse(newer("v4.9.1", "5.0.0"))             # never a downgrade
+        self.assertFalse(newer("", "5.0.0"))
+        self.assertTrue(newer("v5.0.1", "5"))
+
+    def test_the_setup_asset_with_its_size_and_checksum(self):
+        info = self.up.update_info(self.RELEASE, current="5.0.0")
+        self.assertEqual({"version": "5.0.1", "url": "https://x/s.exe", "size": 11,
+                          "sha256": "ab" * 32}, info)
+        self.assertIsNone(self.up.update_info(self.RELEASE, current="5.0.1"))
+        no_setup = {"tag_name": "v5.0.1", "assets": self.RELEASE["assets"][:1]}
+        self.assertIsNone(self.up.update_info(no_setup, current="5.0.0"))
+        no_digest = {"tag_name": "v5.0.1", "assets": [{"name": "AutoDownloader_Setup.exe",
+                                                       "browser_download_url": "https://x/s.exe"}]}
+        self.assertEqual("", self.up.update_info(no_digest, current="5.0.0")["sha256"])
+
+    def _signals(self):
+        from core.signals import signals
+        got = []
+        signals.update_available.connect(lambda info: got.append(("available", info)))
+        signals.update_check_result.connect(lambda level, msg: got.append((level, msg)))
+        self.addCleanup(signals.update_available.disconnect)
+        self.addCleanup(signals.update_check_result.disconnect)
+        return got
+
+    def test_a_copy_run_from_source_never_offers_to_install(self):
+        from unittest import mock
+        got = self._signals()
+        with mock.patch.object(self.up, "fetch_latest") as fetch:
+            self.assertFalse(self.up.updates_enabled())        # tests: not frozen, isolated
+            self.assertIsNone(self.up.check_for_updates(manual=False))
+            self.assertIsNone(self.up.check_for_updates(manual=True))
+            fetch.assert_not_called()
+        self.assertEqual(["info"], [g[0] for g in got])          # only the manual one says so
+
+    def test_check_offers_reports_up_to_date_or_the_error(self):
+        from unittest import mock
+        got = self._signals()
+        with mock.patch.object(self.up, "updates_enabled", return_value=True):
+            with mock.patch.object(self.up, "APP_VERSION", "5.0.1"), \
+                    mock.patch.object(self.up, "fetch_latest", return_value=self.RELEASE):
+                self.assertIsNone(self.up.check_for_updates(manual=True))
+            self.assertEqual(("success", "You're up to date (version 5.0.1)."), got[-1])
+            with mock.patch.object(self.up, "APP_VERSION", "5.0.0"), \
+                    mock.patch.object(self.up, "fetch_latest", return_value=self.RELEASE):
+                self.assertEqual("5.0.1", self.up.check_for_updates(manual=False)["version"])
+            self.assertEqual("available", got[-1][0])
+            with mock.patch.object(self.up, "fetch_latest", side_effect=OSError("offline")):
+                self.assertIsNone(self.up.check_for_updates(manual=True))
+            self.assertEqual("error", got[-1][0])
+            self.assertIn("offline", got[-1][1])
+
+    def test_check_emits_what_to_install(self):
+        from unittest import mock
+        got = self._signals()
+        info = {"version": "5.0.1", "url": "https://x/s.exe", "size": 11, "sha256": ""}
+        with mock.patch.object(self.up, "updates_enabled", return_value=True), \
+                mock.patch.object(self.up, "fetch_latest", return_value=self.RELEASE), \
+                mock.patch.object(self.up, "update_info", return_value=dict(info)):
+            self.up.check_for_updates(manual=True)
+        self.assertEqual([("available", {**info, "manual": True})], got)
+        got.clear()
+        with mock.patch.object(self.up, "updates_enabled", return_value=True), \
+                mock.patch.object(self.up, "fetch_latest", return_value={"tag_name": "v1.0.0"}):
+            self.up.check_for_updates(manual=True)
+        self.assertEqual("success", got[0][0])                  # "You're up to date"
+
+    def _opener(self, body, length=None, calls=None):
+        class Response:
+            def __init__(self):
+                self.headers = {"Content-Length": str(len(body) if length is None else length)}
+                self._data = body
+
+            def read(self, n):
+                chunk, self._data = self._data[:n], self._data[n:]
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def opener(req, timeout=None):
+            if calls is not None:
+                calls.append(timeout)
+            return Response()
+        return opener
+
+    def test_download_is_checked_against_the_release(self):
+        import hashlib
+        from unittest import mock
+        body = os.urandom(600_000)                               # a few chunks
+        digest = hashlib.sha256(body).hexdigest()
+        path = os.path.join(self.tmp, "setup.exe")
+        seen, calls = [], []
+        info = {"url": "https://x/s.exe", "size": len(body), "sha256": digest}
+        with mock.patch.object(self.up, "log"):
+            self.assertEqual(digest, self.up.download(info, path, progress=seen.append,
+                                                      opener=self._opener(body, calls=calls)))
+            self.assertEqual(self.up.READ_TIMEOUT, calls[0])     # a stall can't hang it
+            self.assertEqual(100, seen[-1])
+            with open(path, "rb") as f:
+                self.assertEqual(body, f.read())
+
+            for bad, why in (({**info, "size": len(body) + 1}, "incomplete"),
+                             ({**info, "sha256": "0" * 64}, "SHA-256")):
+                with self.assertRaises(IOError) as cm:
+                    self.up.download(bad, path, opener=self._opener(body))
+                self.assertIn(why, str(cm.exception))
+                self.assertFalse(os.path.exists(path))           # nothing half-written left
+
+            with self.assertRaises(self.up.DownloadCancelled):
+                self.up.download(info, path, cancelled=lambda: True, opener=self._opener(body))
+            self.assertFalse(os.path.exists(path))
+
+    def test_the_setup_runs_only_if_it_is_still_the_downloaded_file(self):
+        import hashlib
+        from unittest import mock
+        path = os.path.join(self.tmp, "setup.exe")
+        with open(path, "wb") as f:
+            f.write(b"setup")
+        digest = hashlib.sha256(b"setup").hexdigest()
+        with mock.patch.object(self.up.subprocess, "Popen") as popen, \
+                mock.patch.object(self.up, "log"):
+            self.assertEqual((True, ""), self.up.launch_setup(path, digest))
+            # Run from its own folder: the inherited app folder couldn't be replaced.
+            popen.assert_called_once_with([path, "--silent"], close_fds=True, cwd=self.tmp)
+            popen.reset_mock()
+            ok, why = self.up.launch_setup(path, "0" * 64)       # swapped after the download
+            self.assertFalse(ok)
+            self.assertIn("changed", why)
+            popen.assert_not_called()
+            popen.side_effect = OSError("blocked by policy")
+            self.assertEqual((False, "blocked by policy"), self.up.launch_setup(path, digest))
+
+    def test_the_download_thread_starts_the_setup_or_reports_why_not(self):
+        """Download, check and launch all happen off the UI thread (the launch
+        waits on the antivirus scanning the exe: ~9 s of frozen window)."""
+        from unittest import mock
+        info = {"url": "https://x/s.exe", "size": 1, "sha256": ""}
+        for launched, expect in (((True, ""), "started"), ((False, "blocked"), "error")):
+            thread = self.up.UpdateDownloaderThread(info)
+            got = []
+            thread.setup_started.connect(lambda p: got.append(("started", p)))
+            thread.error.connect(lambda m: got.append(("error", m)))
+            with mock.patch.object(self.up, "download", return_value="ab"), \
+                    mock.patch.object(self.up, "launch_setup", return_value=launched) as launch, \
+                    mock.patch.object(self.up.tempfile, "mkdtemp", return_value=self.tmp), \
+                    mock.patch.object(self.up, "log"):
+                thread.run()
+            self.assertEqual(expect, got[0][0])
+            launch.assert_called_once_with(os.path.join(self.tmp, "AutoDownloader_Setup.exe"), "ab")
+            if expect == "error":
+                self.assertEqual("Couldn't start the installer: blocked", got[0][1])
+        thread = self.up.UpdateDownloaderThread(info)
+        got = []
+        thread.error.connect(got.append)
+        with mock.patch.object(self.up, "download", side_effect=IOError("timed out")), \
+                mock.patch.object(self.up, "launch_setup") as launch, \
+                mock.patch.object(self.up, "log"):
+            thread.run()
+        self.assertEqual(["Couldn't download the update: timed out"], got)
+        launch.assert_not_called()
+
+    def test_old_update_downloads_are_cleaned_up(self):
+        from unittest import mock
+        for name in ("aed_update_abc", "aed_update_def", "unrelated"):
+            os.makedirs(os.path.join(self.tmp, name, "sub"))
+        with mock.patch.object(self.up, "log"):
+            self.assertEqual(2, self.up.remove_old_downloads(self.tmp))
+        self.assertEqual(["unrelated"], os.listdir(self.tmp))
+
+    def test_shipped_builds_only_ever_update_from_github(self):
+        """Only the sandbox test build (an extra aed_update_test module) can name
+        another release URL; nothing a shipped build reads at runtime can."""
+        import importlib
+        import types
+        from unittest import mock
+        github = "https://api.github.com/repos/ud7-a/autoDownloader/releases/latest"
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        try:
+            with mock.patch.dict(os.environ, {"AED_UPDATE_API_URL": "http://127.0.0.1:1/x"}):
+                self.assertEqual(github, importlib.reload(self.up).API_URL)
+            hook = types.ModuleType("aed_update_test")
+            hook.API_URL = "http://127.0.0.1:8765/release.json"
+            with mock.patch.dict(sys.modules, {"aed_update_test": hook}):
+                self.assertEqual(hook.API_URL, importlib.reload(self.up).API_URL)
+        finally:
+            importlib.reload(self.up)
+        self.assertEqual(github, self.up.API_URL)
+        self.assertFalse(os.path.exists(os.path.join(repo, "aed_update_test.py")))
+        with open(os.path.join(repo, "tools", "build_release.py"), encoding="utf-8") as f:
+            self.assertNotIn("aed_update_test", f.read())
+
+    def test_installer_paths_are_escaped_for_powershell(self):
+        import installer
+        filled = installer.fill_template("$a = '{launcher_exe}'\n$b = '{dest_dir}'",
+                                         {"launcher_exe": r"C:\Users\O'Brien\setup.exe",
+                                          "dest_dir": r"C:\Auto Episodes Downloader\App"})
+        self.assertEqual("$a = 'C:\\Users\\O''Brien\\setup.exe'\n"
+                         "$b = 'C:\\Auto Episodes Downloader\\App'", filled)
+        with open(installer.__file__, encoding="utf-8") as f:
+            self.assertIn('encoding="utf-8-sig"', f.read())       # PowerShell 5.1 reads it as UTF-8
+
+
+class UpdatePromptTests(unittest.TestCase):
+    """AppWindow's side of an update: a failure or cancel never leaves the
+    window stuck, and a later check can offer it again."""
+
+    def _win(self, running=False):
+        from types import SimpleNamespace
+        from unittest import mock
+        from ui.app_window import AppWindow
+        win = SimpleNamespace(_update_busy=False, _download_running=running, progress_dialog=None,
+                              setEnabled=mock.Mock(), close=mock.Mock(),
+                              _download_update=mock.Mock())
+        for name in ("_update_failed", "_close_update_dialog"):
+            setattr(win, name, getattr(AppWindow, name).__get__(win))
+        return win
+
+    def test_no_or_failure_lets_a_later_check_ask_again(self):
+        from unittest import mock
+        from ui.app_window import AppWindow
+        info = {"version": "5.0.1"}
+        win = self._win(running=True)
+        with mock.patch("qfluentwidgets.MessageBox") as box:
+            box.return_value.exec.return_value = False
+            AppWindow.prompt_update(win, info)
+            self.assertIn("A download is running", box.call_args[0][1])
+            self.assertFalse(win._update_busy)                   # declined: can be offered again
+            box.return_value.exec.return_value = True
+            AppWindow.prompt_update(win, info)
+            self.assertTrue(win._update_busy)
+            win._download_update.assert_called_once_with(info)
+            AppWindow.prompt_update(win, info)                   # busy: not asked twice
+            self.assertEqual(2, box.call_count)
+        with mock.patch("qfluentwidgets.InfoBar") as bar:
+            win._update_failed("Couldn't download the update: timed out")
+        self.assertFalse(win._update_busy)
+        win.setEnabled.assert_called_with(True)
+        bar.error.assert_called_once()
+
+    def test_a_closed_progress_dialog_never_comes_back(self):
+        """Found by the sandbox update test: a download that failed within a
+        second closed the dialog, then QProgressDialog's own timer showed it again
+        4 s later -- modal, full bar, blocking the window."""
+        from unittest import mock
+        from PyQt6 import sip
+        from PyQt6.QtWidgets import QApplication, QWidget
+        from ui.app_window import AppWindow
+        type(self)._app = QApplication.instance() or QApplication([])   # alive for the run
+
+        class Host(QWidget):
+            progress_dialog = None
+            _download_update = AppWindow._download_update
+            _close_update_dialog = AppWindow._close_update_dialog
+
+        host = Host()
+        # Destroyed here, on the GUI thread. Left to the garbage collector (the
+        # lambdas wired to the mock thread make a cycle) it could be freed during
+        # a later test on a worker thread, which aborts Qt (0xC0000409).
+        self.addCleanup(lambda: sip.isdeleted(host) or sip.delete(host))
+        thread = mock.Mock()
+        with mock.patch("core.updater.UpdateDownloaderThread", return_value=thread):
+            host._download_update({"url": "x"})
+        dialog = host.progress_dialog
+        self.assertTrue(dialog.isVisible())
+        thread.start.assert_called_once()
+        from PyQt6.QtCore import QTimer
+        dialog.setValue(0)                   # the download's first report: re-arms Qt's
+        dialog.setValue(37)                  # 4 s show timer unless it counts as shown
+        host._close_update_dialog()
+        self.assertFalse(dialog.isVisible())
+        # Qt's show timer is the dialog's QTimer child. Still running, it shows the
+        # closed dialog again. Checked directly rather than by waiting in the event
+        # loop, which would also run whatever earlier tests left queued.
+        self.assertEqual([], [t for t in dialog.findChildren(QTimer) if t.isActive()])
+
+    def test_the_app_closes_normally_once_the_setup_runs(self):
+        from unittest import mock
+        from ui.app_window import AppWindow
+        win = self._win()
+        with mock.patch("ui.app_window.QApplication") as qapp:
+            AppWindow._close_for_update(win)
+        win.close.assert_called_once()                           # a normal close, not os._exit
+        qapp.instance.return_value.quit.assert_called_once()
+
+
+class DownloadNextTests(unittest.TestCase):
+    """Play next's episode isn't downloaded: the app opens on the Downloader with
+    that anime's profile and its missing episodes selected, and says so."""
+
+    def _window(self, found, running=False, profile="Show B"):
+        from types import SimpleNamespace
+        from unittest import mock
+        library = mock.Mock()
+        library.download.return_value = profile
+        win = SimpleNamespace(raise_to_front=mock.Mock(), show_library=mock.Mock(),
+                              _download_running=running,
+                              _ensure_library=mock.Mock(return_value=library))
+        return win, library
+
+    def _run(self, win, found, missing=(6, 7, 8)):
+        from unittest import mock
+        from ui.app_window import AppWindow
+        with mock.patch("utils.quick_play.decide", return_value=found), \
+                mock.patch("utils.watch_later.entries", return_value=[]), \
+                mock.patch("utils.watch_later.missing_from", return_value=list(missing)), \
+                mock.patch("qfluentwidgets.InfoBar") as bar:
+            AppWindow.download_next(win)
+        return bar
+
+    def test_sets_up_the_downloader_and_tells_the_user(self):
+        entry = {"title": "Show B", "url": "https://x/anime/b/"}
+        win, library = self._window(None)
+        bar = self._run(win, ("download", entry, 0, 6))
+        win.raise_to_front.assert_called_once()
+        library.download.assert_called_once_with(entry, 0, episodes=[6, 7, 8])
+        text = bar.warning.call_args[0][1]
+        self.assertIn("Show B episode 6 isn't downloaded yet", text)
+        self.assertIn("Episodes 6-8 are selected", text)
+        win.show_library.assert_not_called()
+
+    def test_while_downloading_it_only_says_so(self):
+        entry = {"title": "Show B", "url": "https://x/anime/b/"}
+        win, library = self._window(None, running=True)
+        bar = self._run(win, ("download", entry, 0, 6))
+        library.download.assert_not_called()
+        self.assertIn("once the current download has finished", bar.warning.call_args[0][1])
+
+    def test_no_message_when_the_profile_couldnt_be_set_up(self):
+        entry = {"title": "Show B", "url": "https://x/anime/b/"}
+        win, library = self._window(None, profile=None)
+        bar = self._run(win, ("download", entry, 0, 6))
+        bar.warning.assert_not_called()
+
+    def test_downloaded_since_opens_the_library(self):
+        win, library = self._window(None)
+        self._run(win, ("play", {}, 0, 6, ["x.mp4"]))
+        win.show_library.assert_called_once()
+        library.download.assert_not_called()
+
+    def test_hand_over_posts_the_registered_message(self):
+        from unittest import mock
+        from utils import instance
+        user32 = mock.Mock()
+        user32.IsIconic.return_value = False
+        user32.RegisterWindowMessageW.side_effect = lambda name: {
+            instance.OPEN_LIBRARY_MESSAGE: 0xC001, instance.DOWNLOAD_NEXT_MESSAGE: 0xC002}[name]
+        with mock.patch.object(instance, "app_is_running", return_value=True), \
+                mock.patch.object(instance, "find_main_window", return_value=1234), \
+                mock.patch.object(instance, "_user32", return_value=user32), \
+                mock.patch.object(instance.sys, "platform", "win32"):
+            self.assertTrue(instance.forward_download_next())
+            user32.PostMessageW.assert_called_with(1234, 0xC002, 0, 0)
+            self.assertTrue(instance.forward_open_library())
+            user32.PostMessageW.assert_called_with(1234, 0xC001, 0, 0)
+        with mock.patch.object(instance, "app_is_running", return_value=False):
+            self.assertFalse(instance.forward_download_next())
 
 
 class ReleaseNotesTests(unittest.TestCase):

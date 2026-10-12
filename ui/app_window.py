@@ -120,12 +120,14 @@ class AppWindow(FluentWindow):
     # A keyboard shortcut needs the user (from main.py's startup check thread).
     shortcut_warning = pyqtSignal(str)
 
-    def __init__(self, autostart_commands: list | None = None, open_library: bool = False):
+    def __init__(self, autostart_commands: list | None = None, open_library: bool = False,
+                 download_next: bool = False):
         super().__init__()
         self.shortcut_warning.connect(self._show_shortcut_warning)
-        # The Library shortcut's message from a second launch (utils/instance.py).
-        from utils.instance import open_library_message_id
+        # The keyboard shortcuts' messages from a second launch (utils/instance.py).
+        from utils.instance import open_library_message_id, message_id, DOWNLOAD_NEXT_MESSAGE
         self._open_library_msg = open_library_message_id()
+        self._download_next_msg = message_id(DOWNLOAD_NEXT_MESSAGE)
 
         self.setWindowTitle(f"Auto Episodes Downloader | Version {APP_VERSION}")
 
@@ -231,8 +233,10 @@ class AppWindow(FluentWindow):
         signals.task_finished.connect(self._start_next_queued)
         signals.task_cancelled.connect(self._clear_download_queue)
 
-        # Wire up the update signal
+        # Updates (core/updater.py): the startup check, and the sidebar button's.
+        self._update_busy = False
         signals.update_available.connect(self.prompt_update)
+        signals.update_check_result.connect(self._show_update_check_result)
         signals.remote_commands_received.connect(self._execute_remote_commands)
 
         # The rest of the tabs: once the window is on screen (first paint), with a
@@ -257,6 +261,10 @@ class AppWindow(FluentWindow):
 
         if autostart_commands:
             QTimer.singleShot(600, lambda: self._execute_remote_commands(autostart_commands))
+        # Started by Play next for an episode that isn't downloaded: once the
+        # window is up, so the message shows on it.
+        if download_next:
+            QTimer.singleShot(300, self.download_next)
 
     def raise_to_front(self):
         """Bring the window forward, e.g. when a remote download command arrives.
@@ -461,49 +469,89 @@ class AppWindow(FluentWindow):
             parent=self, position=InfoBarPosition.TOP, duration=4000)
         self.on_watch_download_all(fresh)
 
-    def prompt_update(self, latest_version, download_url):
-        print(f"[UI] prompt_update TRIGGERED for version {latest_version}")
-        # Prevent spamming the prompt
-        if getattr(self, '_update_prompted', False):
-            print("[UI] Update already prompted this session. Skipping.")
+    def check_for_updates_now(self):
+        """The sidebar's "Check for updates": the startup check, on demand, and
+        it says when there's nothing new."""
+        if self._update_busy:
             return
-        self._update_prompted = True
-        
-        from qfluentwidgets import MessageBox, InfoBar, InfoBarPosition
+        import threading
+        from core.updater import check_for_updates
+        threading.Thread(target=check_for_updates, kwargs={"manual": True}, daemon=True).start()
+
+    def _show_update_check_result(self, level, message):
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        show = {"success": InfoBar.success, "error": InfoBar.error}.get(level, InfoBar.info)
+        show("Updates", message, position=InfoBarPosition.TOP, duration=5000, parent=self)
+
+    def prompt_update(self, info):
+        """Offer a newer release (core/updater.py) and install it on Yes. Asked
+        again by a later check after a No, a failure or a cancel."""
+        if self._update_busy:
+            return
+        self._update_busy = True
+        from qfluentwidgets import MessageBox
+        content = f"🚀 Version {info['version']} is available!\n\nWould you like to download and install it now?"
+        if self._download_running:
+            content += ("\n\nA download is running: installing closes the app and stops it. "
+                        "Episodes already finished are kept.")
+        if not MessageBox("Update Available", content, self).exec():
+            self._update_busy = False
+            return
+        self._download_update(info)
+
+    def _download_update(self, info):
         from PyQt6.QtWidgets import QProgressDialog
         from PyQt6.QtCore import Qt
-        
-        title = "Update Available"
-        content = f"🚀 Version {latest_version} is available!\n\nWould you like to download and install it now?"
-        
-        print("[UI] Attempting to show MessageBox...")
-        w = MessageBox(title, content, self)
-        if w.exec():
-            print("[UI] User clicked YES to update!")
-            self.setEnabled(False)
-            
-            self.progress_dialog = QProgressDialog("Fetching new setup file from GitHub... Please wait.", "Cancel", 0, 100, self)
-            self.progress_dialog.setWindowTitle("Downloading Update")
-            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            self.progress_dialog.setCancelButton(None) # Disable cancel button
-            self.progress_dialog.show()
-            
-            from core.updater import UpdateDownloaderThread, launch_setup_and_exit
-            self.update_thread = UpdateDownloaderThread(download_url)
-            self.update_thread.progress.connect(self.progress_dialog.setValue)
-            
-            def on_download_finished(setup_path):
-                self.progress_dialog.close()
-                launch_setup_and_exit(setup_path)
-                
-            def on_download_error(err):
-                self.setEnabled(True)
-                self.progress_dialog.close()
-                InfoBar.error("Update Failed", f"Could not download the update: {err}", parent=self, position=InfoBarPosition.TOP)
-                
-            self.update_thread.finished.connect(on_download_finished)
-            self.update_thread.error.connect(on_download_error)
-            self.update_thread.start()
+        from core.updater import UpdateDownloaderThread
+
+        dialog = QProgressDialog("Downloading the update from GitHub…", "Cancel", 0, 100, self)
+        dialog.setWindowTitle("Downloading Update")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        self.progress_dialog = dialog
+
+        thread = UpdateDownloaderThread(info)
+        self.update_thread = thread
+        thread.progress.connect(dialog.setValue)
+        # Cancel stops the download at its next chunk (it's not killed mid-write).
+        dialog.canceled.connect(thread.requestInterruption)
+        thread.setup_started.connect(lambda _path: self._close_for_update())
+        thread.error.connect(lambda message: self._update_failed(message))
+        thread.cancelled.connect(lambda: self._update_failed("Update cancelled.", level="info"))
+        # forceShow, not show: it also stops QProgressDialog's own 4-second
+        # timer, which otherwise showed the dialog again after it was closed (a
+        # fast failure left a modal, full-bar "Downloading Update" over the app).
+        dialog.forceShow()
+        thread.start()
+
+    def _close_for_update(self):
+        """The setup is running. A normal close -- settings saved, the search
+        browser shut down -- instead of killing the process; the setup's helper
+        waits a moment before it touches the app folder."""
+        self._close_update_dialog()
+        self.close()
+        QApplication.instance().quit()
+
+    def _update_failed(self, message, level="error"):
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        self._close_update_dialog()
+        self.setEnabled(True)
+        self._update_busy = False
+        show = InfoBar.info if level == "info" else InfoBar.error
+        show("Update", message, position=InfoBarPosition.TOP,
+             duration=4000 if level == "info" else 10000, parent=self)
+
+    def _close_update_dialog(self):
+        dialog = getattr(self, "progress_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.canceled.disconnect()
+            except TypeError:
+                pass
+            dialog.close()
+            dialog.deleteLater()        # nothing can bring this one back
+            self.progress_dialog = None
 
     def on_search_profile_created(self, _name):
         # Search created a profile (and set it as last_profile); refresh both the
@@ -588,6 +636,12 @@ class AppWindow(FluentWindow):
                 routeKey=key, icon=icon, text=text, tooltip=text,
                 onClick=lambda _checked=False, k=key: self.open_tab(k),
                 position=NavigationItemPosition.TOP)
+        # Not a page: runs the update check on demand (the startup one runs once).
+        self.navigationInterface.addItem(
+            routeKey="check_for_updates", icon=FIF.SYNC, text="Check for updates",
+            tooltip=f"Check for updates (this is version {APP_VERSION})",
+            onClick=lambda _checked=False: self.check_for_updates_now(),
+            selectable=False, position=NavigationItemPosition.BOTTOM)
 
     def eventFilter(self, obj, event):
         # getattr: FluentWindow routes its own filters through here during
@@ -601,16 +655,20 @@ class AppWindow(FluentWindow):
         return super().eventFilter(obj, event)
 
     def nativeEvent(self, eventType, message):
-        """A second launch by the Library shortcut posts this window a registered
-        message (utils/instance.py): come to the front on the Library."""
-        msg_id = getattr(self, "_open_library_msg", 0)
-        if msg_id:
+        """A second launch by a keyboard shortcut posts this window a registered
+        message (utils/instance.py): come to the front on the Library, or on the
+        Downloader set up for the next episode."""
+        handlers = {getattr(self, "_open_library_msg", 0): self.show_library,
+                    getattr(self, "_download_next_msg", 0): self.download_next}
+        handlers.pop(0, None)
+        if handlers:
             try:
                 if bytes(eventType) == b"windows_generic_MSG":
                     import ctypes.wintypes
                     msg = ctypes.wintypes.MSG.from_address(int(message))
-                    if msg.message == msg_id:
-                        QTimer.singleShot(0, self.show_library)
+                    handler = handlers.get(msg.message)
+                    if handler:
+                        QTimer.singleShot(0, handler)
                         return True, 0
             except Exception:
                 pass          # an exception here would abort the app
@@ -629,6 +687,42 @@ class AppWindow(FluentWindow):
         if self._download_running:
             return
         self.switchTo(self._ensure_library())
+
+    def download_next(self):
+        """The Play next shortcut's episode isn't downloaded: open the Downloader
+        on that anime's profile with its episodes from the missing one to the
+        last selected, and say so. Which anime is worked out again here, from the
+        Library the shortcut's launch just brought up to date (utils/quick_play)."""
+        from qfluentwidgets import InfoBar, InfoBarPosition
+        from utils import watch_later as wl
+        from utils.quick_play import decide
+        self.raise_to_front()
+        download_dir = app_settings.get("download_dir", "")
+        found = decide(wl.entries(), download_dir)
+        if not found or found[0] != "download":
+            # Downloaded since, or finished: the Library shows what's next.
+            self.show_library()
+            return
+        _kind, entry, part_index, ep = found
+        title = entry.get("title") or "Anime"
+        if self._download_running:
+            # The sidebar is locked to Active Tasks while a download runs.
+            InfoBar.warning("Episode not downloaded",
+                            f"{title} episode {ep} isn't downloaded yet. Download it "
+                            "once the current download has finished.",
+                            position=InfoBarPosition.TOP, duration=10000, parent=self)
+            return
+        episodes = wl.missing_from(entry, part_index, ep, download_dir)
+        # The Library's own "isn't downloaded" path: picks or creates the
+        # profile, sets the episode range and switches to the Downloader.
+        if not self._ensure_library().download(entry, part_index, episodes=episodes):
+            return            # it couldn't (it said why)
+        from ui.downloader_tab import compact_episode_spec
+        InfoBar.warning("Episode not downloaded",
+                        f"{title} episode {ep} isn't downloaded yet. Episodes "
+                        f"{compact_episode_spec(sorted(episodes))} are selected. "
+                        "Press Start Download to get them.",
+                        position=InfoBarPosition.TOP, duration=12000, parent=self)
 
     def _ensure_library(self):
         """The Library tab, built (and wired) the first time it is needed: at

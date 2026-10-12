@@ -49,18 +49,31 @@ if os.environ.get("AED_STARTUP_LOG"):
 else:
     _startup_mark("python reached main.py")
 
-# The "Play next episode" shortcut: start it in mpv.net and leave, no window.
-# Nothing to play -> fall through to the Library, which shows why.
+# The "Continue watching" shortcut (--play-next, its first name): start the
+# episode in mpv.net and leave, no window.
+# Its episode isn't downloaded -> the app on the Downloader, set up to get it
+# (handed to the open window, or --download-next for a new one). Nothing left
+# to watch -> the Library, which shows why.
 if "--play-next" in sys.argv:
     try:
         from utils.quick_play import play_next
-        _played, _ = play_next()
+        _status, _ = play_next()[:2]
     except Exception:
-        _played = False
-    _startup_mark(f"play next: {'started' if _played else 'nothing to play'}")
-    if _played:
+        _status = "nothing"
+    _startup_mark(f"play next: {_status}")
+    if _status == "played":
         sys.exit(0)
-    sys.argv.append("--library")
+    if _status == "download":
+        try:
+            from utils.instance import forward_download_next
+            _handed_over = sys.platform == "win32" and forward_download_next()
+        except Exception:
+            _handed_over = False
+        if _handed_over:
+            sys.exit(0)
+        sys.argv.append("--download-next")
+    else:
+        sys.argv.append("--library")
 
 # The Library shortcut with the app already open: hand over to its window and
 # leave, before Qt is even imported -- the open window shows the Library at once.
@@ -323,11 +336,14 @@ if __name__ == "__main__":
                 user32.EnumWindows(_cb, 0)
             except Exception:
                 pass
-            if "--library" in sys.argv:
-                # The early hand-over found no window yet (it was still opening).
+            # The early hand-over found no window yet (it was still opening).
+            if "--library" in sys.argv or "--download-next" in sys.argv:
                 try:
-                    from utils.instance import forward_open_library
-                    forward_open_library()
+                    from utils.instance import forward_open_library, forward_download_next
+                    if "--download-next" in sys.argv:
+                        forward_download_next()
+                    else:
+                        forward_open_library()
                 except Exception:
                     pass
             sys.exit(0)
@@ -361,7 +377,8 @@ if __name__ == "__main__":
     # Now import and instantiate the main app window
     from ui.app_window import AppWindow
     _startup_mark("ui.app_window imported")
-    window = AppWindow(autostart_commands=initial_commands, open_library="--library" in sys.argv)
+    window = AppWindow(autostart_commands=initial_commands, open_library="--library" in sys.argv,
+                       download_next="--download-next" in sys.argv)
     _startup_mark("AppWindow built")
     if os.environ.get("AED_STARTUP_LOG"):
         window.tabs_built_hook = lambda: _startup_mark("remaining tabs built")

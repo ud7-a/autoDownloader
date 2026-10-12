@@ -426,8 +426,10 @@ class _ShortcutRow(QWidget):
 
     DESCRIPTIONS = {
         "library": "Opens the app straight on the Library.",
-        "play_next": "Starts the next episode of what you're watching in mpv.net — no "
-                     "window opens. With nothing downloaded to continue, the Library opens.",
+        "play_next": "Continues the anime you watched last in mpv.net: an episode you "
+                     "stopped part-way resumes where you left off, otherwise the next one "
+                     "starts. No window opens. If it isn't downloaded yet, the Downloader "
+                     "opens ready to get it.",
     }
 
     def __init__(self, action, current, parent=None):
@@ -1462,7 +1464,8 @@ class WatchLaterWidget(QWidget):
 
     def download(self, entry, part_index=None, episodes=None):
         """Open this anime in the Downloader, creating its profile now if needed.
-        `episodes` (when given) is what the Downloader's episode box is set to."""
+        `episodes` (when given) is what the Downloader's episode box is set to.
+        Returns the profile's name, or None when it didn't (yet)."""
         parts = entry.get("parts") or []
         if not parts and is_local(entry.get("url")):
             InfoBar.warning("Can't download this one", NO_LINK_MESSAGE,
@@ -1510,6 +1513,7 @@ class WatchLaterWidget(QWidget):
         save_config()
         self.refresh()
         self.profile_ready.emit(name)
+        return name
 
     def open_details(self, url):
         entry = wl.find(url)
