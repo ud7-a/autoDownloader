@@ -1,164 +1,185 @@
 <div align="center">
 
-# ⚡ Auto Episodes Downloader (AED)
+<img src="assets/app_icon.png" alt="Auto Episodes Downloader icon" width="96">
 
-**A Windows desktop app that finds, downloads and plays anime episodes — with a weekly watchlist, Discord alerts that work while your PC is off, and an mpv.net player with upscaling shaders.**
+# Auto Episodes Downloader
 
-[![GitHub Release](https://img.shields.io/github/v/release/ud7-a/autoDownloader?style=for-the-badge&color=4cc2ff&logo=github)](https://github.com/ud7-a/autoDownloader/releases)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/ud7-a/autoDownloader/ci.yml?style=for-the-badge&label=CI&logo=githubactions)](https://github.com/ud7-a/autoDownloader/actions)
-[![Python Version](https://img.shields.io/badge/python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?style=for-the-badge&logo=windows)](https://github.com/ud7-a/autoDownloader/releases)
-[![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
+**Find, download, and watch anime from one Windows desktop app.**
 
-[Download Latest Release](https://github.com/ud7-a/autoDownloader/releases/latest) • [Features](#-features) • [Quick Start](#-quick-start) • [Cloud Notifications](#%EF%B8%8F-discord-notifications--remote-downloads) • [Architecture](#%EF%B8%8F-architecture) • [Development](#%EF%B8%8F-development--building-from-source)
+Follow weekly releases, manage your library, and receive Discord alerts even while your PC is off.
+
+[![Latest release](https://img.shields.io/github/v/release/ud7-a/autoDownloader)](https://github.com/ud7-a/autoDownloader/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/ud7-a/autoDownloader/ci.yml?branch=main&label=CI)](https://github.com/ud7-a/autoDownloader/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.13-blue)](https://www.python.org/)
+[![Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)](https://github.com/ud7-a/autoDownloader/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+**[Download for Windows](https://github.com/ud7-a/autoDownloader/releases/latest)** · [Getting started](#getting-started) · [Features](#features) · [Development](#development) · [Documentation](#documentation)
 
 </div>
 
----
+## Getting started
 
-## 🌟 Overview
+**Requirements:** Windows 10 or 11 and Google Chrome. Python is only needed when running from source. mpv.net is optional; the **Video Player** tab can install it through winget.
 
-**Auto Episodes Downloader** automates the whole loop: search an anime, follow it, get told when a new episode is out, download it in the best available quality, and watch it in a tuned player. It is built with **PyQt6 + Fluent Widgets** (Windows 11 dark theme), drives Chrome with **Selenium** to find each episode's download link, and downloads with **aria2c**.
+### Install the app
 
-**Supported sites:** [witanime](https://witanime.site) and [animerco](https://eta.animerco.org).
-
----
-
-## ✨ Features
-
-### 🔎 Search & profiles
-- **Search both sites** with cover art, pagination, and a **MOVIE** badge on films.
-- **One click to a download profile**: loading a show creates a profile from the site's template, so there is nothing to configure.
-- **Profile Manager**: each profile is a set of *automation paths* (one per mirror — e.g. Mediafire, Google Drive, gofile) tried in priority order, plus a **Smart Browser Picker** to build new paths by clicking in a real browser. Import/export profiles as JSON.
-
-### ⬇️ Downloading
-- **aria2c multi-connection downloads** (up to 16 connections per episode, stepping down automatically on hosts that throttle).
-- **Smart concurrency**: picks how many episodes download at once from your measured speed, or set a fixed number.
-- **Mirror check first**: before clicking anything, the app checks which download mirrors an episode actually offers and only tries those, in your profile's order.
-- **Skip filler episodes**: uses the sites' own filler tags (`فلر` on animerco, `فيلر` on witanime), with a cross-site fallback when one site doesn't tag a show.
-- **Archives handled**: `.rar`, `.7z` and `.zip` episodes are extracted automatically.
-- **Ad and popup blocking** in the automation browser (ad requests are blocked natively, no extension needed), so mis-clicks on overlay ads don't derail a download.
-- **Pause with control**: while paused you can change concurrency and hidden/visible browser mode, and skip any episodes that haven't started — from a fast episode grid (click, drag across, Shift+click a range, or type `13-40, 45`).
-- **Resume after a crash or restart**: an unfinished session is offered on the next launch.
-
-### 📚 Library
-- **Watching / Watch later / Completed**: every anime you download or save from Search, with a **Continue watching** strip that plays the next episode in one click.
-- **Tracks what you watched automatically**: episodes played in mpv.net are ticked off (90% in counts as watched), even when the app is closed — a small mpv.net script notes each episode you play and the Library catches up when it opens.
-- **Brings in what you already have**: on first open it adds every anime in your download folder, with what mpv.net says you've already watched, and looks up their posters.
-- **Per-anime history and sources**: each anime keeps its own download history, and each episode shows the site it was downloaded from.
-- **Continue downloading**: one click downloads the episodes the site has that aren't on disk yet.
-
-### 📺 Watchlist & release schedule
-- **Follow with one click** from Search; cards show cover, site and new-episode count.
-- **Grouped by weekday** from the sites' release schedules, with **today** first; on launch the app checks only what airs today (and again every 30 minutes).
-- **Download all new** episodes across the watchlist in one go, or pick a subset per anime.
-
-### ☁️ Discord notifications & remote downloads
-- **Alerts while your PC is off**: a small cloud service (FastAPI on Render) checks followed anime every 15 minutes and posts a rich Discord embed when a new episode airs.
-- **Download from Discord**: each alert has a download link. If your PC is on, the background watcher opens the app and starts that download within seconds; the alert shows whether your PC is online.
-- **Private by design**: webhooks are encrypted at rest with **Fernet** (AES-128-CBC + HMAC-SHA256) and never logged; download links are HMAC-signed.
-- **Shared checking**: each anime is fetched once per cycle no matter how many people follow it.
-- *Note:* animerco blocks requests from cloud servers, so cloud alerts are dependable for **witanime**; animerco shows are still checked by the app itself while your PC is on.
-
-### 🎬 Video Player (mpv.net)
-- **Detects mpv.net** and **installs it through winget** with one click if it's missing.
-- **Quality shaders**, applied in one click (your existing mpv.net config is backed up first):
-  - **Anime** — Anime4K (clamp highlights → restore → 2× upscale → thin lines), used for files in your anime download folder.
-  - **Series & movies** — FSRCNNX 2× + KrigBilateral + SSimDownscaler + adaptive sharpen.
-  - Shortcuts in mpv.net: **F1** anime profile · **F2** series profile · **Ctrl+1** shaders off/on · **P** show active shaders.
-- **Play downloads in mpv.net**: "Start Watching" and the Library open mpv.net directly, with the following episodes queued as a playlist.
-- **Make mpv.net the default player** for `.mp4` and `.mkv` from the same tab.
-- Shaders need a dedicated GPU; see [`assets/mpvnet/THIRD_PARTY.txt`](assets/mpvnet/THIRD_PARTY.txt) for their licenses.
-
-### 🖥️ Works on any screen
-- **Responsive layout** from small laptops (860×520 window, e.g. 1080p at 150% scaling) up to 1440p and wider, where each tab sits in a centred column instead of stretching edge to edge.
-- **Touch screens**: finger drags scroll every page and list (with a fling), taps click, and a drag never triggers the button it started on.
-
----
-
-## 📥 Quick Start
-
-### Option A: Setup installer (recommended)
 1. Download **`AutoDownloader_Setup.exe`** from the [latest release](https://github.com/ud7-a/autoDownloader/releases/latest).
-2. Run it. The app installs to `C:\Auto Episodes Downloader\App` and adds a desktop shortcut; your settings, profiles and history live in `C:\Auto Episodes Downloader`.
-3. When a new version is released the app offers to update itself on launch.
+2. Run the installer and open the app using its desktop shortcut.
+3. Open **Search Anime**, find a show, and select **Load**. Choose a season if prompted.
+4. In **Downloader**, choose your download folder and episodes, then start the download.
+5. When episodes are ready, select **Start Watching**, or open them from **Library**.
 
-### Option B: Portable ZIP
-1. Download **`AutoDownloader_Portable.zip`**.
-2. Extract it anywhere and run `AutoDownloader.exe`.
+The installer places the app in `C:\Auto Episodes Downloader\App`. Settings, profiles, history, and browser data are stored under `C:\Auto Episodes Downloader`. Downloaded episodes are saved to the folder you choose. The installed app offers available updates on launch; you can also select **Check for updates** in the sidebar.
 
-**Requires:** Windows 10/11 and Google Chrome. mpv.net is optional (the Video Player tab can install it).
+### Run without the installer
 
----
+Download **`AutoDownloader_Portable.zip`**, extract it, and run **`AutoDownloader.exe`**. This skips installation, but the app still uses the default data directory above. It does not keep all user data beside the executable.
 
-## 🏗️ Architecture
+## Features
 
-```mermaid
-graph TD
-    A["🖥️ Desktop app (PyQt6)"] -->|"Selenium + Chrome"| S["🌐 witanime / animerco"]
-    A -->|"aria2c"| H["📦 Download hosts"]
-    A -->|"Sync watchlist & webhook"| B["☁️ Cloud service (FastAPI on Render)"]
-    B -->|"Encrypted store"| C[("🗄️ Postgres (Supabase)")]
-    B -->|"Check every 15 min"| S
-    B -->|"New episode embed"| F["🔔 Discord webhook"]
-    F -->|"Download link"| B
-    W["👁️ Background watcher"] -->|"Heartbeat + poll commands"| B
-    W -->|"Opens app & starts download"| A
-```
+| Area | What you can do |
+| --- | --- |
+| Search | Browse both supported sites with cover art, pagination, and movie badges. Load a show using a built-in download profile. |
+| Downloads | Download multiple episodes with aria2c, automatically adjust concurrency, try available mirrors in profile order, and extract ZIP, RAR, and 7z archives. |
+| Episode selection | Select ranges, drag across an episode grid, skip filler when the source provides tags, and change pending selections while paused. |
+| Recovery | Resume an unfinished session after a restart and retry missing episodes. |
+| Library | Organize shows as Watching, Watch later, or Completed; import existing downloads; and continue watching or downloading. |
+| Watchlist | Follow shows, see releases grouped by weekday, and download new episodes individually or together. |
+| Notifications | Receive Windows notifications and Discord alerts, with optional cloud checking and remote download commands. |
+| Playback | Open episodes in mpv.net with a playlist and optional upscaling shaders. |
+| Interface | Use a Fluent-style dark interface with responsive layouts, high-DPI posters, and touch scrolling. |
 
-| Path | What lives there |
-|---|---|
-| `main.py` | App entry point; also runs as the background watcher with `--watcher` |
-| `ui/` | Tabs (downloader, search, watchlist, library, profile manager, video player, active tasks), layout and touch helpers |
-| `core/` | Selenium download engine, concurrency controller, filler detection, ad blocking, watcher, updater |
-| `utils/` | Config/storage, mpv.net integration, Discord sender, crash/error reporting |
-| `service/` | The cloud notification service (FastAPI, Postgres) and its tests |
-| `assets/` | Icons, sounds, and the bundled mpv.net config + shaders |
-| `tools/` | Build, version-bump and lint scripts; bundled `aria2c.exe` / `unrar.exe` |
+### Supported sources
 
----
+- [witanime](https://witanime.site)
+- [animerco](https://eta.animerco.org)
 
-## 🛠️ Development & Building from Source
+Downloads depend on the source site's availability and the mirrors it offers. **Profile Manager** lets you adjust automation paths, import or export profiles as JSON, and build paths with the Smart Browser Picker. The automation browser includes ad and popup blocking.
 
-### Prerequisites
-- Python 3.13
-- Windows 10/11
-- Google Chrome
+### Library and playback
 
-### Local setup
-```bash
+The Library keeps download history and source information for each show. It can scan your download folder for existing episodes and offers a **Continue watching** action.
+
+With the bundled mpv.net progress script configured, playback at 90% or later marks an episode as watched. Playback recorded while AED is closed is picked up when the Library opens again.
+
+The **Video Player** tab can install mpv.net, apply shader presets, and help configure it as the default player for `.mp4` and `.mkv` files. Existing mpv.net configuration is backed up before presets are applied.
+
+| mpv.net shortcut | Action |
+| --- | --- |
+| `F1` | Anime shader profile: Anime4K |
+| `F2` | Series and movie shader profile: FSRCNNX, KrigBilateral, SSimDownscaler, and adaptive sharpen |
+| `Ctrl+1` | Toggle shaders |
+| `P` | Show active shaders |
+
+Shader performance depends on your GPU. See [third-party notices](assets/mpvnet/THIRD_PARTY.txt) for shader sources and licenses.
+
+## Discord and cloud notifications
+
+The optional cloud service checks followed shows and sends Discord alerts while your PC is off. In **Watchlist**, open the cloud notification settings, enter the service URL and your Discord webhook, and enable cloud notifications.
+
+- The repository's [Cloud checker workflow](.github/workflows/cloud-checker.yml) requests a check every **10 minutes**. GitHub scheduling is best-effort, so alerts may arrive later.
+- The desktop Watchlist checks shows scheduled for today on launch and again every **30 minutes** while the app is running.
+- Discord alerts include a download link. Remote downloads require your PC and AED's background watcher to be running and connected to the service.
+- The service encrypts stored webhooks with Fernet and signs download actions with HMAC. Shows shared by multiple subscribers are checked once per cycle.
+
+**Source limitation:** animerco blocks requests from cloud servers. Use witanime for cloud alerts; the desktop app can check animerco while your PC is on.
+
+The service uses FastAPI and PostgreSQL. Self-hosting configuration lives in [render.yaml](render.yaml), [service/docker-compose.yml](service/docker-compose.yml), and the [service source](service/).
+
+## Development
+
+Use **Python 3.13** on Windows 10 or 11, with Google Chrome installed. Run these commands in PowerShell:
+
+```powershell
 git clone https://github.com/ud7-a/autoDownloader.git
 cd autoDownloader
-pip install -r requirements-dev.txt
-python main.py
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+
+# Keep development data separate from your installed app.
+$env:AED_APP_DIR = Join-Path $env:LOCALAPPDATA "AED-Development"
+.\.venv\Scripts\python.exe main.py
 ```
 
-Set `AED_APP_DIR` to a folder of your choice to run against separate test data instead of `C:\Auto Episodes Downloader`.
+Set `AED_APP_DIR` before launching the app to redirect settings, history, browser data, and helper tools. Runs from source or with an alternate data directory do not install automatic updates over the installed app.
 
-### Tests & linter
-```bash
-python -m unittest discover -s tests -v          # desktop app
-python -m unittest discover -s service/tests -v  # cloud service
-python tools/lint.py
+### Checks
+
+```powershell
+.\.venv\Scripts\python.exe tools/lint.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-### Building
-```bash
-python tools/build_release.py             # app + single-file installer in dist/
-python tools/build_release.py --app-only  # just dist/AutoDownloader/
+The desktop suite isolates app data in a temporary directory. CI runs lint, import checks, desktop tests, and a Windows build.
+
+The cloud service has separate dependencies and tests. Use a dedicated test PostgreSQL database; the suite resets its test schema:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r service/requirements.txt
+$env:DATABASE_URL = "postgresql://user:password@localhost:5432/aed_test"
+$env:AED_NOTIFY_SCHEMA = "aed_test"
+.\.venv\Scripts\python.exe -m unittest discover -s service/tests -v
 ```
 
----
+Replace the example connection string with your test database credentials. Service tests supply a test encryption key; production deployments need their own `AED_NOTIFY_KEY`.
 
-## 🚢 Publishing Releases
+### Build
 
-```bash
-python publish.py
+```powershell
+# Build the app and setup installer in dist/.
+.\.venv\Scripts\python.exe tools/build_release.py
+
+# Build only dist/AutoDownloader/.
+.\.venv\Scripts\python.exe tools/build_release.py --app-only
 ```
-*Runs the release checks, prompts for the version bump, shows which files will be published (stray files in the folder are left out), then commits, tags and pushes; GitHub Actions builds the installer and portable ZIP and attaches them to the release. See [`docs/RELEASING.md`](docs/RELEASING.md).*
 
----
+### Release
 
-## 📄 License
+Maintainers can open **Actions → Release → Run workflow** on GitHub, enter an `X.Y.Z` version, and optionally mark it as a prerelease. The workflow runs checks, updates the version and changelog, builds the app, and publishes the installer and portable ZIP.
 
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for details. Bundled shaders keep their own licenses ([`assets/mpvnet/THIRD_PARTY.txt`](assets/mpvnet/THIRD_PARTY.txt)).
+The [release workflow](.github/workflows/release.yml) also accepts `v*` tags. For that route, the tag must match `APP_VERSION` in `utils/config.py`. See the [release guide](docs/RELEASING.md) for details; its `publish.py` helper is maintainer-local and is not included in a clone.
+
+## Architecture
+
+AED uses **PyQt6 and QFluentWidgets** for the desktop interface, **Selenium and Chrome** for source navigation, and **aria2c** for downloads. Cloud notifications run independently of the desktop app.
+
+```mermaid
+flowchart TD
+    App[Desktop app] -->|Selenium + Chrome| Sites[Anime sources]
+    App -->|aria2c| Mirrors[Download mirrors]
+    App -->|Sync follows and notifications| Service[Cloud service]
+    Checker[Scheduled GitHub workflow] -->|Request check cycle| Service
+    Service -->|Check followed shows| Sites
+    Service --> Database[(PostgreSQL)]
+    Service -->|Episode alerts| Discord[Discord]
+    Discord -->|Signed download action| Service
+    Watcher[Background watcher] -->|Heartbeat and command polling| Service
+    Watcher -->|Start downloads| App
+    App -->|Play episodes| Player[mpv.net]
+```
+
+| Path | Responsibility |
+| --- | --- |
+| `main.py` | Desktop entry point and background watcher mode (`--watcher`) |
+| `ui/` | App window, tabs, reusable widgets, and layout helpers |
+| `core/` | Download engine, site flows, scheduling, concurrency, watcher, and updater |
+| `utils/` | Configuration, storage, player integration, notifications, and diagnostics |
+| `service/` | Cloud API, checker, PostgreSQL store, and service tests |
+| `tests/` | Desktop regression tests and site fixtures |
+| `assets/` | Icons, sounds, mpv.net configuration, scripts, and shaders |
+| `tools/` | Build and maintenance scripts, plus bundled download and extraction tools |
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Release process](docs/RELEASING.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy and vulnerability reporting](SECURITY.md)
+
+Report bugs using the [bug report template](https://github.com/ud7-a/autoDownloader/issues/new?template=bug_report.yml), or suggest improvements using the [feature request template](https://github.com/ud7-a/autoDownloader/issues/new?template=feature_request.yml). Include the app version and steps to reproduce; remove webhooks, tokens, and other secrets from logs or screenshots before sharing them.
+
+## License
+
+The repository's own code is distributed under the [MIT License](LICENSE). Bundled shaders and other third-party components retain their respective licenses; see [third-party notices](assets/mpvnet/THIRD_PARTY.txt).
