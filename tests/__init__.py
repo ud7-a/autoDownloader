@@ -18,3 +18,8 @@ os.environ["AED_APP_DIR"] = _ISOLATED_DIR
 _SHORTCUT_DIR = os.path.join(_ISOLATED_DIR, "shortcuts")
 os.makedirs(_SHORTCUT_DIR, exist_ok=True)
 os.environ["AED_SHORTCUT_DIR"] = _SHORTCUT_DIR
+# mpv's resume files: libmpv keeps them in %LOCALAPPDATA%\mpv\watch_later
+# (utils/library_scan.py); tests get an empty folder instead of the user's.
+_MPV_STATE_DIR = os.path.join(_ISOLATED_DIR, "mpv-state")
+os.makedirs(_MPV_STATE_DIR, exist_ok=True)
+os.environ["AED_MPV_STATE_DIR"] = _MPV_STATE_DIR

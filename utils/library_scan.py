@@ -7,8 +7,8 @@ every saved profile, becomes a Library entry:
   * at least one episode downloaded -> Watching (Completed if every known episode
     was watched), otherwise Watch later;
   * what was already watched comes from mpv.net's resume files (watch_later\\*,
-    "start=<seconds>") and the app's own progress log, so viewing done before the
-    Library existed isn't lost.
+    "start=<seconds>"; see resume_dirs for where they are) and the app's own
+    progress log, so viewing done before the Library existed isn't lost.
 
 An episode counts as watched when its resume point is at least 90% in, or the
 progress log saw it finish; reaching episode N counts the episodes before it as
@@ -29,6 +29,89 @@ LOCAL_SCHEME = "local://"       # entry key for a folder with no known anime pag
 
 
 # ------------------------------------------------------------ mpv.net history
+
+def mpv_state_dir():
+    """libmpv's "~~state" folder on Windows: %LOCALAPPDATA%\\mpv -- "mpv", not
+    "mpv.net": the player library names it. AED_MPV_STATE_DIR replaces it (the
+    test suite always sets it, so no test reads the user's real resume files)."""
+    override = os.environ.get("AED_MPV_STATE_DIR")
+    if override:
+        return override
+    base = os.environ.get("LOCALAPPDATA")
+    return os.path.join(base, "mpv") if base else ""
+
+
+def _conf_watch_later_dir(cfg_dir, state_dir):
+    """A watch-later-dir (or its old name, watch-later-directory) set in
+    mpv.conf's top section, with mpv's ~~ prefixes expanded; else ""."""
+    try:
+        with open(os.path.join(cfg_dir, "mpv.conf"), encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    value = ""
+    for line in lines:
+        line = line.split("#", 1)[0].strip()
+        if line.startswith("["):
+            break                                    # a profile: not applied at start
+        key, sep, val = line.partition("=")
+        if sep and key.strip() in ("watch-later-dir", "watch-later-directory"):
+            value = val.strip().strip('"').strip("'")
+    if not value:
+        return ""
+    for prefix, root in (("~~state/", state_dir), ("~~home/", cfg_dir), ("~~/", cfg_dir),
+                         ("~/", os.path.expanduser("~"))):
+        if value.replace("\\", "/").startswith(prefix):
+            return os.path.join(root, value[len(prefix):]) if root else ""
+    return value if os.path.isabs(value) else os.path.join(cfg_dir, value)
+
+
+def resume_dirs(cfg_dir):
+    """Every folder mpv.net may have written resume files to, preferred first:
+    a watch-later-dir from mpv.conf; libmpv 0.38+'s default, ~~state/watch_later
+    (%LOCALAPPDATA%\\mpv\\watch_later -- where mpv.net 7.1 keeps them); and the
+    config folder's watch_later, the default before 0.38 (it stopped changing
+    on this PC on 2026-10-02 with 150 files, while the new one had 753)."""
+    state = mpv_state_dir()
+    out = []
+    for folder in (_conf_watch_later_dir(cfg_dir, state) if cfg_dir else "",
+                   os.path.join(state, "watch_later") if state else "",
+                   os.path.join(cfg_dir, "watch_later") if cfg_dir else ""):
+        if folder and os.path.normcase(os.path.abspath(folder)) not in \
+                {os.path.normcase(os.path.abspath(d)) for d in out}:
+            out.append(folder)
+    return out
+
+
+def _read_resume_files(folders):
+    """{normcased path: resume seconds}; a path saved in several folders takes
+    its newest file's position."""
+    found = {}                                   # path -> (file time, seconds)
+    for folder in folders:
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            file = os.path.join(folder, name)
+            try:
+                with open(file, encoding="utf-8", errors="replace") as f:
+                    lines = f.read().splitlines()
+                mtime = os.path.getmtime(file)
+            except OSError:
+                continue
+            if not lines or not lines[0].startswith("# ") or "redirect entry" in lines[0]:
+                continue
+            path = os.path.normcase(lines[0][2:].strip())
+            start = next((l.split("=", 1)[1] for l in lines[1:] if l.startswith("start=")), None)
+            try:
+                seconds = float(start)
+            except (TypeError, ValueError):
+                continue
+            if path not in found or mtime > found[path][0]:
+                found[path] = (mtime, seconds)
+    return {path: seconds for path, (_mtime, seconds) in found.items()}
+
 
 def read_mpv_history(cfg_dir):
     """{normcased path: resume seconds} from mpv.net's resume files, plus
@@ -61,26 +144,9 @@ def read_mpv_history(cfg_dir):
             percent = 0.0
         if path and (rec.get("eof") or percent >= wl.WATCHED_PERCENT):
             history[path] = None
-    folder = os.path.join(cfg_dir, "watch_later")
-    try:
-        names = os.listdir(folder)
-    except OSError:
-        names = []
-    for name in names:
-        try:
-            with open(os.path.join(folder, name), encoding="utf-8", errors="replace") as f:
-                lines = f.read().splitlines()
-        except OSError:
-            continue
-        if not lines or not lines[0].startswith("# ") or "redirect entry" in lines[0]:
-            continue
-        path = lines[0][2:].strip()
-        start = next((l.split("=", 1)[1] for l in lines[1:] if l.startswith("start=")), None)
-        try:
-            # A finish seen in the progress log outranks an older resume point.
-            history.setdefault(os.path.normcase(path), float(start))
-        except (TypeError, ValueError):
-            continue
+    for path, seconds in _read_resume_files(resume_dirs(cfg_dir)).items():
+        # A finish seen in the progress log outranks an older resume point.
+        history.setdefault(path, seconds)
     return history
 
 

@@ -11,6 +11,7 @@ built on -- the places where a silent regression would quietly break real downlo
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,8 @@ os.environ.setdefault("AED_APP_DIR",
 os.makedirs(os.environ["AED_APP_DIR"], exist_ok=True)
 os.environ.setdefault("AED_SHORTCUT_DIR", os.path.join(os.environ["AED_APP_DIR"], "shortcuts"))
 os.makedirs(os.environ["AED_SHORTCUT_DIR"], exist_ok=True)
+os.environ.setdefault("AED_MPV_STATE_DIR", os.path.join(os.environ["AED_APP_DIR"], "mpv-state"))
+os.makedirs(os.environ["AED_MPV_STATE_DIR"], exist_ok=True)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -67,6 +70,24 @@ class IsolationGuardTests(unittest.TestCase):
         for folder in shortcut._shortcut_folders():
             self.assertNotIn(start_menu, folder.lower())
             self.assertNotIn("desktop", folder.lower())
+
+    def test_every_temp_folder_a_test_makes_is_removed(self):
+        """Each tempfile.mkdtemp() here is followed by a cleanup that deletes it.
+        Nine setups had none: ~6,000 folders (139 MB of them mpv.net config
+        copies) had piled up in %TEMP%."""
+        import re
+        with open(__file__, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        leaks = []
+        for i, line in enumerate(lines):
+            m = re.match(r"\s*([\w.]+) = tempfile\.mkdtemp\(", line)
+            if not m:
+                continue
+            var = re.escape(m.group(1))
+            after = "\n".join(lines[i + 1:i + 8])
+            if not re.search(rf"rmtree[^\n]*\b{var}\b", after):
+                leaks.append(f"line {i + 1}: {line.strip()}")
+        self.assertEqual([], leaks)
 
 
 class EpisodeSpecTests(unittest.TestCase):
@@ -1364,6 +1385,7 @@ class ServerFallbackTests(unittest.TestCase):
                 return self.returncode
 
         tmp = tempfile.mkdtemp(prefix="aed_dl_")
+        self.addCleanup(shutil.rmtree, tmp, True)
         eng.CURRENT_TASK_ID = 99
         eng.ep_cancel_events.pop(1, None)
         eng.ep_pause_events.pop(1, None)
@@ -1640,7 +1662,8 @@ class SecondReviewFixTests(unittest.TestCase):
         import importlib
         import utils.config as cfg
         fresh = tempfile.mkdtemp(prefix="aed_fresh_")
-        old = (cfg.APP_DIR, cfg.CONFIG_FILE, list(cfg.app_settings.get("migrations_done", [])))
+        self.addCleanup(shutil.rmtree, fresh, True)
+        old =(cfg.APP_DIR, cfg.CONFIG_FILE, list(cfg.app_settings.get("migrations_done", [])))
         try:
             cfg.APP_DIR, cfg.CONFIG_FILE = fresh, os.path.join(fresh, "sites_config.json")
             cfg.app_settings["migrations_done"] = []
@@ -2725,6 +2748,20 @@ sys.exit(app.exec())
         old_hooks = (sys.excepthook, threading.excepthook)
         self.addCleanup(lambda: (setattr(sys, "excepthook", old_hooks[0]),
                                  setattr(threading, "excepthook", old_hooks[1])))
+        import faulthandler
+        was_enabled = faulthandler.is_enabled()
+
+        def release_native_file():
+            # install() points faulthandler at last_native_crash.txt and keeps it
+            # open; until it lets go, Windows won't delete the folder (runs before
+            # the rmtree above: cleanups go last-in, first-out).
+            faulthandler.disable()
+            if error_report._native is not None:
+                error_report._native.close()
+                error_report._native = None
+            if was_enabled:
+                faulthandler.enable()
+        self.addCleanup(release_native_file)
         error_report.install(folder)
         t = threading.Thread(target=lambda: 1 / 0, name="worker")
         t.start(); t.join()
@@ -3935,6 +3972,9 @@ class MpvnetTests(unittest.TestCase):
         from utils import mpvnet
         self.mpvnet = mpvnet
         self.cfg = tempfile.mkdtemp(prefix="aed_mpvcfg_")
+        # mpv.net config copies land here; left behind, 2,449 of these folders
+        # had piled up to 139 MB in %TEMP%.
+        self.addCleanup(shutil.rmtree, self.cfg, True)
 
     def test_bundle_is_complete(self):
         base = self.mpvnet.bundle_dir()
@@ -4284,6 +4324,7 @@ class WatchLaterTests(unittest.TestCase):
         from utils import watch_later as wl
         self.wl = wl
         self.tmp = tempfile.mkdtemp(prefix="aed_wl_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         patch = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
         patch.start()
         self.addCleanup(patch.stop)
@@ -4489,6 +4530,7 @@ class LibraryImportTests(unittest.TestCase):
         from utils import watch_later as wl
         self.wl = wl
         self.tmp = tempfile.mkdtemp(prefix="aed_scan_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         patch = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
         patch.start()
         self.addCleanup(patch.stop)
@@ -4541,6 +4583,72 @@ class LibraryImportTests(unittest.TestCase):
         self.assertNotIn(norm("C:\\anime\\Show Ep5.mp4"), h)       # only started
         self.assertNotIn(norm("C:\\anime\\Show Ep9.mp4"), h)
         self.assertNotIn(norm("C:\\anime"), h)
+
+    def _resume_file(self, folder, name, path, start, mtime):
+        os.makedirs(folder, exist_ok=True)
+        file = os.path.join(folder, name)
+        with open(file, "w", encoding="utf-8") as f:
+            f.write(f"# {path}\nstart={start}\n")
+        os.utime(file, (mtime, mtime))
+
+    def test_mpv_history_reads_libmpv_041s_state_folder_too(self):
+        """mpv.net 7.1 (libmpv 0.41) keeps resume files in %LOCALAPPDATA%\\mpv\\
+        watch_later; the config folder's watch_later stopped changing (measured:
+        newest file 2026-10-02 there, today's in the new one). Both are read; the
+        newest file for a path wins."""
+        from unittest import mock
+        from utils.library_scan import read_mpv_history, resume_dirs
+        cfg = os.path.join(self.tmp, "mpvcfg")
+        state = os.path.join(self.tmp, "state")
+        os.makedirs(cfg)
+        self._resume_file(os.path.join(cfg, "watch_later"), "A", "C:\\anime\\Show Ep1.mp4", 100, 1000)
+        self._resume_file(os.path.join(cfg, "watch_later"), "B", "C:\\anime\\Show Ep2.mp4", 50, 1000)
+        self._resume_file(os.path.join(state, "watch_later"), "B", "C:\\anime\\Show Ep2.mp4", 900, 2000)
+        self._resume_file(os.path.join(state, "watch_later"), "C", "C:\\anime\\Show Ep3.mp4", 30, 2000)
+        with mock.patch.dict(os.environ, {"AED_MPV_STATE_DIR": state}):
+            self.assertEqual([os.path.join(state, "watch_later"), os.path.join(cfg, "watch_later")],
+                             resume_dirs(cfg))
+            h = read_mpv_history(cfg)
+        norm = os.path.normcase
+        self.assertEqual({norm("C:\\anime\\Show Ep1.mp4"): 100.0,      # only in the old folder
+                          norm("C:\\anime\\Show Ep2.mp4"): 900.0,      # the newer file wins
+                          norm("C:\\anime\\Show Ep3.mp4"): 30.0}, h)   # only in the new one
+
+    def test_mpv_history_follows_watch_later_dir_in_mpv_conf(self):
+        from unittest import mock
+        from utils.library_scan import read_mpv_history, resume_dirs
+        cfg = os.path.join(self.tmp, "mpvcfg")
+        state = os.path.join(self.tmp, "state")
+        os.makedirs(cfg)
+        with open(os.path.join(cfg, "mpv.conf"), "w", encoding="utf-8") as f:
+            f.write("save-position-on-quit=yes\n# watch-later-dir=C:/nope\n"
+                    "watch-later-directory=~~/old-name  # the option's old name\n"
+                    "watch-later-dir=~~state/mine\n"
+                    "[some-profile]\nwatch-later-dir=C:/only-in-a-profile\n")
+        self._resume_file(os.path.join(state, "mine"), "A", "C:\\anime\\Show Ep7.mp4", 70, 1000)
+        with mock.patch.dict(os.environ, {"AED_MPV_STATE_DIR": state}):
+            dirs = resume_dirs(cfg)
+            h = read_mpv_history(cfg)
+        self.assertEqual(os.path.join(state, "mine"), dirs[0])        # the last top-level one
+        self.assertNotIn("C:/only-in-a-profile", dirs)
+        self.assertEqual(70.0, h[os.path.normcase("C:\\anime\\Show Ep7.mp4")])
+        self.assertEqual(os.path.join(os.environ["LOCALAPPDATA"], "mpv")
+                         if os.environ.get("LOCALAPPDATA") else "",
+                         self._state_dir_without_override())
+
+    def _state_dir_without_override(self):
+        from unittest import mock
+        from utils.library_scan import mpv_state_dir
+        env = {k: v for k, v in os.environ.items() if k != "AED_MPV_STATE_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            return mpv_state_dir()
+
+    def test_tests_never_read_the_users_mpv_resume_files(self):
+        from utils.library_scan import resume_dirs
+        real = os.path.join(os.environ.get("LOCALAPPDATA", ""), "mpv")
+        for folder in resume_dirs(os.path.join(self.tmp, "mpvcfg")):
+            self.assertFalse(os.path.normcase(folder).startswith(os.path.normcase(real) + os.sep),
+                             folder)
 
     def test_watch_state_from_resume_points(self):
         from utils.library_scan import watch_state
@@ -4618,6 +4726,7 @@ class EpisodeSourceTests(unittest.TestCase):
         from utils import watch_later as wl
         self.wl = wl
         self.tmp = tempfile.mkdtemp(prefix="aed_src_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         patch = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
         patch.start()
         self.addCleanup(patch.stop)
@@ -4683,6 +4792,7 @@ class LibraryPosterTests(unittest.TestCase):
         from utils import watch_later as wl
         self.wl = wl
         tmp = tempfile.mkdtemp(prefix="aed_poster_")
+        self.addCleanup(shutil.rmtree, tmp, True)
         patch = mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json"))
         patch.start()
         self.addCleanup(patch.stop)
@@ -4794,6 +4904,7 @@ class WatchLaterTabClickTests(unittest.TestCase):
         from utils import watch_later as wl
         from ui.watch_later_tab import EntryDialog
         tmp = tempfile.mkdtemp(prefix="aed_wldlg_")
+        self.addCleanup(shutil.rmtree, tmp, True)
         url = "https://witanime.site/anime/show-d/"
         with mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json")):
             wl.add("Show D", url, "witanime.site")
@@ -4830,6 +4941,7 @@ class WatchLaterTabClickTests(unittest.TestCase):
         from utils import watch_later as wl
         from ui.watch_later_tab import WatchLaterWidget
         tmp = tempfile.mkdtemp(prefix="aed_wltab_")
+        self.addCleanup(shutil.rmtree, tmp, True)
         stray = []
 
         class Spy(QObject):
@@ -4868,6 +4980,7 @@ class WatchLaterTabClickTests(unittest.TestCase):
         from utils import watch_later as wl
         from ui.watch_later_tab import WatchLaterWidget
         tmp = tempfile.mkdtemp(prefix="aed_wltab_")
+        self.addCleanup(shutil.rmtree, tmp, True)
         with mock.patch.object(wl, "FILE", os.path.join(tmp, "watch_later.json")):
             w = WatchLaterWidget()
             for key in (wl.LATER, wl.COMPLETED, wl.WATCHING):

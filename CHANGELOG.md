@@ -17,7 +17,8 @@ turns that heading into the version number when the release is made.
   is saved every 30 seconds, so a player crash loses at most half a minute.
 - **Brings in what you already have.** The first time you open it, every anime
   in your download folder is added, with what you had already watched in
-  mpv.net, and their posters are looked up.
+  mpv.net, and their posters are looked up. Newer mpv.net versions (7.1 and
+  later) keep where you stopped in a different folder; both are read.
 - **Per-anime history and sources.** Each anime keeps its own download history,
   and each episode shows the website it was downloaded from.
 - **Continue downloading** gets the episodes the site has that aren't on disk yet.
