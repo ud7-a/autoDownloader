@@ -1,90 +1,124 @@
-# Auto Episodes Downloader — Cloud Notification Service
+# Cloud Notification Service
 
-This service enables **offline Discord notifications** for followed anime in your Watchlist. It periodically checks supported anime sources in the cloud and sends rich Discord notifications to subscribed users even when their personal computer is turned off.
+The optional AED service checks followed anime and sends Discord notifications
+while the user's PC is off. Remote download commands are handled by the desktop
+app or background watcher when the PC is on.
 
----
+The API uses FastAPI; subscribers, follows, episode watermarks, and commands live
+in **PostgreSQL**. A shared source URL is fetched once per check cycle. Webhooks
+are encrypted with Fernet, access tokens are stored as hashes, and download
+actions are HMAC-signed.
 
-## Key Features
+## Configuration
 
-1. **Catalogue Deduplication**: When multiple users follow the same anime (e.g. *One Piece*), the server checks the source page only **once** per cycle, keeping scraper load minimal.
-2. **Encrypted at Rest**: Discord Webhook URLs are encrypted with **Fernet (AES-128-CBC + HMAC-SHA256)**. Plaintext webhooks are never stored, logged, or returned in API responses.
-3. **Zero-Spam Baseline**: Adding an ongoing anime with 1,000 episodes will not spam your Discord channel with 1,000 messages. Initial subscription syncs to the current latest episode and only alerts on future releases.
-4. **Rich Discord Embeds**: Formatted alerts with anime titles, episode numbers, links, timestamps, and colors.
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Required PostgreSQL connection string |
+| `AED_NOTIFY_KEY` | Required Fernet key for webhook encryption and action signatures |
+| `AED_NOTIFY_SCHEMA` | Database schema; defaults to `public` |
+| `AED_DISABLE_CHECKER` | Any non-empty value disables the API's built-in checker |
+| `PORT` | Container HTTP port; defaults to `8000` |
 
----
+Keep the database and encryption key across restarts. The service creates its
+schema and tables on database access; the database account needs permission to
+create and update them. There is no SQLite backend, and `AED_NOTIFY_DB` is not
+used by the store.
 
-## AED_NOTIFY_KEY — read before deploying
+Generate a key **once**, then save it outside the host and reuse it:
 
-Every stored Discord webhook is encrypted with this Fernet key, and it is **not
-recoverable from anywhere else**. If it is lost or changed, every stored webhook
-becomes permanently undecryptable: notifications stop and each user has to re-enter
-their webhook in the app.
-
-Set it by hand and keep a copy somewhere separate from the host. `render.yaml`
-deliberately uses `sync: false` rather than `generateValue: true` so the key is
-something you hold rather than something the platform holds for you.
-
-The service refuses to start without it, on purpose — a generated-on-boot key would
-appear to work until the next restart and then silently orphan every stored webhook.
-
-## The database must be on persistent storage
-
-`AED_NOTIFY_DB` must point at a real disk. On an ephemeral path such as `/tmp`, every
-restart drops all subscribers, their follows and their notified-episode watermarks.
-The deployment config mounts a disk at `/data` for this reason.
-
-If the database is lost anyway, clients recover on their own: the desktop app
-re-registers when the service returns `401`, and subscriber ids are derived from the
-webhook, so the same identity comes back. The **server** must never paper over the
-loss by trusting an id it is handed — it used to, and that accepted any caller.
-
----
-
-## Quick Start (Docker / VPS)
-
-### 1. Generate an Encryption Key
-Run in Python:
 ```bash
+python -m pip install cryptography
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### 2. Run with Docker Compose
+Losing or replacing `AED_NOTIFY_KEY` makes existing webhook values undecryptable
+and invalidates old signed download links. A missing key causes encryption and
+signing operations to fail; a successful health response does not prove that the
+key or database is configured.
+
+## Docker setup
+
+Run from the repository root on a Docker host. The following commands use Bash:
+
 ```bash
-export AED_NOTIFY_KEY="<your_generated_fernet_key>"
-docker compose up -d
+export AED_NOTIFY_KEY="<saved_fernet_key>"
+export DATABASE_URL="postgresql://user:password@database-host:5432/aed"
+docker compose -f service/docker-compose.yml up -d --build
 ```
 
-The service will start on port `8000`.
+Replace both placeholders. The PostgreSQL host must be reachable **from the
+container**; `localhost` inside the container refers to the container itself.
+Compose requires both variables and builds with the repository root as context,
+matching the Dockerfile's `COPY service/requirements.txt` instruction.
+The API is exposed on port `8000`. No local database volume is required.
 
----
+For Render and scheduling setup, see [the deployment guide](../docs/DEPLOYMENT.md).
 
-## Manual Installation (Without Docker)
+## Run from source
+
+Use Python 3.13. From the repository root, in a virtual environment:
 
 ```bash
-# 1. Install dependencies
-pip install -r service/requirements.txt
-
-# 2. Set environment variables
-export AED_NOTIFY_KEY="<your_generated_fernet_key>"
-export AED_NOTIFY_DB="/var/data/notify.db"
-
-# 3. Start the API server
+python -m pip install -r service/requirements.txt
+python -m playwright install --with-deps chromium
+export AED_NOTIFY_KEY="<saved_fernet_key>"
+export DATABASE_URL="postgresql://user:password@database-host:5432/aed"
 python -m uvicorn service.api:app --host 0.0.0.0 --port 8000
 ```
 
-To run the background checker worker in standalone mode:
-```python
-from service.checker import start_checker_loop
+These server commands use Bash. On Windows, assign variables using
+`$env:NAME = "value"` in PowerShell.
 
-start_checker_loop(interval_seconds=900)  # Checks every 15 minutes
+## Scheduling
+
+The API starts `checker.start_checker_loop` in a daemon thread by default. It
+checks immediately, then waits **900 seconds after each cycle** before checking
+again. You do not need to start a second standalone checker beside the API.
+
+The repository also includes a [GitHub Cloud checker workflow](../.github/workflows/cloud-checker.yml)
+that requests `POST /v1/check` every **10 minutes**. GitHub's scheduler is
+best-effort. Set `AED_DISABLE_CHECKER=1` to use external scheduling alone, and
+configure the repository variable `CLOUD_SERVICE_URL` with the service's base URL.
+
+By default, a cycle includes shows scheduled for today, yesterday, or tomorrow
+in UTC, plus shows without a known release day. Source availability still
+determines whether a check can find episodes; animerco cloud requests may be
+blocked.
+
+## Desktop configuration
+
+1. Open **Watchlist** in AED.
+2. Open the cloud notification settings.
+3. Enter the service URL and Discord webhook URL, then enable cloud notifications.
+
+The desktop synchronizes followed shows. Its initial episode counts seed
+notification baselines; first server discovery also establishes a baseline
+instead of sending the full backlog. If the service loses a subscriber record,
+the desktop can re-register after an authentication failure. This does not
+restore lost follow or notification history from the database.
+
+## Health and diagnostics
+
+- `GET /v1/health` reports API availability. `/health` and `/healthz` are aliases.
+- `POST /v1/check` runs a cycle and returns counts of checks, notifications, and errors.
+- `GET /docs` exposes the API documentation.
+
+The health endpoint does not test PostgreSQL access, the encryption key, or
+notification delivery. Use a configured follow and a check cycle to verify the
+notification path.
+
+## Tests
+
+Install the service dependencies, point `DATABASE_URL` at a dedicated test
+PostgreSQL database, and run from the repository root:
+
+```bash
+export DATABASE_URL="postgresql://user:password@localhost:5432/aed_test"
+export AED_NOTIFY_SCHEMA="aed_test"
+python -m unittest discover -s service/tests -v
 ```
 
----
-
-## Desktop App Configuration
-
-1. Open **Auto Episodes Downloader**.
-2. Go to the **Watchlist** tab.
-3. Look for the **☁️ Cloud Discord Notifications** card at the top.
-4. Click the ⚙️ settings button, enter your **Cloud Service URL** (e.g. `https://your-domain.com` or `http://localhost:8000`) and your **Discord Webhook URL**.
-5. Toggle the switch **ON**. Your followed anime will automatically sync with the cloud service!
+The tests supply a test encryption key and clear their test schema.
+`reset_for_tests()` refuses to clear `public`. The desktop development
+requirements do not include service dependencies, and the current CI and Release
+workflows do not run the service suite.

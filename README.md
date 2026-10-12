@@ -79,13 +79,14 @@ Shader performance depends on your GPU. See [third-party notices](assets/mpvnet/
 The optional cloud service checks followed shows and sends Discord alerts while your PC is off. In **Watchlist**, open the cloud notification settings, enter the service URL and your Discord webhook, and enable cloud notifications.
 
 - The repository's [Cloud checker workflow](.github/workflows/cloud-checker.yml) requests a check every **10 minutes**. GitHub scheduling is best-effort, so alerts may arrive later.
-- The desktop Watchlist checks shows scheduled for today on launch and again every **30 minutes** while the app is running.
-- Discord alerts include a download link. Remote downloads require your PC and AED's background watcher to be running and connected to the service.
+- The API also starts a built-in checker by default, with a **15-minute wait between cycles**. Set `AED_DISABLE_CHECKER=1` when using only an external scheduler.
+- The desktop Watchlist checks shows scheduled for today, plus shows with no known release day, on launch and again every **30 minutes** while the app is running.
+- Discord alerts include a download link. Remote downloads require your PC to be on, with AED or its background watcher running and connected to the service.
 - The service encrypts stored webhooks with Fernet and signs download actions with HMAC. Shows shared by multiple subscribers are checked once per cycle.
 
 **Source limitation:** animerco blocks requests from cloud servers. Use witanime for cloud alerts; the desktop app can check animerco while your PC is on.
 
-The service uses FastAPI and PostgreSQL. Self-hosting configuration lives in [render.yaml](render.yaml), [service/docker-compose.yml](service/docker-compose.yml), and the [service source](service/).
+The service uses FastAPI and PostgreSQL. See the [deployment guide](docs/DEPLOYMENT.md) and [service README](service/README.md) for database, encryption key, and scheduling setup. Desktop webhook and token storage uses reversible obfuscation; cloud webhook storage uses Fernet encryption.
 
 ## Development
 
@@ -173,6 +174,8 @@ flowchart TD
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Cloud deployment](docs/DEPLOYMENT.md)
+- [Cloud service setup and tests](service/README.md)
 - [Release process](docs/RELEASING.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)

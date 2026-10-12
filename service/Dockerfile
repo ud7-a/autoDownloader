@@ -1,4 +1,4 @@
-# Cloud Notification Microservice with Headless Playwright Chromium for Cloudflare Bypass
+# Cloud notification service with Playwright Chromium for source navigation
 FROM python:3.13-slim
 
 WORKDIR /app
@@ -22,11 +22,9 @@ COPY . /app
 # Set PYTHONPATH so service.api and service.checker are found cleanly
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-ENV AED_NOTIFY_DB=/data/notify.db
 ENV PORT=8000
 
-# Volume mount point for persistent SQLite database
-VOLUME ["/data"]
+# DATABASE_URL and AED_NOTIFY_KEY are supplied at runtime. Data lives in PostgreSQL.
 
 EXPOSE 8000
 

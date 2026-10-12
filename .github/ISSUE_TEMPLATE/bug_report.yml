@@ -10,8 +10,8 @@ body:
     id: version
     attributes:
       label: Application Version
-      description: What version of AED are you using? (e.g., 4.4.0)
-      placeholder: e.g. 4.4.0
+      description: What version of AED are you using? Find it in the Check for updates tooltip.
+      placeholder: e.g. 5.0.0
     validations:
       required: true
   - type: dropdown
@@ -37,9 +37,9 @@ body:
       label: Steps to Reproduce
       description: Step-by-step instructions to reproduce the issue.
       placeholder: |
-        1. Go to 'Search' tab
+        1. Go to 'Search Anime' tab
         2. Search for '...'
-        3. Click 'Download'
+        3. Click 'Load'
         4. See error
     validations:
       required: true
@@ -47,5 +47,5 @@ body:
     id: logs
     attributes:
       label: Relevant Logs / Error Output
-      description: Paste any error messages or logs from the application.
+      description: Paste relevant errors or logs. Remove Discord webhooks, tokens, and other secrets first.
       render: shell

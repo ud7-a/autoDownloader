@@ -1,40 +1,70 @@
 # System Architecture
 
-Auto Episodes Downloader consists of two main components:
-1. **Desktop Client Application** (`core/`, `ui/`, `utils/`, `tools/`)
-2. **Cloud Notification Microservice** (`service/`)
+Auto Episodes Downloader has a Windows desktop app and an optional cloud
+notification service. Their dependencies and persistence are separate.
 
----
+## Desktop app
 
-## 🖥️ 1. Desktop Client Application
+The interface uses **Python 3.13**, **PyQt6**, and **QFluentWidgets**. It has a
+Fluent-style dark appearance; the widgets are Qt widgets.
 
-The desktop application is built with **Python 3.13** and **PyQt6** using **QFluentWidgets** for a native WinUI 3 Fluent Dark interface.
+| Module | Responsibility |
+| --- | --- |
+| `main.py` | App startup, single-instance handling, and background watcher mode |
+| `ui/downloader_tab.py` | Download configuration, episode selection, and session recovery |
+| `ui/search_tab.py` | Source search, show details, and loading built-in profiles |
+| `ui/watchlist_tab.py` | Followed shows, release schedules, and cloud notification settings |
+| `ui/watch_later_tab.py` | Library: Watching, Watch later, Completed, and playback actions |
+| `ui/manager_tab.py` | Editable site automation paths and profile import/export |
+| `core/selenium_engine.py` | Chrome navigation, mirror selection, and aria2c download execution |
+| `core/watcher.py` | Remote command polling when the main app is closed |
+| `utils/config.py` | Settings, profiles, and desktop cloud-service calls |
+| `utils/database.py` | Local SQLite download history |
+| `utils/watch_later.py` | Library persistence and watched-episode state |
+| `utils/library_scan.py` | Importing local media and mpv playback state |
 
-### Key Subsystems:
-- **Downloader Tab (`ui/downloader_tab.py`)**:
-  - Directs download requests to the multi-stream engine.
-  - Controls concurrency, volume, directory path, and active profiles.
-- **Watchlist Tab (`ui/watchlist_tab.py`)**:
-  - Manages followed anime series and displays airing schedules.
-  - Handles Cloud Discord Notifications configuration and synchronization.
-- **Search Tab (`ui/search_tab.py`)**:
-  - Scrapes search results from supported anime providers.
-  - Allows 1-click following directly to the Watchlist.
-- **Profile Manager (`ui/manager_tab.py`)**:
-  - Configurable data-driven site flow definitions (XPaths, delays, and download button navigation).
-- **Watch Later Tab (`ui/watch_later_tab.py`, data in `utils/watch_later.py`)**:
-  - Anime the user plans to watch, is watching, or has finished (`watch_later.json`). Adding one never creates a profile; Download does.
-  - Each anime keeps its own download history (fed from `log_history`) and watched episodes, ticked by hand or automatically from `aed-progress.lua`, which mpv.net runs and which appends a line per played file to `aed-progress.log`.
-  - `utils/library_scan.py` imports what is already on disk on first open (and from "Scan anime folder"): every anime folder and saved profile, with watched episodes from mpv.net's resume files and the progress log. Folders with no known site page are keyed `local://<folder>` and are merged into the real entry when that anime is added from Search.
+The default desktop data directory is `C:\Auto Episodes Downloader`;
+`AED_APP_DIR` redirects it. Media uses the selected download folder.
+The installer places executables in the data directory's `App` subfolder.
+The portable build also uses the default data directory unless redirected.
 
----
+The Library stores entries in `watch_later.json` and associates download history
+with each show. Local entries use `local://<folder>` identities until merged
+with a source-backed entry. The bundled `aed-progress.lua` records playback on
+pause, file end, shutdown, and every 30 seconds. The Library reads that log and
+mpv resume state to update watched episodes.
 
-## ☁️ 2. Cloud Notification Microservice (`service/`)
+Desktop code does not import the cloud service modules: those require packages
+that are not part of the desktop runtime.
 
-The cloud microservice runs independently in the cloud (hosted on Render or VPS) to provide 24/7 episode tracking and Discord alerts even when the user's PC is turned off.
+## Cloud service
 
-### Architectural Principles:
-1. **Catalogue Deduplication**: Multiple users following the same anime share a single record in the `anime` table. The scraper polls each show only once per cycle.
-2. **Encrypted at Rest**: Subscriber Discord Webhooks are encrypted using **Fernet (AES-128-CBC + HMAC-SHA256)** with the secret `AED_NOTIFY_KEY`.
-3. **Daily Schedule Filtering**: The checker only queries anime scheduled to air **today**, minimizing server load and external site traffic.
-4. **Backlog Suppression**: When a user follows an existing show, their notification baseline is seeded to the current episode to prevent spamming older episodes.
+The service uses **FastAPI**, **PostgreSQL**, and the fetchers in
+`service/checker.py`. `service/api.py` handles HTTP requests,
+`service/store.py` owns database access, and `service/crypto.py` handles webhook
+encryption, token hashing, and signed download actions.
+
+- Each source URL has a shared `anime` record. A check cycle queries it once and
+  fans out notifications to its subscribers.
+- Release filtering includes **today, yesterday, and tomorrow in UTC**, plus
+  shows without a known release day. This accommodates timezone differences.
+- Initial discovery establishes a baseline rather than sending the full backlog.
+- Webhooks are encrypted with Fernet. PostgreSQL holds subscribers, follows,
+  episode watermarks, and remote commands. The desktop's credential storage
+  uses reversible obfuscation, as described in [SECURITY.md](../SECURITY.md).
+
+## Scheduling and remote downloads
+
+| Mechanism | Current behavior |
+| --- | --- |
+| Desktop Watchlist | Checks today's shows and unknown release days on launch and every 30 minutes |
+| Built-in API checker | Enabled by default; waits 900 seconds after each cycle |
+| GitHub Cloud checker workflow | Requests `POST /v1/check` every 10 minutes; scheduled runs can be delayed |
+| Remote command handling | The open app polls commands; the background watcher handles them when the app is closed |
+
+The API checker and GitHub workflow are separate triggers. Set
+`AED_DISABLE_CHECKER=1` when using only an external scheduler. Remote downloads
+require the user's PC to be on and the app or watcher to be connected.
+
+See the [deployment guide](DEPLOYMENT.md) and
+[service README](../service/README.md) for required environment variables.

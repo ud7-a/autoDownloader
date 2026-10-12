@@ -1,10 +1,8 @@
-version: '3.8'
-
 services:
   notify-service:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: service/Dockerfile
     container_name: aed_notify_service
     restart: unless-stopped
     ports:
@@ -13,9 +11,7 @@ services:
       - PORT=8000
       # Required: compose refuses to start without it (no placeholder default).
       - AED_NOTIFY_KEY=${AED_NOTIFY_KEY:?Set AED_NOTIFY_KEY to a Fernet key before starting}
-      - AED_NOTIFY_DB=/data/notify.db
-    volumes:
-      - aed_notify_data:/data
-
-volumes:
-  aed_notify_data:
+      - DATABASE_URL=${DATABASE_URL:?Set DATABASE_URL to a PostgreSQL connection string before starting}
+      - AED_NOTIFY_SCHEMA=${AED_NOTIFY_SCHEMA:-public}
+      # Leave unset for the API's built-in checker, or set to 1 for external scheduling.
+      - AED_DISABLE_CHECKER=${AED_DISABLE_CHECKER:-}

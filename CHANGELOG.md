@@ -3,8 +3,10 @@
 What changed in each release. The section for a version is what appears on its
 GitHub release page.
 
-Add new entries under **Unreleased**; `publish.py` (or the Release workflow)
-turns that heading into the version number when the release is made.
+Add new entries under **Unreleased**. The manually dispatched Release workflow
+stamps that section with the release version. For a manual tag release, run
+`python tools/release_notes.py --stamp X.Y.Z` before committing and tagging.
+See [the release guide](docs/RELEASING.md).
 
 ## Unreleased
 
