@@ -5513,6 +5513,74 @@ class LibraryShortcutTests(unittest.TestCase):
         self.assertEqual(2, len(warnings))
         self.assertIn("Sign out of Windows and back in", warnings[0])
 
+    def _install_env(self, drops):
+        """install() against a fake Explorer: the n-th save of the link is
+        registered, then dropped after `drops[n]` checks (None = kept)."""
+        from types import SimpleNamespace
+        from unittest import mock
+        from utils import shortcut
+        tmp = tempfile.mkdtemp(prefix="aed_inst_")
+        import shutil
+        self.addCleanup(shutil.rmtree, tmp, True)
+        clock = SimpleNamespace(now=0.0, slept=0.0)
+        state = SimpleNamespace(saves=0, held=None, checks=0)
+
+        def save(path, *args):
+            hotkey = args[4]
+            header = bytearray(0x4C)
+            header[:4] = b"\x4c\x00\x00\x00"
+            value = shortcut.to_lnk_hotkey(hotkey)
+            header[0x40], header[0x41] = value & 0xFF, value >> 8
+            with open(path, "wb") as f:
+                f.write(bytes(header))
+            state.held, state.checks = hotkey, 0
+            state.saves += 1
+
+        def is_taken(hotkey):
+            if hotkey != state.held:
+                return False
+            state.checks += 1
+            limit = drops[min(state.saves, len(drops)) - 1]
+            return limit is None or state.checks <= limit
+
+        def sleep(seconds):
+            clock.now += seconds
+            clock.slept += seconds
+        patches = [mock.patch.dict(os.environ, {"AED_SHORTCUT_DIR": tmp}),
+                   mock.patch.object(shortcut, "_save_shell_link", side_effect=save),
+                   mock.patch.object(shortcut, "_notify_shell"),
+                   mock.patch.object(shortcut, "is_taken", side_effect=is_taken),
+                   mock.patch.object(shortcut, "time", SimpleNamespace(
+                       time=lambda: clock.now, sleep=sleep)),
+                   mock.patch.object(shortcut.sys, "platform", "win32")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return shortcut, state, clock
+
+    def test_a_key_explorer_drops_right_away_is_saved_again(self):
+        """Measured after the rename from "Play next": Explorer registered the new
+        key, then dropped it ~0.1 s later (a delete it handled late). install()
+        now checks the key stays held, and saves again after a pause if not."""
+        shortcut, state, clock = self._install_env(drops=[2, None])
+        ok, message = shortcut.install("Ctrl+Alt+M", action="play_next")
+        self.assertTrue(ok)
+        self.assertIn("continues what you're watching", message)
+        self.assertEqual(2, state.saves)                       # the retry
+        self.assertGreaterEqual(clock.slept, shortcut.SETTLE_SECONDS)
+
+    def test_a_key_explorer_never_keeps_ends_in_the_sign_out_advice(self):
+        shortcut, state, _clock = self._install_env(drops=[1, 1, 1])
+        ok, message = shortcut.install("Ctrl+Alt+M", action="play_next")
+        self.assertTrue(ok)                                    # the file is right
+        self.assertIn("sign out of Windows", message)
+        self.assertEqual(shortcut.SAVE_ATTEMPTS, state.saves)
+
+    def test_a_kept_key_is_saved_once(self):
+        shortcut, state, _clock = self._install_env(drops=[None])
+        self.assertTrue(shortcut.install("Ctrl+Alt+M", action="play_next")[0])
+        self.assertEqual(1, state.saves)
+
     def test_an_old_play_next_shortcut_moves_to_continue_watching(self):
         """The action was renamed; a shortcut saved as "... - Play next.lnk" is
         deleted and written again under the new name with the same key (a renamed

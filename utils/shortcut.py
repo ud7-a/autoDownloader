@@ -507,6 +507,21 @@ def _wait(condition, seconds):
         time.sleep(0.15)
 
 
+SAVE_ATTEMPTS = 3
+SETTLE_SECONDS = 2.5        # before a retry: Explorer finishes with the delete first
+HOLD_CHECK_SECONDS = 1.0    # a registration that survives this long stays
+
+
+def _keeps(hotkey, seconds):
+    """Explorer still holds `hotkey` throughout the next `seconds`."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if not is_taken(hotkey):
+            return False
+        time.sleep(0.1)
+    return True
+
+
 def install(hotkey, wait_for_explorer=3.0, action="library"):
     """Write `action`'s Start-menu shortcut with `hotkey`. Returns (ok, message).
 
@@ -527,24 +542,32 @@ def install(hotkey, wait_for_explorer=3.0, action="library"):
     # Checked first: once ours is saved, "taken" can't tell Explorer from them.
     if hotkey != old and is_taken(hotkey):
         return False, f"Another program has already claimed {hotkey}. Pick another one."
-    if os.path.exists(path):
+    for attempt in range(SAVE_ATTEMPTS):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError as e:
+                return False, f"Couldn't replace the old shortcut: {e}"
+            _notify_shell(path)
+            if old:
+                _wait(lambda: not is_taken(old), 2.0)    # Explorer lets go of the old key
+            if attempt:
+                time.sleep(SETTLE_SECONDS * attempt)     # and finishes with the delete
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
-            os.remove(path)
+            _save_shell_link(path, program, args, cwd, icon, hotkey, info["description"])
         except OSError as e:
-            return False, f"Couldn't replace the old shortcut: {e}"
-        _notify_shell(path)
-        if old:
-            _wait(lambda: not is_taken(old), 2.0)        # Explorer lets go of the old key
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        _save_shell_link(path, program, args, cwd, icon, hotkey, info["description"])
-    except OSError as e:
-        return False, f"Couldn't create the shortcut: {e}"
-    if read_lnk_hotkey(path) != to_lnk_hotkey(hotkey):
-        return False, "Couldn't save the key combination in the shortcut."
-    # Explorer holds the combination once it has registered the shortcut.
-    if wait_for_explorer <= 0 or _wait(lambda: is_taken(hotkey), wait_for_explorer):
-        return True, f"{hotkey} {info['done']}"
+            return False, f"Couldn't create the shortcut: {e}"
+        if read_lnk_hotkey(path) != to_lnk_hotkey(hotkey):
+            return False, "Couldn't save the key combination in the shortcut."
+        if wait_for_explorer <= 0:
+            return True, f"{hotkey} {info['done']}"
+        # Explorer holds the combination once it has registered the shortcut --
+        # and must keep holding it: a delete it handles late (measured after the
+        # rename from "Play next") takes the new key with it ~0.1 s later.
+        if _wait(lambda: is_taken(hotkey), wait_for_explorer) and _keeps(hotkey, HOLD_CHECK_SECONDS):
+            return True, f"{hotkey} {info['done']}"
+        old = hotkey
     return True, (f"Saved. If {hotkey} doesn't respond yet, sign out of Windows and back in "
                   "once -- Windows picks up new shortcut keys at sign-in.")
 
