@@ -8,6 +8,8 @@ turns that heading into the version number when the release is made.
 
 ## Unreleased
 
+## 5.0.0 — 2026-10-12
+
 ### 📚 New: the Library tab (replaces History)
 - **Watching / Watch later / Completed** lists for every anime you download or
   save from Search, with a **Continue watching** strip that plays the next
