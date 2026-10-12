@@ -1819,11 +1819,10 @@ class WitAnimeBrowserModeTests(unittest.TestCase):
             self.assertIn("--window-position=-10000,-10000", args)
             self.assertIn("--window-size=1920,1080", args)
 
-    def test_downloader_profile_changes_preserve_browser_defaults(self):
+    def test_downloader_tab_headless_remains_user_controlled(self):
         import copy
         from unittest import mock
         import ui.downloader_tab as dt
-        from ui.settings_tab import SettingsWidget
         import utils.config as cfg
         saved_sites = copy.deepcopy(cfg.sites_data)
         saved_settings = copy.deepcopy(cfg.app_settings)
@@ -1833,17 +1832,22 @@ class WitAnimeBrowserModeTests(unittest.TestCase):
         ))
         cfg.sites_data["WitAnime Show"] = {"url": "https://witanime.site/watch/hyouken/{x}"}
         cfg.sites_data["Animerco Show"] = {"url": "https://eta.animerco.org/episode/hyouken-{x}"}
-        cfg.app_settings["headless"] = False
+        cfg.app_settings["headless"] = True
+
         with mock.patch.object(dt, "save_config", lambda: None):
             w = dt.DownloaderWidget()
-            settings = SettingsWidget()
-            for profile in ("WitAnime Show", "Animerco Show"):
-                w.on_site_select(profile)
-                self.assertFalse(cfg.app_settings["headless"])
-                self.assertFalse(settings.chk_headless.isChecked())
-                self.assertTrue(settings.chk_headless.isEnabled())
             w._save_timer.stop()
-            settings._save_timer.stop()
+            # Select WitAnime profile: user preference is preserved, checkbox remains enabled
+            w.on_site_select("WitAnime Show")
+            self.assertTrue(w.chk_headless.isChecked())
+            self.assertTrue(w.chk_headless.isEnabled())
+            self.assertEqual(w.chk_headless.text(), "Run Invisibly (Headless)")
+
+            # Select Animerco profile: checkbox remains enabled and checked
+            w.on_site_select("Animerco Show")
+            self.assertTrue(w.chk_headless.isChecked())
+            self.assertTrue(w.chk_headless.isEnabled())
+            self.assertEqual(w.chk_headless.text(), "Run Invisibly (Headless)")
 
     def test_progress_tab_paused_panel_headless_remains_enabled(self):
         from unittest import mock
@@ -1893,15 +1897,18 @@ class WitAnimeBrowserModeTests(unittest.TestCase):
     def test_start_watch_download_headless_mode(self):
         from unittest import mock
         import ui.downloader_tab as dt
-        with mock.patch.object(dt, "save_config", lambda: None), \
-                mock.patch.dict(dt.app_settings, {"headless": False}):
+        with mock.patch.object(dt, "save_config", lambda: None):
             w = dt.DownloaderWidget()
             w._save_timer.stop()
+            w.chk_headless.setChecked(True)
             begun_params = []
             w._begin_download = lambda p: begun_params.append(p)
+
+            # Witanime watch download -> headless respects chk_headless
             w.start_watch_download("Show1", "https://witanime.site/watch/show/{x}", "witanime.site", "1")
-            self.assertFalse(begun_params[-1]["headless"])
-            dt.app_settings["headless"] = True
+            self.assertTrue(begun_params[-1]["headless"])
+
+            # Animerco watch download -> headless respects chk_headless
             w.start_watch_download("Show2", "https://eta.animerco.org/episode/show-{x}", "eta.animerco.org", "1")
             self.assertTrue(begun_params[-1]["headless"])
 
@@ -2458,7 +2465,8 @@ class ActiveCardOrderTests(unittest.TestCase):
 
 
 class DownloaderSaveSettingsTests(unittest.TestCase):
-    """Defaults are saved from Settings; pause changes also reach recovery and retry."""
+    """save_settings had its second half inside on_webhook_updated: concurrency,
+    auto mode and the episode range were never written to disk."""
 
     @classmethod
     def setUpClass(cls):
@@ -2469,12 +2477,12 @@ class DownloaderSaveSettingsTests(unittest.TestCase):
     def test_concurrency_is_saved_and_written(self):
         import copy
         from unittest import mock
-        import ui.settings_tab as st
+        import ui.downloader_tab as dt
         import utils.config as cfg
         saved = copy.deepcopy(cfg.app_settings)
         self.addCleanup(lambda: (cfg.app_settings.clear(), cfg.app_settings.update(saved)))
-        with mock.patch.object(st, "save_config", lambda: None):
-            w = st.SettingsWidget()
+        with mock.patch.object(dt, "save_config", lambda: None):
+            w = dt.DownloaderWidget()
         w._save_timer.stop()
         w.chk_auto_concurrency.setChecked(False)
         w.spin_concurrency.setValue(5)
@@ -2482,26 +2490,20 @@ class DownloaderSaveSettingsTests(unittest.TestCase):
         self.assertEqual(cfg.app_settings["concurrency"], 5)
         self.assertFalse(cfg.app_settings["concurrency_auto"])
         self.assertTrue(w._save_timer.isActive(), "the disk write must be scheduled")
-        w._save_timer.stop()
 
-    def test_paused_screen_choices_update_saved_defaults(self):
+    def test_paused_screen_choices_reach_the_downloader(self):
         import copy
         from unittest import mock
         import ui.downloader_tab as dt
-        from ui.settings_tab import SettingsWidget
         import utils.config as cfg
         saved = copy.deepcopy(cfg.app_settings)
         self.addCleanup(lambda: (cfg.app_settings.clear(), cfg.app_settings.update(saved)))
         with mock.patch.object(dt, "save_config", lambda: None):
             w = dt.DownloaderWidget()
-        settings = SettingsWidget()
         w.on_paused_settings_changed({"limit": 2, "auto": False, "headless": False})
-        settings.load_defaults()
-        self.assertEqual((settings.spin_concurrency.value(), settings.chk_auto_concurrency.isChecked(),
-                          settings.chk_headless.isChecked()), (2, False, False))
+        self.assertEqual((w.spin_concurrency.value(), w.chk_auto_concurrency.isChecked(),
+                          w.chk_headless.isChecked()), (2, False, False))
         self.assertEqual((cfg.app_settings["concurrency"], cfg.app_settings["headless"]), (2, False))
-        w._save_timer.stop()
-        settings._save_timer.stop()
 
     def test_paused_choices_carry_into_resume_and_retry(self):
         import copy
@@ -2518,8 +2520,7 @@ class DownloaderSaveSettingsTests(unittest.TestCase):
         w.on_paused_settings_changed({"limit": 1, "auto": False, "headless": False})
         session = cfg.app_settings["unfinished_session"]
         self.assertEqual((session["headless"], session["concurrency"]), (False, 1))
-        self.assertEqual(w.last_download_params, {"headless": False, "concurrency": 1,
-                                                        "concurrency_auto": False})
+        self.assertEqual(w.last_download_params, {"headless": False, "concurrency": 1})
 
 
 class ShippedImportTests(unittest.TestCase):

@@ -169,7 +169,6 @@ class AppWindow(FluentWindow):
         self.watch_later_interface = None
         self.watchlist_interface = None
         self.player_interface = None
-        self.settings_interface = None
         self._tabs_built = False
         self.notifier = Notifier(self)   # Windows notifications (finished runs, new episodes)
 
@@ -228,8 +227,6 @@ class AppWindow(FluentWindow):
         
         self.downloader_interface.goto_profiles_signal.connect(
             lambda: self.open_tab("manager_interface"))
-        self.downloader_interface.settings_requested.connect(
-            lambda: self.open_tab("settings_interface"))
 
         # Batch downloads run back-to-back: the engine handles one task at a time.
         self._download_queue = []
@@ -249,13 +246,18 @@ class AppWindow(FluentWindow):
         QTimer.singleShot(1500, self._build_tabs)
 
         # Silent background sync of watchlist & seen episodes with Cloud Service on launch
-        self._cloud_poll_count = 0
-        self._cloud_poll_timer = QTimer(self)
-        self._cloud_poll_timer.timeout.connect(self._poll_cloud_commands)
-        self._sync_cloud_polling()
         if app_settings.get("cloud_notify_enabled"):
             from utils.config import _trigger_bg_cloud_sync
             QTimer.singleShot(2000, _trigger_bg_cloud_sync)
+            # Commands every 5 s, so a click on Discord's download button starts the
+            # download within seconds; the heartbeat rides along every third poll.
+            self._cloud_poll_count = 0
+            self._cloud_poll_timer = QTimer(self)
+            self._cloud_poll_timer.timeout.connect(self._poll_cloud_commands)
+            self._cloud_poll_timer.start(5 * 1000)
+            # The first poll right after the window is up (in the background):
+            # main.py no longer fetches commands before showing it.
+            QTimer.singleShot(0, self._poll_cloud_commands)
 
         if autostart_commands:
             QTimer.singleShot(600, lambda: self._execute_remote_commands(autostart_commands))
@@ -288,20 +290,9 @@ class AppWindow(FluentWindow):
             except Exception:
                 pass
 
-    def _sync_cloud_polling(self):
-        """Apply cloud settings immediately, including enabling them after launch."""
-        if app_settings.get("cloud_notify_enabled"):
-            if not self._cloud_poll_timer.isActive():
-                self._cloud_poll_timer.start(5 * 1000)
-                QTimer.singleShot(0, self._poll_cloud_commands)
-        else:
-            self._cloud_poll_timer.stop()
-
     def _poll_cloud_commands(self):
         """Background poller that sends heartbeat and checks for incoming remote download commands."""
         import threading
-        if not app_settings.get("cloud_notify_enabled"):
-            return
         # One poll at a time: a slow or cold-starting service must not let 5 s ticks
         # pile up threads behind it.
         if getattr(self, "_cloud_poll_busy", False):
@@ -627,13 +618,12 @@ class AppWindow(FluentWindow):
         ("search_interface", FIF.SEARCH, "Search Anime"),
         ("watchlist_interface", FIF.HEART, "Watchlist"),
         ("watch_later_interface", FIF.LIBRARY, "Library"),
-        ("manager_interface", FIF.EDIT, "Profile Manager"),
+        ("manager_interface", FIF.SETTING, "Profile Manager"),
         ("player_interface", FIF.VIDEO, "Video Player"),
-        ("settings_interface", FIF.SETTING, "Settings"),
     )
     DEFERRED_WIDTHS = {"search_interface": 1700, "watchlist_interface": 1300,
                        "watch_later_interface": 1300, "manager_interface": 1300,
-                       "player_interface": 1200, "settings_interface": 1000}
+                       "player_interface": 1200}
 
     def init_navigation(self):
         # Active Tasks is the one tab added later (when a download starts). The
@@ -645,8 +635,7 @@ class AppWindow(FluentWindow):
             self.navigationInterface.addItem(
                 routeKey=key, icon=icon, text=text, tooltip=text,
                 onClick=lambda _checked=False, k=key: self.open_tab(k),
-                position=(NavigationItemPosition.BOTTOM if key == "settings_interface"
-                          else NavigationItemPosition.TOP))
+                position=NavigationItemPosition.TOP)
         # Not a page: runs the update check on demand (the startup one runs once).
         self.navigationInterface.addItem(
             routeKey="check_for_updates", icon=FIF.SYNC, text="Check for updates",
@@ -761,7 +750,7 @@ class AppWindow(FluentWindow):
         self.switchTo(getattr(self, key))
 
     def _build_tabs(self):
-        """Build Search, Watchlist, Library, Profile Manager, Video Player, Settings, and
+        """Build Search, Watchlist, Library, Profile Manager and Video Player, and
         wire them up. Runs once, right after the window's first paint."""
         if self._tabs_built:
             return
@@ -771,13 +760,10 @@ class AppWindow(FluentWindow):
         from ui.manager_tab import SiteManagerWidget
         from ui.watchlist_tab import WatchlistWidget
         from ui.player_tab import PlayerWidget
-        from ui.settings_tab import SettingsWidget
         self.search_interface = AnimeSearchWidget(self)
         self.watchlist_interface = WatchlistWidget()
         self.manager_interface = SiteManagerWidget()
         self.player_interface = PlayerWidget()
-        self.settings_interface = SettingsWidget()
-        self.settings_interface.cloud_changed.connect(self._sync_cloud_polling)
         self._ensure_library()            # already built when started with --library
         for key, _icon, _text in self.DEFERRED_TABS:
             if key == "watch_later_interface":
@@ -798,6 +784,10 @@ class AppWindow(FluentWindow):
         self.watchlist_interface.download_new_signal.connect(self.on_watch_download_new)
         self.watchlist_interface.download_all_signal.connect(self.on_watch_download_all)
         self.watchlist_interface.new_episodes_found.connect(self.on_new_episodes_found)
+
+        # Discord webhook sync between Downloader tab and Watchlist Cloud Notifications
+        self.downloader_interface.webhook_changed.connect(self.watchlist_interface.on_webhook_updated)
+        self.watchlist_interface.webhook_changed.connect(self.downloader_interface.on_webhook_updated)
 
         # Auto-check the Watchlist shortly after launch and periodically while open
         if get_watchlist():

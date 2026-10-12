@@ -10,13 +10,6 @@ See [the release guide](docs/RELEASING.md).
 
 ## Unreleased
 
-- Added a Settings page for Discord/cloud configuration, notification sounds and
-  volume, Windows notifications, and default browser/concurrency preferences.
-- Simplified Downloader to anime/profile, episodes, destination, and starting
-  downloads. New downloads use Settings defaults; resumed sessions keep their
-  saved choices, including automatic/manual concurrency.
-- Cloud command polling starts and stops immediately when cloud settings change.
-
 ## 5.0.0 — 2026-10-12
 
 ### 📚 New: the Library tab (replaces History)

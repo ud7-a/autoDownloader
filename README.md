@@ -49,7 +49,6 @@ Download **`AutoDownloader_Portable.zip`**, extract it, and run **`AutoDownloade
 | Notifications | Receive Windows notifications and Discord alerts, with optional cloud checking and remote download commands. |
 | Playback | Open episodes in mpv.net with a playlist and optional upscaling shaders. |
 | Interface | Use a Fluent-style dark interface with responsive layouts, high-DPI posters, and touch scrolling. |
-| Settings | Configure Discord, cloud notifications, sounds, volume, Windows notifications, and default browser/concurrency behavior in one page. |
 
 ### Supported sources
 
@@ -77,9 +76,7 @@ Shader performance depends on your GPU. See [third-party notices](assets/mpvnet/
 
 ## Discord and cloud notifications
 
-The optional cloud service checks followed shows and sends Discord alerts while your PC is off. In **Settings → Discord**, enter your webhook and service URL, then enable cloud notifications. Use **Save Discord settings** after editing an existing configuration. Followed shows remain in **Watchlist**.
-
-**Settings** also contains notification sounds, volume, Windows notifications, and download defaults. Download and sound preferences save automatically; new downloads use those defaults. **Downloader** focuses on the anime/profile, episodes, destination folder, and starting the download. Resumed sessions retain their saved preferences.
+The optional cloud service checks followed shows and sends Discord alerts while your PC is off. In **Watchlist**, open the cloud notification settings, enter the service URL and your Discord webhook, and enable cloud notifications.
 
 - The repository's [Cloud checker workflow](.github/workflows/cloud-checker.yml) requests a check every **10 minutes**. GitHub scheduling is best-effort, so alerts may arrive later.
 - The API also starts a built-in checker by default, with a **15-minute wait between cycles**. Set `AED_DISABLE_CHECKER=1` when using only an external scheduler.

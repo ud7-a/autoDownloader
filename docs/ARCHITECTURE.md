@@ -11,10 +11,9 @@ Fluent-style dark appearance; the widgets are Qt widgets.
 | Module | Responsibility |
 | --- | --- |
 | `main.py` | App startup, single-instance handling, and background watcher mode |
-| `ui/downloader_tab.py` | Anime/profile, destination, episode selection, download start, and session recovery |
-| `ui/settings_tab.py` | Download defaults, notification sounds and volume, Windows notifications, and Discord/cloud configuration |
+| `ui/downloader_tab.py` | Download configuration, episode selection, and session recovery |
 | `ui/search_tab.py` | Source search, show details, and loading built-in profiles |
-| `ui/watchlist_tab.py` | Followed shows and release schedules |
+| `ui/watchlist_tab.py` | Followed shows, release schedules, and cloud notification settings |
 | `ui/watch_later_tab.py` | Library: Watching, Watch later, Completed, and playback actions |
 | `ui/manager_tab.py` | Editable site automation paths and profile import/export |
 | `core/selenium_engine.py` | Chrome navigation, mirror selection, and aria2c download execution |
@@ -37,11 +36,6 @@ mpv resume state to update watched episodes.
 
 Desktop code does not import the cloud service modules: those require packages
 that are not part of the desktop runtime.
-
-Settings owns persistent download and notification preferences. Downloader reads
-a snapshot for each new run and records it for recovery and retry. Paused-task
-changes update the active session and saved defaults. Enabling or disabling cloud
-notifications in Settings updates command polling without restarting the app.
 
 ## Cloud service
 
