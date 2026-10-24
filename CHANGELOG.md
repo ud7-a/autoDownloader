@@ -35,6 +35,9 @@ See [the release guide](docs/RELEASING.md).
   **Delete watched** to clear one anime now (it asks first).
 
 ### 🎬 Video Player
+- **Shortcuts work on Arabic, Russian and Hebrew keyboard layouts**: with one
+  of those active, mpv.net ignored letter shortcuts (K, P, Ctrl+S...). They now
+  do the same as on an English layout. Installed automatically.
 - **Check for updates** for mpv.net: the button now also looks for a newer
   mpv.net release and offers **Update** (through winget). If winget doesn't
   have the new version yet, or mpv.net wasn't installed with it, you get a link

@@ -4805,9 +4805,72 @@ class WatchLaterTests(unittest.TestCase):
                 mock.patch.object(mpvnet, "config_dir", return_value=cfg):
             self.assertTrue(mpvnet.ensure_progress_script())
             self.assertEqual(os.path.join(cfg, mpvnet.PROGRESS_LOG), mpvnet.progress_log_path())
-        self.assertEqual(["aed-progress.lua", "aed-skip.lua"],
+        self.assertEqual(["aed-progress.lua", "aed-skip.lua", "key-layouts.lua"],
                          sorted(os.listdir(os.path.join(cfg, "scripts"))))
         self.assertFalse(os.path.exists(os.path.join(cfg, "mpv.conf")))
+
+
+class KeyLayoutTests(unittest.TestCase):
+    """mpv names a letter key by what the active layout types: on an Arabic layout
+    K arrives as "ن" and no shortcut fired. scripts/key-layouts.lua presses the
+    Latin key instead. Run against mpv.net's own libmpv when it is installed."""
+
+    def test_non_latin_keys_reach_the_latin_bindings(self):
+        import ctypes
+        import time
+        from utils import intro_detect, mpvnet
+        dll = intro_detect.find_libmpv()
+        if not dll:
+            self.skipTest("mpv.net is not installed")
+        lib = intro_detect._load(dll)
+        lib.mpv_get_property_string.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        lib.mpv_get_property_string.restype = ctypes.c_void_p
+        lib.mpv_free.argtypes = [ctypes.c_void_p]
+        tmp = tempfile.mkdtemp(prefix="aed_keys_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        conf = os.path.join(tmp, "input.conf")
+        with open(conf, "w", encoding="utf-8") as f:
+            f.write("k set user-data/hit k\nCtrl+s set user-data/hit ctrl-s\n"
+                    "S set user-data/hit S\n; set user-data/hit semicolon\n"
+                    "ق set user-data/hit own\n")
+        script = os.path.join(mpvnet.bundle_dir(), "scripts", "key-layouts.lua")
+        h = lib.mpv_create()
+        self.assertTrue(h)
+        self.addCleanup(lib.mpv_terminate_destroy, h)
+        # config=no and load-scripts=no: nothing of the user's mpv.net is read.
+        for k, v in {"config": "no", "load-scripts": "no", "scripts": script, "idle": "yes",
+                     "input-default-bindings": "yes", "input-conf": conf, "terminal": "no",
+                     "vo": "null", "ao": "null"}.items():
+            lib.mpv_set_option_string(h, k.encode(), v.encode("utf-8"))
+        self.assertEqual(0, lib.mpv_initialize(h))
+
+        def command(*args):
+            arr = (ctypes.c_char_p * (len(args) + 1))(*[a.encode("utf-8") for a in args], None)
+            lib.mpv_command(h, arr)
+
+        def press(key):
+            command("set", "user-data/hit", "-")
+            command("keypress", key)
+            deadline = time.monotonic() + 2
+            value = "-"
+            while value == "-" and time.monotonic() < deadline:
+                lib.mpv_wait_event(h, 0.05)
+                p = lib.mpv_get_property_string(h, b"user-data/hit")
+                value = ctypes.string_at(p).decode("utf-8").strip('"') if p else None
+                if p:
+                    lib.mpv_free(p)
+            return value
+
+        deadline = time.monotonic() + 10                  # the script loads in parallel
+        while press("ن") != "k" and time.monotonic() < deadline:
+            pass
+        self.assertEqual("k", press("ن"))                 # Arabic K
+        self.assertEqual("ctrl-s", press("Ctrl+س"))       # with a modifier
+        self.assertEqual("S", press("ٍ"))                 # Shift layer
+        self.assertEqual("semicolon", press("ك"))         # a key that needs quoting
+        self.assertEqual("k", press("л"))                 # Russian
+        self.assertEqual("k", press("ל"))                 # Hebrew
+        self.assertEqual("own", press("ق"))               # input.conf still wins
 
 
 class LibraryImportTests(unittest.TestCase):

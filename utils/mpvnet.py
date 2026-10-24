@@ -373,8 +373,10 @@ PROGRESS_SCRIPT = "aed-progress.lua"
 PROGRESS_LOG = "aed-progress.log"
 # Offers "Skip opening" from the times utils/intro_detect.py finds.
 SKIP_SCRIPT = "aed-skip.lua"
+# Keyboard shortcuts on Arabic, Russian and Hebrew layouts (mpv sees "ن", not "k").
+LAYOUT_SCRIPT = "key-layouts.lua"
 # The app's own scripts: kept installed even when the user never applies shaders.
-APP_SCRIPTS = (PROGRESS_SCRIPT, SKIP_SCRIPT)
+APP_SCRIPTS = (PROGRESS_SCRIPT, SKIP_SCRIPT, LAYOUT_SCRIPT)
 
 
 def progress_log_path():

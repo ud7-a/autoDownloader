@@ -75,6 +75,8 @@ The **Video Player** tab can install mpv.net, apply shader presets, and help con
 | `P` | Show active shaders |
 | `K` | Skip the opening or ending, while **Skip** is shown |
 
+The shortcuts also work with an Arabic, Russian, or Hebrew keyboard layout active.
+
 Shader performance depends on your GPU. See [third-party notices](assets/mpvnet/THIRD_PARTY.txt) for shader sources and licenses.
 
 ## Discord and cloud notifications

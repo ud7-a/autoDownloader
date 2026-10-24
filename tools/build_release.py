@@ -111,6 +111,8 @@ REQUIRED_IN_BUNDLE = [
     os.path.join("_internal", "assets", "mpvnet", "scripts", "aed-progress.lua"),
     # ... and the one that offers "Skip opening" from the detected times.
     os.path.join("_internal", "assets", "mpvnet", "scripts", "aed-skip.lua"),
+    # ... and the one that makes the shortcuts work on non-Latin keyboard layouts.
+    os.path.join("_internal", "assets", "mpvnet", "scripts", "key-layouts.lua"),
 ]
 
 
