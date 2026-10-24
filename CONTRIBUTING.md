@@ -39,6 +39,24 @@ The desktop test suite redirects app data, shortcuts, and mpv resume state to
 temporary directories. CI runs lint, an offscreen import check, desktop tests,
 and a Windows app/installer build.
 
+Desktop tests are split by area, so one area can run on its own, for example
+`python -m unittest tests.test_library`:
+
+| File | Covers |
+| --- | --- |
+| `test_downloads.py` | Episode ranges, the download engine, mirrors and tabs, retries, pausing, the Downloader tab |
+| `test_sites.py` | witanime and animerco flows, seasons, search, filler, the shipped site definitions |
+| `test_watchlist.py` | Release days, the daily check, new-episode notices, covers |
+| `test_library.py` | Watched tracking, Continue and its shortcut, folder import, the episode dialog, Free up space |
+| `test_player.py` | The mpv.net config and scripts, skip openings and endings, keyboard layouts |
+| `test_cloud.py` | Windows and Discord notifications, the cloud checker, remote downloads, the watcher |
+| `test_app.py` | Config loading and migration, start-up speed, layout, tooltips, menus, touch, error reports |
+| `test_release.py` | What the build ships, the installed app's imports, release notes, the updater |
+| `test_isolation.py` | The suite never touching real data; every temp folder a test makes is removed |
+
+Each file imports the `tests` package before any app module, so the redirect
+above also applies when a single file runs.
+
 ### Service changes
 
 Install the service dependencies and use a dedicated PostgreSQL test database:
