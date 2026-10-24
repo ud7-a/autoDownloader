@@ -7,8 +7,8 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QG
                              QFrame, QLabel)
 from qfluentwidgets import (CardWidget, IconWidget, SubtitleLabel, StrongBodyLabel,
                             BodyLabel, CaptionLabel, PrimaryPushButton, PushButton,
-                            IndeterminateProgressBar, InfoBar, InfoBarPosition,
-                            ScrollArea, SwitchButton, FluentIcon as FIF)
+                            HyperlinkButton, IndeterminateProgressBar, InfoBar, InfoBarPosition,
+                            ScrollArea, SwitchButton, ComboBox, FluentIcon as FIF)
 
 from utils import mpvnet
 from utils.config import app_settings
@@ -17,17 +17,17 @@ from utils.config import app_settings
 # fall back to their file name, so editing the bundled mpv.conf never breaks the tab.
 SHADER_INFO = {
     "Anime4K_Clamp_Highlights": ("Clamp highlights", "stops halos around edges"),
-    "Anime4K_Restore_CNN_L": ("Restore", "removes blur and compression"),
-    "Anime4K_Upscale_CNN_x2_L": ("Upscale 2×", "sharper line art"),
-    "Anime4K_Thin_HQ": ("Thin lines", "crisper outlines"),
-    "FSRCNNX_x2_16-0-4-1": ("FSRCNNX 2×", "detail-preserving upscale"),
-    "KrigBilateral": ("KrigBilateral", "sharper colour edges"),
-    "SSimDownscaler-PK": ("SSim downscaler", "clean fit to your screen"),
-    "adaptive-sharpen": ("Adaptive sharpen", "brings out fine detail"),
+    "Anime4K_Restore_CNN_Soft_UL": ("Restore Soft UL",
+                                    "removes blur and compression, no over-sharpening"),
+    "Anime4K_Upscale_CNN_x2_UL": ("Upscale 2× UL", "largest model, crispest lines"),
+    "FSRCNNX_x2_8-0-4-1": ("FSRCNNX 2×", "detail-preserving upscale"),
+    "adaptive-sharpen": ("Adaptive sharpen", "light, restores the original's detail"),
 }
 PROFILE_TITLES = {"anime": "Anime", "series": "Series & movies"}
 SHORTCUTS = (("F1", "Anime profile"), ("F2", "Series profile"),
-             ("Ctrl+1", "Shaders off / on"), ("P", "Show active shaders"))
+             ("Ctrl+1", "Shaders off / on"), ("P", "Show active shaders"),
+             ("K", "Skip opening / ending (when offered)"))
+SKIP_MODES = (("off", "Off"), ("ask", "Ask (press K)"), ("auto", "Skip automatically"))
 
 MUTED = (QColor(96, 96, 96), QColor(160, 160, 160))   # (light, dark) theme text
 PILL_COLORS = {
@@ -51,6 +51,12 @@ def muted(label):
     # Secondary text wraps on narrow windows instead of forcing the page wider.
     label.setWordWrap(True)
     return label
+
+
+def wrappable_path(path):
+    """A path that word wrap can break after each folder: one long run of
+    characters set the page's minimum width and pushed it past the tab."""
+    return path.replace("\\", "\\​")
 
 
 def section_label(text):
@@ -78,16 +84,38 @@ class StatusPill(QLabel):
 
 
 class WingetInstallThread(QThread):
+    """winget install (or, with upgrade=True, winget upgrade) of mpv.net."""
     line = pyqtSignal(str)
     done = pyqtSignal(int)
 
+    def __init__(self, parent=None, upgrade=False):
+        super().__init__(parent)
+        self.upgrade = upgrade
+
     def run(self):
         try:
-            code = mpvnet.run_winget_install(self.line.emit)
+            run = mpvnet.run_winget_upgrade if self.upgrade else mpvnet.run_winget_install
+            code = run(self.line.emit)
         except Exception as e:
             self.line.emit(f"winget could not start: {e}")
             code = -1
         self.done.emit(code)
+
+
+class UpdateCheckThread(QThread):
+    """Asks GitHub for mpv.net's newest release (network: off the UI thread)."""
+    done = pyqtSignal(object)        # mpvnet.check_update's dict, or {"error": text}
+
+    def __init__(self, installed, parent=None):
+        super().__init__(parent)
+        self.installed = installed
+
+    def run(self):
+        try:
+            result = mpvnet.check_update(self.installed)
+        except Exception as e:
+            result = {"error": str(e) or type(e).__name__}
+        self.done.emit(result)
 
 
 class ElevatedThread(QThread):
@@ -125,7 +153,11 @@ class PlayerWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._exe = None
+        self._version = None
         self._install_thread = None
+        self._upgrading = False
+        self._check_thread = None
+        self._update = None          # check_update's result while a newer mpv.net exists
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -149,6 +181,7 @@ class PlayerWidget(QWidget):
         layout.addSpacing(4)
         layout.addWidget(self._build_player_card())
         layout.addWidget(self._build_shader_card())
+        layout.addWidget(self._build_skip_card())
         layout.addStretch(1)
         # Detection reads the registry, so it waits for the tab to be opened
         # instead of slowing down app start (see showEvent).
@@ -214,10 +247,14 @@ class PlayerWidget(QWidget):
         self.btn_recheck = PushButton(FIF.SYNC, "Check again")
         self.btn_open_player = PushButton(FIF.PLAY, "Open mpv.net")
         self.btn_install = PrimaryPushButton(FIF.DOWNLOAD, "Install with winget")
+        self.btn_update = PrimaryPushButton(FIF.UPDATE, "Update")
+        self.btn_update.hide()
         self.btn_install.clicked.connect(self.install_mpvnet)
+        self.btn_update.clicked.connect(self.update_mpvnet)
         self.btn_open_player.clicked.connect(self.open_player)
-        self.btn_recheck.clicked.connect(self.refresh_status)
-        body.addLayout(self._button_row(self.btn_recheck, self.btn_open_player, self.btn_install))
+        self.btn_recheck.clicked.connect(self.check_now)
+        body.addLayout(self._button_row(self.btn_recheck, self.btn_open_player,
+                                        self.btn_update, self.btn_install))
 
         # Play the app's own downloads in mpv.net -- needs nothing from Windows.
         self.default_divider = self._divider()
@@ -311,8 +348,10 @@ class PlayerWidget(QWidget):
             cap = QLabel(key)
             cap.setStyleSheet(KEYCAP_STYLE)
             row, col = divmod(i, 2)
-            keys.addWidget(cap, row, col * 2, Qt.AlignmentFlag.AlignLeft)
-            keys.addWidget(BodyLabel(action), row, col * 2 + 1)
+            keys.addWidget(cap, row, col * 2, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            action_label = BodyLabel(action)
+            action_label.setWordWrap(True)
+            keys.addWidget(action_label, row, col * 2 + 1)
         keys.setColumnStretch(1, 1)
         keys.setColumnStretch(3, 1)
         body.addLayout(keys)
@@ -326,7 +365,8 @@ class PlayerWidget(QWidget):
         info.setFixedSize(16, 16)
         note.addWidget(info, 0, Qt.AlignmentFlag.AlignVCenter)
         note.addWidget(muted(CaptionLabel(
-            "Needs a dedicated GPU. Your current config is backed up first.")), 1)
+            "The anime profile needs a high-end GPU. Your current config is backed up "
+            "first.")), 1)
 
         self.btn_open_config = PushButton(FIF.FOLDER, "Open config folder")
         self.btn_apply = PrimaryPushButton(FIF.BRUSH, "Apply shaders")
@@ -334,6 +374,69 @@ class PlayerWidget(QWidget):
         self.btn_apply.clicked.connect(self.apply_shaders)
         body.addLayout(self._button_row(self.btn_open_config, self.btn_apply, leading=note))
         return card
+
+    def _build_skip_card(self):
+        card, body, self.skip_pill, _ = self._card(
+            FIF.SKIP_FORWARD, "Skip openings and endings",
+            "Found from the audio of your downloaded episodes (3 or more of an anime), "
+            "in the background after each download")
+        self.skip_boxes = {}
+        for key, title, caption in (
+                ("opening", "Openings", "Ask shows \"Skip opening\" for 10 seconds; "
+                                        "K skips until the opening ends."),
+                ("ending", "Endings", "Skips to the end of the song, so a scene after "
+                                      "the credits still plays.")):
+            info = QVBoxLayout()
+            info.setSpacing(0)
+            info.addWidget(BodyLabel(title))
+            info.addWidget(muted(CaptionLabel(caption)))
+            box = ComboBox()
+            for _mode, label in SKIP_MODES:
+                box.addItem(label)
+            box.setMinimumWidth(190)
+            box.currentIndexChanged.connect(self._on_skip_mode)
+            self.skip_boxes[key] = box
+            row = self._button_row(box, leading=info)
+            body.addLayout(row)
+        return card
+
+    def _skip_modes(self):
+        return {key: SKIP_MODES[box.currentIndex()][0] for key, box in self.skip_boxes.items()}
+
+    def _refresh_skip(self, exe):
+        from utils import skip_times
+        cfg = mpvnet.config_dir(exe)
+        current = skip_times.read_settings(cfg)
+        modes = [m for m, _label in SKIP_MODES]
+        for key, box in self.skip_boxes.items():
+            box.blockSignals(True)
+            box.setCurrentIndex(modes.index(current[key]))
+            box.blockSignals(False)
+            box.setEnabled(bool(exe))
+            box.setToolTip("" if exe else "Install mpv.net first")
+        script = os.path.join(cfg, "scripts", mpvnet.SKIP_SCRIPT)
+        if exe and not os.path.isfile(script):
+            mpvnet.ensure_progress_script()       # the app's own scripts, not the config
+        if not exe:
+            self.skip_pill.set_state("off", "Needs mpv.net")
+        elif not os.path.isfile(script):
+            self.skip_pill.set_state("bad", "Script missing")
+        elif current["opening"] == "off" and current["ending"] == "off":
+            self.skip_pill.set_state("off", "Off")
+        else:
+            self.skip_pill.set_state("ok", "On")
+
+    def _on_skip_mode(self, _index):
+        from utils import skip_times
+        if not self._exe:
+            return
+        modes = self._skip_modes()
+        if skip_times.write_settings(mpvnet.config_dir(self._exe), modes["opening"],
+                                     modes["ending"]):
+            mpvnet.ensure_progress_script()       # installs the skip script too
+            self._refresh_skip(self._exe)
+            InfoBar.success("Saved", "Takes effect the next time an episode opens in mpv.net.",
+                            position=InfoBarPosition.TOP, duration=2500, parent=self.window())
 
     def _profile_panel(self, name, stems):
         panel = QFrame()
@@ -358,19 +461,23 @@ class PlayerWidget(QWidget):
             num.setFixedSize(20, 20)
             num.setAlignment(Qt.AlignmentFlag.AlignCenter)
             num.setStyleSheet(STEP_STYLE)
-            row.addWidget(num)
+            row.addWidget(num, 0, Qt.AlignmentFlag.AlignTop)
+            # Name over purpose, the purpose wrapping: side by side and unwrapped,
+            # three panels needed a page wider than the tab and cut its right
+            # edge off (the page never scrolls sideways).
+            text = QVBoxLayout()
+            text.setSpacing(0)
             label = BodyLabel(title)
             label.setToolTip(f"{stem}.glsl")
-            row.addWidget(label)
-            row.addStretch(1)
-            purpose_label = muted(CaptionLabel(purpose))
-            purpose_label.setWordWrap(False)   # a few words; wrapping split them needlessly
-            row.addWidget(purpose_label)
+            text.addWidget(label)
+            if purpose:
+                text.addWidget(muted(CaptionLabel(purpose)))
+            row.addLayout(text, 1)
             box.addLayout(row)
         box.addStretch(1)
         return panel
 
-    STACK_PANELS_BELOW = 860   # px of tab width: under this the two profiles stack
+    STACK_PANELS_BELOW = 1100  # px of tab width: under this the three profiles stack
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -389,12 +496,20 @@ class PlayerWidget(QWidget):
     def refresh_status(self):
         exe, version = mpvnet.find_mpvnet()
         self._exe = exe
+        self._version = version or mpvnet.file_version(exe)
+        version = self._version
         installing = self._install_thread is not None
         has_winget = bool(mpvnet.winget_path())
 
-        if exe:
+        if exe and self._upgrading:
+            self.player_pill.set_state("busy", "Updating…")
+            self.lbl_player_path.setText(wrappable_path(exe))
+        elif exe and self._update:
+            self.player_pill.set_state("busy", f"{self._update['latest']} available")
+            self.lbl_player_path.setText(wrappable_path(exe))
+        elif exe:
             self.player_pill.set_state("ok", f"Installed {version}" if version else "Installed")
-            self.lbl_player_path.setText(exe)
+            self.lbl_player_path.setText(wrappable_path(exe))
         elif installing:
             self.player_pill.set_state("busy", "Installing…")
             self.lbl_player_path.setText("Windows may ask for permission.")
@@ -408,13 +523,22 @@ class PlayerWidget(QWidget):
                 "Microsoft Store, then check again.")
         self.btn_install.setVisible(not exe)
         self.btn_install.setEnabled(not installing and has_winget)
+        self.btn_update.setVisible(bool(exe and self._update))
+        self.btn_update.setEnabled(not installing)
+        if self._update:
+            self.btn_update.setText(f"Update to {self._update['latest']}")
+        self.btn_recheck.setText("Check for updates" if exe else "Check again")
+        self.btn_recheck.setToolTip("Looks at mpv.net here again, and on GitHub for a newer "
+                                    "version" if exe else "Looks for mpv.net again")
         self.btn_open_player.setVisible(bool(exe))
         self._refresh_default()
 
         folder = mpvnet.anime_folder_name(app_settings.get("download_dir"))
+        when = {"anime": f'Files inside a "{folder}" folder', "series": "Everything else"}
         for name, label in self._profile_when.items():
-            label.setText(f'Files inside a "{folder}" folder' if name == "anime"
-                          else "Everything else")
+            # A profile with no rule of its own (a hand-edited mpv.conf) is only
+            # ever picked by hand.
+            label.setText(when.get(name, "Only when picked by hand"))
 
         cfg = mpvnet.config_dir(exe)
         applied = mpvnet.shaders_applied(cfg)
@@ -424,6 +548,7 @@ class PlayerWidget(QWidget):
         self.btn_apply.setEnabled(bool(exe))
         self.btn_apply.setToolTip("" if exe else "Install mpv.net first")
         self.btn_open_config.setEnabled(os.path.isdir(cfg))
+        self._refresh_skip(exe)
 
     # ---------------------------------------------------- default player
 
@@ -560,6 +685,111 @@ class PlayerWidget(QWidget):
             hint = f"winget exited with 0x{code:08X}" if code > 0xFFFF else f"winget exited with {code}"
             InfoBar.error("Install failed", f"{hint}. {last}", duration=-1,
                           position=InfoBarPosition.TOP, parent=self)
+
+    # ----------------------------------------------------------- updates
+
+    def check_now(self):
+        """The Check button: look at mpv.net here again and, when it's installed,
+        ask GitHub whether there's a newer version."""
+        self.refresh_status()
+        if not self._exe or self._check_thread is not None or self._install_thread is not None:
+            return
+        self.btn_recheck.setEnabled(False)
+        self.lbl_install_line.setText("Checking for a newer mpv.net…")
+        self.lbl_install_line.show()
+        self._check_thread = UpdateCheckThread(self._version, self)
+        self._check_thread.done.connect(self._on_update_checked)
+        self._check_thread.start()
+
+    def _on_update_checked(self, result):
+        thread, self._check_thread = self._check_thread, None
+        if thread is not None:
+            thread.deleteLater()
+        self.btn_recheck.setEnabled(True)
+        self.lbl_install_line.hide()
+        if "error" in result:
+            InfoBar.warning("Couldn't check for mpv.net updates", result["error"],
+                            duration=6000, position=InfoBarPosition.TOP, parent=self)
+            return
+        latest = result["latest"]
+        if result["status"] == "current":
+            self._update = None
+            self.refresh_status()
+            InfoBar.success("mpv.net is up to date",
+                            f"{result['installed']} is the newest version.",
+                            duration=4000, position=InfoBarPosition.TOP, parent=self)
+            return
+        self._update = result
+        self.refresh_status()
+        if result["status"] == "newer":
+            self.lbl_install_line.setText(
+                f"mpv.net {latest} is out — you have {result['installed']}.")
+        else:
+            self.lbl_install_line.setText(
+                f"The newest mpv.net is {latest}. Yours doesn't say which version it is.")
+        self.lbl_install_line.show()
+
+    def update_mpvnet(self):
+        if self._install_thread is not None or not self._update:
+            return
+        if not mpvnet.winget_path():
+            self._update_elsewhere("winget isn't available on this PC, so the app can't "
+                                   "update mpv.net.")
+            return
+        if mpvnet.is_running():
+            InfoBar.warning("Close mpv.net first",
+                            "Its installer can't replace mpv.net while it's open.",
+                            duration=5000, position=InfoBarPosition.TOP, parent=self)
+            return
+        self._upgrading = True
+        self.btn_recheck.setEnabled(False)
+        self.install_bar.show()
+        self.install_bar.start()
+        self.lbl_install_line.setText("Starting winget…")
+        self.lbl_install_line.show()
+        self._install_thread = WingetInstallThread(self, upgrade=True)
+        self._install_thread.line.connect(self.lbl_install_line.setText)
+        self._install_thread.done.connect(self._on_update_done)
+        self._install_thread.start()
+        self.refresh_status()
+
+    def _on_update_done(self, code):
+        thread, self._install_thread = self._install_thread, None
+        if thread is not None:
+            thread.deleteLater()
+        self._upgrading = False
+        self.install_bar.stop()
+        self.install_bar.hide()
+        self.btn_recheck.setEnabled(True)
+        target = (self._update or {}).get("latest", "")
+        self.refresh_status()                       # reads the version again
+        if mpvnet.version_tuple(self._version) >= mpvnet.version_tuple(target) > ():
+            self._update = None
+            self.refresh_status()
+            self.lbl_install_line.hide()
+            InfoBar.success("mpv.net updated", f"Now on {self._version}.",
+                            duration=5000, position=InfoBarPosition.TOP, parent=self)
+            return
+        last = self.lbl_install_line.text()
+        self.lbl_install_line.hide()
+        if code == mpvnet.WINGET_NO_UPGRADE:
+            self._update_elsewhere(f"winget doesn't offer {target} yet; it usually follows "
+                                   "GitHub within a few days.")
+        elif code == mpvnet.WINGET_NOT_FOUND:
+            self._update_elsewhere("This mpv.net wasn't installed with winget, so winget "
+                                   "can't update it.")
+        else:
+            hint = (f"winget exited with 0x{code:08X}" if code > 0xFFFF
+                    else f"winget exited with {code}")
+            InfoBar.error("Update failed", f"{hint}. {last}", duration=-1,
+                          position=InfoBarPosition.TOP, parent=self)
+
+    def _update_elsewhere(self, why):
+        """The update can't go through winget: say why, and link the download."""
+        url = (self._update or {}).get("url") or mpvnet.RELEASES_PAGE
+        bar = InfoBar.warning("Update mpv.net from GitHub", why, duration=-1,
+                              position=InfoBarPosition.TOP, parent=self)
+        bar.addWidget(HyperlinkButton(url, "Download page"))
 
     def open_player(self):
         if self._exe and os.path.isfile(self._exe):

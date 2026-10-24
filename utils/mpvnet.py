@@ -1,7 +1,8 @@
-"""mpv.net support: find it, install it with winget, and apply the bundled
-quality-shader config (assets/mpvnet) to its config folder.
+"""mpv.net support: find it, install and update it with winget, and apply the
+bundled quality-shader config (assets/mpvnet) to its config folder.
 
-Stdlib only, so the frozen app needs nothing extra.
+Stdlib only, so the frozen app needs nothing extra (is_running uses psutil,
+which the app ships for its watcher, and says "not running" without it).
 """
 import os
 import re
@@ -23,6 +24,11 @@ ANIME_FOLDER = "animes"
 
 # winget's "no newer version available" -- the package is already installed.
 WINGET_ALREADY_INSTALLED = 0x8A15002B
+WINGET_NO_UPGRADE = WINGET_ALREADY_INSTALLED     # same code from `winget upgrade`
+WINGET_NOT_FOUND = 0x8A150014                    # no installed package matches
+# mpv.net's releases, for "Check for updates" (stable only: /latest skips betas).
+RELEASES_API = "https://api.github.com/repos/mpvnet-player/mpv.net/releases/latest"
+RELEASES_PAGE = "https://github.com/mpvnet-player/mpv.net/releases/latest"
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -109,6 +115,94 @@ def find_mpvnet():
         if candidate and os.path.isfile(candidate):
             return candidate, None
     return None, None
+
+
+def file_version(path):
+    """The exe's own version resource ("7.1.2.0"), or None. For an mpv.net
+    found without an uninstall entry -- that's the only place with a version."""
+    if sys.platform != "win32" or not path:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ver = ctypes.WinDLL("version")
+        ver.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+        ver.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+        ver.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                            ctypes.c_void_p]
+        ver.GetFileVersionInfoW.restype = wintypes.BOOL
+        ver.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                       ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)]
+        ver.VerQueryValueW.restype = wintypes.BOOL
+        size = ver.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(path, 0, size, buf):
+            return None
+        ptr, length = ctypes.c_void_p(), wintypes.UINT()
+        if not ver.VerQueryValueW(buf, "\\", ctypes.byref(ptr), ctypes.byref(length)):
+            return None
+        # VS_FIXEDFILEINFO: signature, struct version, then FileVersionMS / LS.
+        words = ctypes.cast(ptr, ctypes.POINTER(wintypes.DWORD * 4)).contents
+        ms, ls = words[2], words[3]
+        return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+    except Exception:
+        return None
+
+
+def version_tuple(text):
+    """"v7.1.2.0" -> (7, 1, 2). Trailing zeros dropped, so 7.1.2 == 7.1.2.0."""
+    m = re.search(r"\d+(?:\.\d+)*", text or "")
+    if not m:
+        return ()
+    parts = [int(p) for p in m.group().split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def latest_release(timeout=10, opener=None):
+    """(version, page URL) of mpv.net's newest stable release, from GitHub's API
+    (structured, unlike winget's output, which Windows translates). Raises when
+    it can't be read."""
+    import json
+    import urllib.request
+    opener = opener or urllib.request.urlopen
+    req = urllib.request.Request(RELEASES_API, headers={
+        "User-Agent": "AutoEpisodesDownloader", "Accept": "application/vnd.github+json"})
+    with opener(req, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    tag = str(data.get("tag_name") or "")
+    if not version_tuple(tag) or data.get("prerelease") or data.get("draft"):
+        raise ValueError(f"unexpected release data ({tag or 'no tag'})")
+    return re.sub(r"^[vV]", "", tag), data.get("html_url") or RELEASES_PAGE
+
+
+def check_update(installed, fetch=latest_release):
+    """{"status": "newer" | "current" | "unknown", "latest", "url", "installed"}.
+    "unknown": this mpv.net doesn't say which version it is."""
+    latest, url = fetch()
+    if not version_tuple(installed):
+        status = "unknown"
+    elif version_tuple(latest) > version_tuple(installed):
+        status = "newer"
+    else:
+        status = "current"
+    return {"status": status, "latest": latest, "url": url, "installed": installed}
+
+
+def is_running():
+    """mpv.net is open: its installer can't replace a running exe."""
+    try:
+        import psutil
+    except ImportError:
+        return False
+    try:
+        return any((p.info.get("name") or "").lower() == EXE_NAME
+                   for p in psutil.process_iter(["name"]))
+    except Exception:
+        return False
 
 
 def config_dir(exe_path=None):
@@ -277,6 +371,10 @@ def open_videos(files):
 
 PROGRESS_SCRIPT = "aed-progress.lua"
 PROGRESS_LOG = "aed-progress.log"
+# Offers "Skip opening" from the times utils/intro_detect.py finds.
+SKIP_SCRIPT = "aed-skip.lua"
+# The app's own scripts: kept installed even when the user never applies shaders.
+APP_SCRIPTS = (PROGRESS_SCRIPT, SKIP_SCRIPT)
 
 
 def progress_log_path():
@@ -286,28 +384,32 @@ def progress_log_path():
 
 
 def ensure_progress_script():
-    """Install (or refresh) only the progress script in mpv.net's scripts folder.
+    """Install (or refresh) only the app's own scripts (APP_SCRIPTS: progress
+    tracking, skip openings) in mpv.net's scripts folder.
 
-    Lets Watch Later track playback without the user re-applying the whole config,
-    which would also overwrite their mpv.conf and input.conf. Returns True when the
-    script is in place.
+    Lets Watch Later track playback, and episodes offer "Skip opening", without
+    the user re-applying the whole config, which would also overwrite their
+    mpv.conf and input.conf. Returns True when the scripts are in place.
     """
     exe = find_mpvnet()[0]
     if not exe:
         return False
-    data = _read_bytes(os.path.join(bundle_dir(), "scripts", PROGRESS_SCRIPT))
-    if data is None:
-        return False
-    target = os.path.join(config_dir(exe), "scripts", PROGRESS_SCRIPT)
-    if _read_bytes(target) == data:
-        return True
-    try:
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "wb") as f:
-            f.write(data)
-    except OSError:
-        return False
-    return True
+    ok = True
+    for name in APP_SCRIPTS:
+        data = _read_bytes(os.path.join(bundle_dir(), "scripts", name))
+        if data is None:
+            ok = False
+            continue
+        target = os.path.join(config_dir(exe), "scripts", name)
+        if _read_bytes(target) == data:
+            continue
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(data)
+        except OSError:
+            ok = False
+    return ok
 
 
 def run_elevated(exe, args, timeout_ms=180000, show=1):
@@ -513,6 +615,12 @@ def winget_install_command(winget):
             "--silent", "--accept-package-agreements", "--accept-source-agreements"]
 
 
+def winget_upgrade_command(winget):
+    return [winget, "upgrade", "--id", WINGET_ID, "--exact", "--source", "winget",
+            "--silent", "--accept-package-agreements", "--accept-source-agreements",
+            "--disable-interactivity"]
+
+
 _SPINNER = set("-\\|/ ")
 
 
@@ -530,11 +638,22 @@ def clean_winget_line(raw):
 def run_winget_install(on_line=None):
     """Blocking. Streams cleaned output lines to on_line; returns winget's exit code
     (-1 when winget is missing)."""
+    return _run_winget(winget_install_command, on_line)
+
+
+def run_winget_upgrade(on_line=None):
+    """run_winget_install, for an update. WINGET_NO_UPGRADE: winget has nothing
+    newer (its catalog can lag a GitHub release by days); WINGET_NOT_FOUND:
+    this mpv.net wasn't installed through winget, so winget can't update it."""
+    return _run_winget(winget_upgrade_command, on_line)
+
+
+def _run_winget(command, on_line):
     winget = winget_path()
     if not winget:
         return -1
     proc = subprocess.Popen(
-        winget_install_command(winget),
+        command(winget),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         creationflags=CREATE_NO_WINDOW,
     )

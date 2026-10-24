@@ -44,7 +44,7 @@ Download **`AutoDownloader_Portable.zip`**, extract it, and run **`AutoDownloade
 | Downloads | Download multiple episodes with aria2c, automatically adjust concurrency, try available mirrors in profile order, and extract ZIP, RAR, and 7z archives. |
 | Episode selection | Select ranges, drag across an episode grid, skip filler when the source provides tags, and change pending selections while paused. |
 | Recovery | Resume an unfinished session after a restart and retry missing episodes. |
-| Library | Organize shows as Watching, Watch later, or Completed; import existing downloads; and continue watching or downloading. |
+| Library | Organize shows as Watching, Watch later, or Completed; import existing downloads; continue watching or downloading; and optionally delete episodes after watching, keeping the last few. |
 | Watchlist | Follow shows, see releases grouped by weekday, and download new episodes individually or together. |
 | Notifications | Receive Windows notifications and Discord alerts, with optional cloud checking and remote download commands. |
 | Playback | Open episodes in mpv.net with a playlist and optional upscaling shaders. |
@@ -63,14 +63,17 @@ The Library keeps download history and source information for each show. It can 
 
 With the bundled mpv.net progress script configured, playback at 90% or later marks an episode as watched. Playback recorded while AED is closed is picked up when the Library opens again.
 
+**Skip openings and endings.** Once an anime has three or more episodes downloaded, AED finds each episode's opening and ending from the audio (the songs repeat between episodes) in the background, offline, and mpv.net shows **Skip opening** with the `K` key. The Video Player tab sets openings and endings to Off, Ask, or Skip automatically; the Library's **⋯** menu shows how many were found and can look again.
+
 The **Video Player** tab can install mpv.net, apply shader presets, and help configure it as the default player for `.mp4` and `.mkv` files. Existing mpv.net configuration is backed up before presets are applied.
 
 | mpv.net shortcut | Action |
 | --- | --- |
-| `F1` | Anime shader profile: Anime4K |
-| `F2` | Series and movie shader profile: FSRCNNX, KrigBilateral, SSimDownscaler, and adaptive sharpen |
+| `F1` | Anime shader profile: Anime4K's largest (UL) models with the soft restore, no colour fringes beside lines. Needs a high-end GPU (RTX 4090 class) |
+| `F2` | Series and movie shader profile: FSRCNNX with light adaptive sharpening |
 | `Ctrl+1` | Toggle shaders |
 | `P` | Show active shaders |
+| `K` | Skip the opening or ending, while **Skip** is shown |
 
 Shader performance depends on your GPU. See [third-party notices](assets/mpvnet/THIRD_PARTY.txt) for shader sources and licenses.
 

@@ -24,6 +24,11 @@
 
 // Adaptive sharpen - version 2021-10-17
 // Tuned for use post-resize
+//
+// Modified for Auto Episodes Downloader: curve_height 1.0 -> 0.2. After
+// FSRCNNX on live action, 1.0 pushed fine detail to 143% of the original and
+// painted skin like oil paint; 0.2 restores it to ~99% (measured vs a clean
+// reference). Nothing else is changed.
 
 //!HOOK OUTPUT
 //!BIND HOOKED
@@ -31,7 +36,7 @@
 
 //--------------------------------------- Settings ------------------------------------------------
 
-#define curve_height    1.0                  // Main control of sharpening strength [>0]
+#define curve_height    0.2                  // Main control of sharpening strength [>0]
                                              // 0.3 <-> 2.0 is a reasonable range of values
 
 #define overshoot_ctrl  false                // Allow for higher overshoot if the current edge pixel

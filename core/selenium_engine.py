@@ -581,6 +581,40 @@ def available_paths(driver, step_paths, timeout=4.0, fallback_only=()):
     return choose_paths(order, found, fallback_only), found
 
 
+def return_to_episode(driver, episode_handle, episode_url, keep_handles):
+    """Put the browser back on the episode page before the next download path.
+
+    A path that fails part-way leaves the browser wherever it stopped: on the host's
+    tab (a removed MediaFire file has no #downloadButton), on an ad, or on
+    chrome://downloads. The next path then looked for the episode page's buttons in
+    that tab and failed without ever reaching its own host -- One Piece 612: the
+    MediaFire file was removed and Google Drive was "tried" inside MediaFire.
+
+    Closes every tab opened since the episode loaded (anything not in `keep_handles`),
+    switches to the episode tab, and reloads the episode if a same-tab path (gofile)
+    navigated it to another site. False when the episode tab itself is gone.
+    """
+    for handle in list(driver.window_handles):
+        if handle == episode_handle or handle in keep_handles:
+            continue
+        try:
+            driver.execute_cdp_cmd("Target.closeTarget", {"targetId": handle})
+        except Exception:
+            try:
+                driver.switch_to.window(handle)
+                driver.close()
+            except Exception:
+                pass
+    try:
+        driver.switch_to.window(episode_handle)
+    except Exception:
+        return False
+    if _host_of(driver.current_url) != _host_of(episode_url):
+        driver.get(episode_url)
+        time.sleep(3)
+    return True
+
+
 # ---- The final episode ----
 #
 # witanime titles the last episode "الحلقة 19 والأخيرة" ("episode 19, the last") in
@@ -1723,11 +1757,19 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                     if os.environ.get("AED_DEBUG_LOG"):
                         _debug_log("PATHS", episode=x, found=found, trying=to_try)
 
-                    for path_name in to_try:
+                    # Where every path starts from; see return_to_episode.
+                    episode_handle = driver.current_window_handle
+                    episode_url = driver.current_url
+                    keep_handles = set(driver.window_handles) - {episode_handle}
+
+                    for path_idx, path_name in enumerate(to_try):
                         steps = step_paths.get(path_name) or []
                         if (cancel_event.is_set() or CURRENT_TASK_ID != my_task_id) or path_success: break
                         if not steps: continue
-                        
+                        if path_idx and not return_to_episode(driver, episode_handle,
+                                                              episode_url, keep_handles):
+                            break             # episode tab lost: the next attempt reopens it
+
                         signals.update_status.emit(f"Status: [{path_name}] Executing...", "#ffffff")
                         path_failed = False
                         found_data = None
@@ -2224,6 +2266,12 @@ def run_selenium_task(site_key, episodes_list, download_dir, headless, webhook_u
                             and not (ep_cancel_events.get(ep) and ep_cancel_events[ep].is_set())]
                     record_sources(site_key, done, locals().get("url_template", ""),
                                    os.path.join(download_dir, safe_folder_name(site_key)))
+                except Exception:
+                    traceback.print_exc()
+                # New episodes: find their openings/endings in the background.
+                try:
+                    from utils.skip_times import queue_folder
+                    queue_folder(os.path.join(download_dir, safe_folder_name(site_key)))
                 except Exception:
                     traceback.print_exc()
 

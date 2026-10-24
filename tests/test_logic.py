@@ -39,7 +39,7 @@ from utils.config import sites_data, config_lock            # noqa: E402
 from core.selenium_engine import (_format_eta, _aria_convert_unit,          # noqa: E402
                                   parse_smart_xpath, episode_url_variants,
                                   is_block_page, _host_of, tab_matches_path,
-                                  PATH_HOSTS, rotate_error_log)
+                                  PATH_HOSTS, rotate_error_log, return_to_episode)
 from core.schedule import SCHEDULE_URLS, SCHEDULE_MATCH                     # noqa: E402
 from core import site_health, nav_block                                     # noqa: E402
 from utils.browser_flags import DEFAULT_HOSTS                               # noqa: E402
@@ -2533,7 +2533,7 @@ class ShippedImportTests(unittest.TestCase):
     DIST_TO_MODULE = {"pyqt6": "PyQt6", "pyqt6-fluent-widgets": "qfluentwidgets",
                       "selenium": "selenium", "websocket-client": "websocket",
                       "py7zr": "py7zr", "rarfile": "rarfile", "pillow": "PIL",
-                      "scipy": "scipy", "psutil": "psutil"}
+                      "scipy": "scipy", "psutil": "psutil", "numpy": "numpy"}
 
     def client_files(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -3787,6 +3787,77 @@ class DownloadDestinationTests(unittest.TestCase):
             if name in shipped:
                 self.assertIn(name, PATH_HOSTS, f"'{name}' lost its expected hosts")
 
+
+class ReturnToEpisodeTests(unittest.TestCase):
+    """Each download path must start on the episode page. A path that failed on its
+    host's tab used to leave the browser there, so the next path searched the wrong
+    page -- One Piece 612: MediaFire file removed, Google Drive tried inside MediaFire."""
+
+    EPISODE = "https://witanime.site/episode/one-piece-الحلقة-612/"
+
+    class _Browser:
+        """Tabs as {handle: url}; closing via CDP or close() removes the tab."""
+        def __init__(self, tabs, current):
+            from types import SimpleNamespace
+            self.tabs = dict(tabs)
+            self.current = current
+            self.loaded = []
+            self.switch_to = SimpleNamespace(window=self._switch)
+
+        @property
+        def window_handles(self):
+            return list(self.tabs)
+
+        @property
+        def current_url(self):
+            return self.tabs[self.current]
+
+        def _switch(self, handle):
+            if handle not in self.tabs:
+                raise RuntimeError("no such window")
+            self.current = handle
+
+        def execute_cdp_cmd(self, cmd, args):
+            del self.tabs[args["targetId"]]
+
+        def close(self):
+            del self.tabs[self.current]
+
+        def get(self, url):
+            self.tabs[self.current] = url
+            self.loaded.append(url)
+
+    def back(self, browser):
+        from unittest import mock
+        with mock.patch("core.selenium_engine.time.sleep"):
+            return return_to_episode(browser, "ep", self.EPISODE, {"base"})
+
+    def test_a_failed_host_tab_is_left_for_the_episode_page(self):
+        b = self._Browser({"base": "about:blank", "ep": self.EPISODE,
+                           "mf": "https://www.mediafire.com/file/x/ep612.mp4/file"}, "mf")
+        self.assertTrue(self.back(b))
+        self.assertEqual(b.current, "ep")
+        self.assertEqual(set(b.tabs), {"base", "ep"})
+        self.assertEqual(b.loaded, [])          # same page, no reload needed
+
+    def test_the_downloads_tab_and_ads_are_closed_too(self):
+        b = self._Browser({"base": "about:blank", "ep": self.EPISODE,
+                           "ad": "https://ads.example/pop", "dl": "chrome://downloads/"}, "dl")
+        self.assertTrue(self.back(b))
+        self.assertEqual(set(b.tabs), {"base", "ep"})
+
+    def test_an_episode_tab_navigated_away_is_reloaded(self):
+        # gofile opens in the episode's own tab, with no popup.
+        b = self._Browser({"base": "about:blank", "ep": "https://gofile.io/d/abc"}, "ep")
+        self.assertTrue(self.back(b))
+        self.assertEqual(b.loaded, [self.EPISODE])
+
+    def test_a_lost_episode_tab_reports_failure(self):
+        b = self._Browser({"base": "about:blank",
+                           "mf": "https://www.mediafire.com/file/x/ep612.mp4/file"}, "mf")
+        self.assertFalse(self.back(b))
+        self.assertEqual(set(b.tabs), {"base"})
+
     def test_mapped_hosts_are_bare_domains(self):
         """Hosts are compared with == and endswith('.'+host), so a scheme, path or
         leading dot in this table would silently never match anything."""
@@ -3981,7 +4052,7 @@ class MpvnetTests(unittest.TestCase):
         for name in self.mpvnet.BUNDLE_FILES:
             self.assertTrue(os.path.isfile(os.path.join(base, name)), name)
         shaders = self.mpvnet.bundled_shaders()
-        self.assertIn("Anime4K_Upscale_CNN_x2_L.glsl", shaders)
+        self.assertIn("Anime4K_Upscale_CNN_x2_UL.glsl", shaders)
         # Every shader the bundled mpv.conf loads is actually shipped.
         with open(os.path.join(base, "mpv.conf"), encoding="utf-8") as f:
             conf = f.read()
@@ -4032,6 +4103,9 @@ class MpvnetTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.cfg, "Shaders", "mine.glsl")))
         self.assertTrue(os.path.isdir(os.path.join(self.cfg, "script-opts")))
         self.assertTrue(os.path.isfile(os.path.join(self.cfg, "scripts", "shader-toggle.lua")))
+        # Smooth timing is global, so the guard that drops back to audio sync when
+        # a profile is too heavy for the GPU (F3 stuttered on an RTX 3050) ships too.
+        self.assertTrue(os.path.isfile(os.path.join(self.cfg, "scripts", "sync-guard.lua")))
         self.assertTrue(self.mpvnet.shaders_applied(self.cfg))
 
         # Re-applying the same thing has nothing to back up.
@@ -4046,12 +4120,61 @@ class MpvnetTests(unittest.TestCase):
     def test_profiles_parsed_and_described(self):
         from ui.player_tab import SHADER_INFO, PROFILE_TITLES
         profiles = dict(self.mpvnet.bundled_profiles())
+        # Two profiles: the former F3 "best" chain became the anime profile.
         self.assertEqual(["anime", "series"], list(profiles))
-        self.assertEqual("Anime4K_Clamp_Highlights", profiles["anime"][0])
+        # The largest Anime4K models, Soft Restore (no over-sharpened outlines), no
+        # Thin, no SSimDownscaler -- and no KrigBilateral: it painted colour
+        # fringes beside black line art.
+        self.assertEqual(["Anime4K_Clamp_Highlights", "Anime4K_Restore_CNN_Soft_UL",
+                          "Anime4K_Upscale_CNN_x2_UL"], profiles["anime"])
+        # Nothing shipped that no profile loads (shaders_applied checks them all).
+        used = {s for stems in profiles.values() for s in stems}
+        self.assertEqual(used, {os.path.splitext(s)[0] for s in self.mpvnet.bundled_shaders()})
+        # Series: FSRCNNX 8 then a light sharpen. KrigBilateral and SSimDownscaler
+        # scored worse on live action, and full-strength sharpening painted skin
+        # like oil paint, so the bundled copy is turned down to 0.2.
+        self.assertEqual(["FSRCNNX_x2_8-0-4-1", "adaptive-sharpen"], profiles["series"])
+        with open(os.path.join(self.mpvnet.bundle_dir(), "Shaders", "adaptive-sharpen.glsl"),
+                  encoding="utf-8") as f:
+            self.assertRegex(f.read(), r"(?m)^#define curve_height\s+0\.2\b")
         for name, stems in profiles.items():
             self.assertIn(name, PROFILE_TITLES)
             for stem in stems:
                 self.assertIn(stem, SHADER_INFO, f"{stem} has no friendly name in the tab")
+
+    def test_two_profiles_one_per_key(self):
+        """The former F3 "best" chain is the anime profile (F1); F3 is gone. Both
+        profiles set the same options, so switching never leaks one into the other."""
+        import re
+        base = self.mpvnet.bundle_dir()
+        with open(os.path.join(base, "mpv.conf"), encoding="utf-8") as f:
+            conf = f.read()
+        blocks = dict(re.findall(r"^\[([^\]]+)\]\n(.*?)(?=^\[|\Z)", conf, re.M | re.S))
+        self.assertEqual(["anime", "series"], sorted(blocks))
+
+        def keys(block):
+            return {line.split("=", 1)[0] for line in block.splitlines()
+                    if "=" in line and not line.startswith("#")}
+        anime = blocks["anime"]
+        self.assertEqual(keys(anime), keys(blocks["series"]))
+        # ewa_lanczos: high quality without the sharpening of its -sharp variant,
+        # for chroma too (KrigBilateral fringed lines); downscaled in gamma light.
+        for line in ("dscale=ewa_lanczos", "cscale=ewa_lanczos", "linear-downscaling=no"):
+            self.assertIn(line + "\n", anime)
+        # Even pacing (display sync + oversample, no invented frames) for every
+        # profile: set once globally, never overridden, so F12's manual switch to
+        # audio sync survives F1/F2.
+        for key in ("video-sync=display-resample", "interpolation=yes", "tscale=oversample"):
+            self.assertRegex(conf, rf"(?m)^{key}$")
+        for name, block in blocks.items():
+            self.assertNotRegex(block, r"(?m)^(video-sync|interpolation|tscale)=", name)
+        with open(os.path.join(base, "input.conf"), encoding="utf-8") as f:
+            keys_conf = f.read()
+        self.assertRegex(keys_conf, r"(?m)^F1\s+apply-profile anime\s")
+        self.assertRegex(keys_conf, r"(?m)^F2\s+apply-profile series\s")
+        # F3 bound to nothing, rather than left to mpv.net's own default.
+        self.assertRegex(keys_conf, r"(?m)^F3\s+ignore\s*$")
+        self.assertNotIn("anime-best", keys_conf + conf)
 
     def test_default_player_detection(self):
         is_mpv = self.mpvnet.is_mpvnet_progid
@@ -4145,6 +4268,151 @@ class MpvnetTests(unittest.TestCase):
         cmd = self.mpvnet.winget_install_command("winget")
         self.assertEqual(["winget", "install", "--id", "mpv.net", "--exact"], cmd[:5])
         self.assertIn("--accept-source-agreements", cmd)
+        cmd = self.mpvnet.winget_upgrade_command("winget")
+        self.assertEqual(["winget", "upgrade", "--id", "mpv.net", "--exact"], cmd[:5])
+        self.assertIn("--silent", cmd)
+
+    def _release(self, body):
+        class Response:
+            def __init__(self):
+                self._body = json.dumps(body).encode()
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+        return lambda req, timeout=None: Response()
+
+    def test_mpvnet_update_check(self):
+        m = self.mpvnet
+        self.assertEqual((7, 1, 2), m.version_tuple("v7.1.2.0"))
+        self.assertEqual(m.version_tuple("7.1.2"), m.version_tuple("7.1.2.0"))
+        stable = {"tag_name": "v7.2.0.0", "html_url": "https://x/v7.2.0.0", "prerelease": False}
+        self.assertEqual(("7.2.0.0", "https://x/v7.2.0.0"),
+                         m.latest_release(opener=self._release(stable)))
+        with self.assertRaises(ValueError):          # a beta is never offered
+            m.latest_release(opener=self._release({"tag_name": "v7.3-beta", "prerelease": True}))
+        fetch = lambda: ("7.2.0.0", "https://x")    # noqa: E731
+        self.assertEqual("newer", m.check_update("7.1.2.0", fetch)["status"])
+        self.assertEqual("current", m.check_update("7.2.0.0", fetch)["status"])
+        self.assertEqual("current", m.check_update("7.2", fetch)["status"])
+        self.assertEqual("current", m.check_update("8.0.0.0", fetch)["status"])  # ahead (a beta)
+        self.assertEqual("unknown", m.check_update(None, fetch)["status"])
+
+    def test_file_version_reads_the_exe_resource(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        self.assertRegex(self.mpvnet.file_version(sys.executable) or "", r"^\d+\.\d+\.\d+\.\d+$")
+        self.assertIsNone(self.mpvnet.file_version(os.path.join(self.cfg, "missing.exe")))
+        self.assertIsNone(self.mpvnet.file_version(None))
+
+    def _player_tab(self, version="7.1.2.0"):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from unittest import mock
+        from PyQt6.QtWidgets import QApplication
+        type(self)._app = QApplication.instance() or QApplication([])   # alive for the run
+        m = self.mpvnet
+        state = {"version": version}
+        exe = os.path.join(self.cfg, "mpvnet.exe")
+        for p in (mock.patch.object(m, "find_mpvnet", side_effect=lambda: (exe, state["version"])),
+                  mock.patch.object(m, "winget_path", return_value="winget"),
+                  mock.patch.object(m, "default_player_status", return_value={".mp4": True,
+                                                                              ".mkv": True}),
+                  mock.patch.object(m, "policy_active", return_value=False),
+                  mock.patch.object(m, "config_dir", return_value=self.cfg),
+                  mock.patch("ui.player_tab.InfoBar")):
+            p.start()
+            self.addCleanup(p.stop)
+        from ui.player_tab import PlayerWidget
+        w = PlayerWidget()
+        self.addCleanup(w.deleteLater)
+        w.refresh_status()
+        return w, state
+
+    def test_skip_card_saves_what_the_player_does(self):
+        from utils import skip_times
+        w, _state = self._player_tab()
+        boxes = w.skip_boxes
+        self.assertEqual(["Ask (press K)", "Off"],
+                         [boxes["opening"].currentText(), boxes["ending"].currentText()])
+        # The skip script is put in place without applying (overwriting) the config.
+        self.assertTrue(os.path.isfile(os.path.join(self.cfg, "scripts", "aed-skip.lua")))
+        self.assertFalse(os.path.exists(os.path.join(self.cfg, "mpv.conf")))
+        self.assertEqual("On", w.skip_pill.text())
+        boxes["opening"].setCurrentIndex(2)            # Skip automatically
+        boxes["ending"].setCurrentIndex(1)             # Ask
+        self.assertEqual({"opening": "auto", "ending": "ask"}, skip_times.read_settings(self.cfg))
+        boxes["opening"].setCurrentIndex(0)
+        boxes["ending"].setCurrentIndex(0)
+        self.assertEqual("Off", w.skip_pill.text())
+        # Re-reading the tab shows what's saved.
+        w.refresh_status()
+        self.assertEqual("Off", boxes["opening"].currentText())
+
+    def test_page_fits_the_tab_side_by_side(self):
+        """The page never scrolls sideways, so a page wider than the tab is cut
+        off: the three profile panels, each one line per shader with the purpose
+        unwrapped, needed more than a 1580 px tab and clipped every right-hand
+        control (status pills, Open mpv.net, the switch, Re-apply, the skip boxes)."""
+        w, _state = self._player_tab()
+        w.resize(w.STACK_PANELS_BELOW + 20, 900)          # widest layout: side by side
+        page = w.scroll.widget()
+        self.assertEqual(w._panels.direction(), w._panels.Direction.LeftToRight)
+        self.assertLessEqual(page.minimumSizeHint().width(), w.width() - 20)
+
+    def test_check_button_offers_a_newer_mpvnet(self):
+        from ui import player_tab
+        w, _state = self._player_tab()
+        self.assertEqual("Check for updates", w.btn_recheck.text())
+        self.assertFalse(w.btn_update.isVisibleTo(w))
+        w._on_update_checked({"status": "newer", "latest": "7.2.0.0", "url": "https://x",
+                              "installed": "7.1.2.0"})
+        self.assertTrue(w.btn_update.isVisibleTo(w))
+        self.assertEqual("Update to 7.2.0.0", w.btn_update.text())
+        self.assertEqual("7.2.0.0 available", w.player_pill.text())
+        self.assertIn("you have 7.1.2.0", w.lbl_install_line.text())
+        w._on_update_checked({"status": "current", "latest": "7.2.0.0", "url": "https://x",
+                              "installed": "7.2.0.0"})
+        self.assertFalse(w.btn_update.isVisibleTo(w))
+        player_tab.InfoBar.success.assert_called_once()
+        w._on_update_checked({"error": "offline"})
+        self.assertIn("offline", player_tab.InfoBar.warning.call_args[0][1])
+
+    def test_update_result_is_reported(self):
+        from ui import player_tab
+        w, state = self._player_tab()
+        newer = {"status": "newer", "latest": "7.2.0.0", "url": "https://x/rel",
+                 "installed": "7.1.2.0"}
+        # winget's catalog hasn't got it yet -> the GitHub download page instead.
+        w._on_update_checked(dict(newer))
+        w._on_update_done(self.mpvnet.WINGET_NO_UPGRADE)
+        self.assertIn("doesn't offer 7.2.0.0 yet", player_tab.InfoBar.warning.call_args[0][1])
+        self.assertTrue(w.btn_update.isVisibleTo(w))                # still on offer
+        # Not a winget install.
+        w._on_update_done(self.mpvnet.WINGET_NOT_FOUND)
+        self.assertIn("wasn't installed with winget", player_tab.InfoBar.warning.call_args[0][1])
+        # Updated: the version read back is the new one.
+        state["version"] = "7.2.0.0"
+        w._on_update_done(0)
+        self.assertFalse(w.btn_update.isVisibleTo(w))
+        self.assertIn("7.2.0.0", player_tab.InfoBar.success.call_args[0][1])
+        self.assertEqual("Installed 7.2.0.0", w.player_pill.text())
+
+    def test_update_waits_for_mpvnet_to_close(self):
+        from unittest import mock
+        from ui import player_tab
+        w, _state = self._player_tab()
+        w._on_update_checked({"status": "newer", "latest": "7.2.0.0", "url": "https://x",
+                              "installed": "7.1.2.0"})
+        with mock.patch.object(self.mpvnet, "is_running", return_value=True), \
+                mock.patch.object(player_tab, "WingetInstallThread") as thread:
+            w.update_mpvnet()
+        thread.assert_not_called()
+        self.assertEqual("Close mpv.net first", player_tab.InfoBar.warning.call_args[0][0])
 
 
 class LoadConfigSaveTests(unittest.TestCase):
@@ -4472,6 +4740,27 @@ class WatchLaterTests(unittest.TestCase):
                          [os.path.basename(p) for p in
                           wl.playlist_from(wl.find(self.URL), 0, 2, self.downloads)])
 
+    def test_unticking_moves_continue_off_a_later_started_episode(self):
+        wl = self.wl
+        profile = self._linked(max_ep=28)
+        self._files(profile, range(1, 29))
+        wl.apply_progress([self._log(profile, 28, 0.5)])         # jumped to 28 by mistake
+        self.assertEqual(28, wl.next_episode(wl.find(self.URL), self.downloads)[1])
+        wl.change_watched(self.URL, 0, removed=range(19, 28))
+        part = wl.find(self.URL)["parts"][0]
+        self.assertEqual({}, part["progress"])
+        self.assertEqual(19, wl.next_episode(wl.find(self.URL), self.downloads)[1])
+
+    def test_unticking_later_episodes_keeps_earlier_progress(self):
+        wl = self.wl
+        profile = self._linked(max_ep=20)
+        wl.apply_progress([self._log(profile, 10, 20.0)])        # 1-9 watched, 10 half-way
+        wl.change_watched(self.URL, 0, added=[15])
+        wl.change_watched(self.URL, 0, removed=[15])
+        part = wl.find(self.URL)["parts"][0]
+        self.assertEqual({"10": 20.0}, part["progress"])
+        self.assertEqual(10, wl.next_episode(wl.find(self.URL), self.downloads)[1])
+
     def test_manual_status_is_not_undone_by_a_recompute(self):
         wl = self.wl
         profile = self._linked(max_ep=1)
@@ -4505,7 +4794,8 @@ class WatchLaterTests(unittest.TestCase):
         self.assertEqual("Show", wl.part_profile_name(one, one["parts"][0]))
         self.assertEqual("Show - Season 2", wl.part_profile_name(two, two["parts"][1]))
 
-    def test_progress_script_is_bundled_and_installed_alone(self):
+    def test_app_scripts_are_bundled_and_installed_alone(self):
+        """Progress tracking and "Skip opening" work without applying the config."""
         from unittest import mock
         from utils import mpvnet
         src = os.path.join(mpvnet.bundle_dir(), "scripts", mpvnet.PROGRESS_SCRIPT)
@@ -4515,7 +4805,8 @@ class WatchLaterTests(unittest.TestCase):
                 mock.patch.object(mpvnet, "config_dir", return_value=cfg):
             self.assertTrue(mpvnet.ensure_progress_script())
             self.assertEqual(os.path.join(cfg, mpvnet.PROGRESS_LOG), mpvnet.progress_log_path())
-        self.assertEqual(["aed-progress.lua"], os.listdir(os.path.join(cfg, "scripts")))
+        self.assertEqual(["aed-progress.lua", "aed-skip.lua"],
+                         sorted(os.listdir(os.path.join(cfg, "scripts"))))
         self.assertFalse(os.path.exists(os.path.join(cfg, "mpv.conf")))
 
 
@@ -5091,6 +5382,47 @@ class LibraryEdgeCaseTests(unittest.TestCase):
         grid.set_selected(sorted(set(grid.selected()) | {9}))     # the user ticks 9
         dlg.yesButton.click()
         self.assertEqual([1, 2, 3, 4, 5, 9], wl.find(self.PAGE)["parts"][0]["watched"])
+
+    def test_dialog_names_what_next_plays_and_follows_unticks(self):
+        """Ep 28 opened by mistake was saved as started, and Next kept playing it
+        with no way to change that from this dialog (Frieren, 2026-10-23)."""
+        wl = self.wl
+        from ui.watch_later_tab import EntryDialog
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 28}])
+        wl.link_profile(self.PAGE, 0, "Show X")
+        wl.apply_progress([self._log("Show X", 28, 0.5)])         # the accidental jump
+        dlg = EntryDialog(wl.find(self.PAGE), self.host)
+        self.assertTrue(dlg.lbl_next.text().startswith("Up next: Ep 28, started"))
+        grid = dlg._grids[0][1]
+        grid.set_selected(range(1, 19))                            # untick 19-27
+        self.assertTrue(dlg.next_text().startswith("Up next: Ep 19"))
+        dlg.yesButton.click()
+        nxt = wl.next_episode(wl.find(self.PAGE), self.downloads)
+        self.assertEqual((0, 19), nxt[:2])
+        self.assertEqual({}, wl.find(self.PAGE)["parts"][0]["progress"])
+
+    def test_done_reads_unread_playback_before_saving(self):
+        """Ep 28 played again, its log line not yet read. Read after Done, it re-ticked
+        1-27 and Continue went back to 28; read before, the unticks win."""
+        wl = self.wl
+        from ui.watch_later_tab import EntryDialog
+        wl.add("Show X", self.PAGE, "witanime.site")
+        wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 28}])
+        wl.link_profile(self.PAGE, 0, "Show X")
+        log = os.path.join(self.tmp, "aed-progress.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write(self._log("Show X", 28, 0.5) + "\n")
+        wl.ingest_log(log)
+        dlg = EntryDialog(wl.find(self.PAGE), self.host, catch_up=lambda: wl.ingest_log(log))
+        with open(log, "a", encoding="utf-8") as f:              # played again meanwhile
+            f.write(self._log("Show X", 28, 0.6) + "\n")
+        dlg._grids[0][1].set_selected(range(1, 19))
+        dlg.yesButton.click()
+        self.assertFalse(wl.ingest_log(log))                     # nothing left to undo it
+        part = wl.find(self.PAGE)["parts"][0]
+        self.assertEqual(list(range(1, 19)), part["watched"])
+        self.assertEqual(19, wl.next_episode(wl.find(self.PAGE), self.downloads)[1])
 
     def test_unknown_status_and_junk_entries_do_not_crash(self):
         wl = self.wl
@@ -6116,6 +6448,224 @@ class QuickPlayTests(unittest.TestCase):
         self.assertEqual("played", status)
         self.assertEqual("Show B Ep6.mp4", os.path.basename(popen.call_args[0][0][1]))
 
+    def test_play_next_frees_up_space_after_reading_the_log(self):
+        from unittest import mock
+        from utils import quick_play, storage
+        settings = {"download_dir": self.downloads, "cleanup_keep": 2}
+        order = []
+        with mock.patch.object(quick_play, "_settings", return_value=settings), \
+                mock.patch("utils.mpvnet.find_mpvnet", return_value=(None, None)), \
+                mock.patch.object(quick_play, "catch_up", side_effect=lambda exe: order.append("log")), \
+                mock.patch.object(storage, "auto_clean",
+                                  side_effect=lambda s, d: order.append(("clean", s, d))):
+            quick_play.play_next()
+        self.assertEqual(["log", ("clean", settings, self.downloads)], order)
+
+
+class FreeUpSpaceTests(unittest.TestCase):
+    """Library > Free up space (utils/storage.py, wl.cleanup_candidates): delete
+    watched episodes N behind. Files go through a fake Recycle Bin here -- the
+    suite never calls the real one."""
+
+    URL = "https://witanime.site/anime/space-show/"
+    TEMPLATE = "https://witanime.site/episode/space-show-الحلقة-{x}/"
+    PROFILE = "Space Show"
+
+    def setUp(self):
+        from unittest import mock
+        from utils import watch_later as wl, storage
+        self.wl, self.storage = wl, storage
+        self.tmp = tempfile.mkdtemp(prefix="aed_space_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        p = mock.patch.object(wl, "FILE", os.path.join(self.tmp, "watch_later.json"))
+        p.start()
+        self.addCleanup(p.stop)
+        self.downloads = os.path.join(self.tmp, "animes")
+        self.folder = os.path.join(self.downloads, self.PROFILE)
+        self.binned = []
+        wl.add(self.PROFILE, self.URL, "witanime.site")
+        wl.set_parts(self.URL, [{"template": self.TEMPLATE, "max_ep": 24, "first_ep": 1}])
+        wl.link_profile(self.URL, 0, self.PROFILE)
+
+    def recycle(self, path):
+        os.remove(path)
+        self.binned.append(wl_ep(path))
+        return True
+
+    def files(self, eps):
+        os.makedirs(self.folder, exist_ok=True)
+        for ep in eps:
+            with open(os.path.join(self.folder, f"{self.PROFILE} Ep{ep}.mp4"), "wb") as f:
+                f.write(b"x" * 1000)
+
+    def finish(self, *eps, percent=100.0):
+        self.wl.apply_progress([json.dumps({
+            "path": os.path.join(self.folder, f"{self.PROFILE} Ep{ep}.mp4"),
+            "percent": percent, "eof": percent >= 100}) for ep in eps])
+
+    def on_disk(self):
+        return sorted(self.wl.episode_files(self.folder))
+
+    def auto(self, keep=2, **extra):
+        return self.storage.auto_clean(dict({"cleanup_keep": keep}, **extra), self.downloads,
+                                       recycle=self.recycle)
+
+    def test_finishing_an_episode_deletes_the_ones_n_behind(self):
+        self.files(range(1, 25))
+        self.finish(*range(1, 20))                     # watched up to Ep 19
+        report = self.auto(keep=2)
+        self.assertEqual(list(range(1, 18)), self.binned)
+        self.assertEqual(list(range(18, 25)), self.on_disk())
+        part = self.wl.find(self.URL)["parts"][0]
+        self.assertEqual(list(range(1, 18)), part["cleaned"])
+        self.assertEqual("Freed " + self.storage.size_text(17000),
+                         self.storage.describe(report)[0])
+        self.assertIn("Space Show Ep 1-17", self.storage.describe(report)[1])
+
+    def test_episodes_only_implied_by_a_jump_are_never_deleted_on_their_own(self):
+        """Ep 28 opened by mistake ticks 1-27; only what was really seen goes."""
+        self.files(range(1, 25))
+        self.finish(1, 2, 3)
+        self.finish(24, percent=0.5)                   # the accidental jump
+        self.assertEqual(list(range(1, 24)), self.wl.find(self.URL)["parts"][0]["watched"])
+        self.auto(keep=2)
+        self.assertEqual([1], self.binned)             # 3 - 2; nothing of 4-23
+
+    def test_off_by_default_and_never_for_a_kept_anime(self):
+        self.files(range(1, 25))
+        self.finish(*range(1, 20))
+        self.assertEqual([], self.storage.auto_clean({}, self.downloads, recycle=self.recycle))
+        self.assertEqual([], self.auto(keep=0))
+        self.wl.update(self.URL, keep_all=True)
+        self.assertEqual([], self.auto(keep=2))
+        self.assertEqual([], self.binned)
+
+    def test_hand_ticked_episodes_go_only_when_asked(self):
+        self.files(range(1, 25))
+        self.wl.set_watched(self.URL, 0, range(1, 11))
+        self.assertEqual([], self.auto(keep=2))
+        self.storage.clean(self.downloads, 2, url=self.URL, finished_only=False,
+                           recycle=self.recycle)
+        self.assertEqual(list(range(1, 9)), self.binned)
+
+    def test_deleted_after_watching_is_not_missing_but_deleted_by_hand_is(self):
+        self.files(range(1, 25))
+        self.finish(*range(1, 11))
+        self.auto(keep=2)                              # 1-8 cleaned
+        os.remove(os.path.join(self.folder, f"{self.PROFILE} Ep20.mp4"))
+        entry = self.wl.find(self.URL)
+        self.assertEqual((0, [20]), self.wl.missing_episodes(entry, self.downloads))
+        self.assertEqual([20], self.wl.missing_from(entry, 0, 9, self.downloads))
+
+    def test_keeps_three_files_the_one_playing_and_skip_neighbours(self):
+        from utils import skip_times
+        wl = self.wl
+        self.files(range(1, 5))
+        self.finish(1, 2, 3, 4)
+        self.storage.clean(self.downloads, 0, recycle=self.recycle)   # 4 files: one may go
+        self.assertEqual([1], self.binned)
+        # The last played episode may be open in mpv.net.
+        self.binned.clear()
+        self.files(range(5, 11))
+        self.finish(5, 6, 7, 8)
+        entry = wl.find(self.URL)
+        self.assertEqual(8, entry["last_played"]["ep"])
+        doomed = [ep for ep, _p in wl.cleanup_candidates(entry, self.downloads, 0)[0]]
+        self.assertNotIn(8, doomed)
+        # Ep 9 still waits for skip times: its two neighbours below stay.
+        stamped = {os.path.basename(p): skip_times.stamp(p)
+                   for ep, p in wl.episode_files(self.folder).items() if ep != 9}
+        with open(os.path.join(self.folder, skip_times.SKIP_FILE), "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "episodes": stamped}, f)
+        doomed = [ep for ep, _p in wl.cleanup_candidates(entry, self.downloads, 0)[0]]
+        self.assertEqual([2, 3, 4, 5, 6], doomed)
+
+    def test_a_file_in_use_is_tried_again_next_time(self):
+        self.files(range(1, 25))
+        self.finish(*range(1, 6))
+        busy = os.path.join(self.folder, f"{self.PROFILE} Ep1.mp4")
+        report = self.storage.clean(self.downloads, 2, recycle=lambda p: p != busy and self.recycle(p))
+        self.assertEqual([2, 3], self.binned)
+        self.assertEqual(1, report[0]["failed"])
+        self.assertEqual([2, 3], self.wl.find(self.URL)["parts"][0]["cleaned"])
+        self.auto(keep=2)
+        self.assertEqual([2, 3, 1], self.binned)
+
+    def test_permanent_deletion_skips_the_recycle_bin(self):
+        from unittest import mock
+        self.files(range(1, 25))
+        self.finish(*range(1, 6))
+        bin_ = mock.Mock(return_value=True)
+        self.storage.auto_clean({"cleanup_keep": 2, "cleanup_permanent": True}, self.downloads,
+                                recycle=bin_)
+        bin_.assert_not_called()
+        self.assertEqual(list(range(4, 25)), self.on_disk())
+
+    def test_finished_and_cleaned_survive_a_season_refresh(self):
+        self.files(range(1, 25))
+        self.finish(*range(1, 6))
+        self.auto(keep=2)
+        self.wl.set_parts(self.URL, [{"template": self.TEMPLATE, "max_ep": 26}])
+        part = self.wl.find(self.URL)["parts"][0]
+        self.assertEqual([1, 2, 3, 4, 5], part["finished"])
+        self.assertEqual([1, 2, 3], part["cleaned"])
+
+    def test_the_windows_delete_call_works(self):
+        """The real SHFileOperationW call, minus FOF_ALLOWUNDO so the temp file is
+        deleted outright: nothing lands in the user's Recycle Bin."""
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        from unittest import mock
+        path = os.path.join(self.tmp, "Space Show Ep1.mp4")
+        with open(path, "wb") as f:
+            f.write(b"x")
+        with mock.patch.object(self.storage, "_FOF_ALLOWUNDO", 0):
+            self.assertTrue(self.storage._recycle(path))
+        self.assertFalse(os.path.exists(path))
+
+    def test_storage_and_details_dialogs(self):
+        from unittest import mock
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication, QWidget
+        type(self)._app = QApplication.instance() or QApplication([])
+        from ui import watch_later_tab as tab
+        host = QWidget()
+        dlg = tab.StorageDialog(2, True, host)
+        self.assertEqual((2, True), dlg.values())
+        dlg.combo_keep.setCurrentIndex(0)
+        dlg.combo_where.setCurrentIndex(0)
+        self.assertEqual((0, False), dlg.values())
+
+        self.files(range(1, 25))
+        self.finish(*range(1, 11))
+        with mock.patch.object(tab, "_settings", return_value={"cleanup_keep": 2}), \
+                mock.patch.object(tab, "_download_dir", return_value=self.downloads):
+            dlg = tab.EntryDialog(self.wl.find(self.URL), host)
+            self.assertTrue(dlg.btn_free.isVisibleTo(dlg))         # 1-8 can go
+            self.assertIn("8 watched", dlg.btn_free.toolTip())
+            dlg.check_keep_all.setChecked(True)
+            dlg.yesButton.click()
+            self.assertTrue(self.wl.find(self.URL)["keep_all"])
+            dlg = tab.EntryDialog(self.wl.find(self.URL), host)
+            self.assertFalse(dlg.btn_free.isVisibleTo(dlg))        # kept: nothing offered
+        self.assertEqual(list(range(1, 25)), self.on_disk())
+
+    def test_settings_and_text(self):
+        keep = self.storage.keep_setting
+        self.assertEqual(0, keep({}))
+        self.assertEqual(0, keep({"cleanup_keep": "x"}))
+        self.assertEqual(0, keep({"cleanup_keep": -1}))
+        self.assertEqual(3, keep({"cleanup_keep": 3}))
+        self.assertEqual("1-3, 7, 9-10", self.storage.episode_spec([9, 1, 2, 3, 7, 10]))
+        self.assertEqual("1.5 GB", self.storage.size_text(int(1.5 * 1024 ** 3)))
+        self.assertIsNone(self.storage.describe([{"episodes": [], "freed": 0, "failed": 1,
+                                                  "title": "x", "label": ""}]))
+
+
+def wl_ep(path):
+    from utils.watch_later import episode_number
+    return episode_number(path)
+
 
 class UpdaterTests(unittest.TestCase):
     """core/updater.py: which release is offered, and the download that must
@@ -6773,6 +7323,199 @@ class ShaderToggleBindingTests(unittest.TestCase):
         bound = re.search(r"^Ctrl\+1\s+script-binding\s+(\S+)", conf, re.M).group(1)
         self.assertNotIn("/", bound)
         self.assertIn(f'add_key_binding(nil, "{bound}"', lua)
+
+
+class SkipTimesTests(unittest.TestCase):
+    """Openings/endings found from the audio (utils/intro_detect.py), saved beside
+    the episodes and offered by scripts/aed-skip.lua (utils/skip_times.py)."""
+
+    RATE = 11025
+
+    def setUp(self):
+        import numpy as np
+        from utils import intro_detect, skip_times
+        self.np, self.d, self.st = np, intro_detect, skip_times
+        self.tmp = tempfile.mkdtemp(prefix="aed_skiptest_")
+        self.rng = np.random.default_rng(7)
+        self.song = self.noise(90)          # the "opening": the same in every episode
+        self.ending = self.noise(85)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def noise(self, seconds):
+        return self.rng.standard_normal(int(seconds * self.RATE)).astype("float32") * 3000
+
+    def episode(self, seconds, op_at=None, ed_at=None, dialogue=0.0, song_len=90):
+        audio = self.noise(seconds)
+        r = self.RATE
+        if op_at is not None:
+            song = self.song[:int(song_len * r)]
+            seg = song + (self.noise(len(song) / r) * dialogue if dialogue else 0)
+            audio[int(op_at * r):int(op_at * r) + len(seg)] = seg
+        if ed_at is not None:
+            audio[int(ed_at * r):int(ed_at * r) + len(self.ending)] = self.ending
+        return audio
+
+    def test_shared_opening_found_where_each_episode_puts_it(self):
+        a = self.d.fingerprint(self.episode(300, op_at=30))
+        b = self.d.fingerprint(self.episode(300, op_at=75))
+        length, start_a, start_b, _agree = self.d.shared_segment(a, b)
+        self.assertAlmostEqual(90, length, delta=2)
+        self.assertAlmostEqual(30, start_a, delta=1)
+        self.assertAlmostEqual(75, start_b, delta=1)
+
+    def test_opening_under_dialogue_still_found(self):
+        a = self.d.fingerprint(self.episode(300, op_at=10, dialogue=0.5))
+        b = self.d.fingerprint(self.episode(300, op_at=120, dialogue=0.5))
+        found = self.d.shared_segment(a, b)
+        self.assertIsNotNone(found)
+        self.assertAlmostEqual(10, found[1], delta=1.5)
+        self.assertAlmostEqual(120, found[2], delta=1.5)
+
+    def test_nothing_shared_or_too_short_finds_nothing(self):
+        a = self.d.fingerprint(self.episode(300))
+        b = self.d.fingerprint(self.episode(300))
+        self.assertIsNone(self.d.shared_segment(a, b))
+        # 30 s in common is a recap jingle or a reused cue, not an opening.
+        a = self.d.fingerprint(self.episode(300, op_at=20, song_len=30))
+        b = self.d.fingerprint(self.episode(300, op_at=90, song_len=30))
+        self.assertIsNone(self.d.shared_segment(a, b))
+
+    def test_a_segment_needs_two_neighbours_to_agree(self):
+        self.assertIsNone(self.d._confirmed([(30.0, 120.0)]))
+        self.assertIsNone(self.d._confirmed([(30.0, 120.0), (60.0, 150.0)]))
+        self.assertEqual([30.5, 120.5], self.d._confirmed([(30.0, 120.0), (31.0, 121.0)]))
+
+    def make_folder(self, ops, seconds=400, ed=True):
+        """Episodes "Show Ep<n>.mp4" (n from 1) with their audio kept in memory."""
+        audio = {}
+        for n, op_at in enumerate(ops, 1):
+            path = os.path.join(self.tmp, f"Show Ep{n}.mp4")
+            with open(path, "wb") as f:
+                f.write(b"\0" * (1000 + n))          # distinct sizes
+            audio[path] = self.episode(seconds, op_at=op_at,
+                                       ed_at=(seconds - 100) if ed else None)
+        calls = []
+
+        def decoder(path, start, length):
+            calls.append(path)
+            a = audio[path]
+            s = int((len(a) / self.RATE + start if start < 0 else start) * self.RATE)
+            return a[max(0, s):max(0, s) + int(length * self.RATE)]
+        return audio, decoder, calls
+
+    def test_folder_detection_saves_times_and_reuses_them(self):
+        audio, decoder, calls = self.make_folder([5, 40, 0, 70])
+        found = self.d.detect_folder(self.tmp, decoder=decoder, duration=lambda p: 400.0)
+        self.assertEqual(4, found)
+        data = self.st.read_skip_file(self.tmp)
+        eps = data["episodes"]
+        for n, op_at in enumerate([5, 40, 0, 70], 1):
+            entry = eps[f"Show Ep{n}.mp4"]
+            self.assertAlmostEqual(op_at, entry["op"][0], delta=1.5)
+            self.assertAlmostEqual(op_at + 90, entry["op"][1], delta=2.5)
+            self.assertAlmostEqual(300, entry["ed"][0], delta=1.5)
+            self.assertEqual("audio", entry["source"])
+        self.assertEqual((4, 4), self.st.skip_counts(self.tmp))
+        # Second visit: every file unchanged, nothing decoded again.
+        calls.clear()
+        self.assertEqual(4, self.d.detect_folder(self.tmp, decoder=decoder,
+                                                 duration=lambda p: 400.0))
+        self.assertEqual([], calls)
+        # A replaced episode is done again (with its neighbours, to compare).
+        ep2 = os.path.join(self.tmp, "Show Ep2.mp4")
+        with open(ep2, "wb") as f:
+            f.write(b"\0" * 5000)
+        self.assertEqual((3, 4), self.st.skip_counts(self.tmp))
+        calls.clear()
+        self.d.detect_folder(self.tmp, decoder=decoder, duration=lambda p: 400.0)
+        self.assertIn(ep2, calls)
+        self.assertEqual((4, 4), self.st.skip_counts(self.tmp))
+
+    def test_fewer_than_three_episodes_or_no_mpvnet_saves_nothing(self):
+        from unittest import mock
+        _audio, decoder, _calls = self.make_folder([5, 40])
+        self.assertEqual(-1, self.d.detect_folder(self.tmp, decoder=decoder))
+        self.make_folder([5, 40, 0])
+        with mock.patch.object(self.d, "find_libmpv", return_value=""):
+            self.assertEqual(-1, self.d.detect_folder(self.tmp))
+        # Not saved as "nothing found": it's tried again once mpv.net is there.
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, self.st.SKIP_FILE)))
+
+    def test_an_episode_that_fails_to_decode_is_tried_again_later(self):
+        _audio, decoder, _calls = self.make_folder([5, 40, 0, 70])
+        bad = os.path.join(self.tmp, "Show Ep4.mp4")
+
+        def flaky(path, start, length):
+            if path == bad:
+                raise self.d.DecodeError("broken file")
+            return decoder(path, start, length)
+        self.d.detect_folder(self.tmp, decoder=flaky, duration=lambda p: 400.0)
+        eps = self.st.read_skip_file(self.tmp)["episodes"]
+        self.assertNotIn("Show Ep4.mp4", eps)
+        self.assertEqual(3, len(eps))
+
+    def test_player_settings_round_trip(self):
+        self.assertEqual({"opening": "ask", "ending": "off"}, self.st.read_settings(self.tmp))
+        self.assertTrue(self.st.write_settings(self.tmp, "auto", "ask"))
+        self.assertEqual({"opening": "auto", "ending": "ask"}, self.st.read_settings(self.tmp))
+        self.assertFalse(self.st.write_settings(self.tmp, "sometimes", "ask"))
+        with open(os.path.join(self.tmp, self.st.SETTINGS_FILE), "a", encoding="utf-8") as f:
+            f.write("ending=loud\n")                  # a bad hand edit is ignored
+        self.assertEqual("ask", self.st.read_settings(self.tmp)["ending"])
+
+    def test_queue_runs_each_folder_once(self):
+        import threading
+        from unittest import mock
+        done, seen = threading.Event(), []
+        other = os.path.join(self.tmp, "Another Show")     # removed with self.tmp
+        os.makedirs(other)
+        gate = threading.Event()
+
+        def fake(folder, force=False, should_stop=None):
+            gate.wait(5)
+            seen.append((folder, force))
+            if len(seen) == 2:
+                done.set()
+        with mock.patch.object(self.d, "detect_folder", side_effect=fake):
+            self.assertTrue(self.st.queue_folder(self.tmp))
+            self.assertTrue(self.st.queue_folder(other))
+            self.assertTrue(self.st.queue_folder(other, force=True))   # merged, now forced
+            self.assertFalse(self.st.queue_folder(os.path.join(self.tmp, "missing")))
+            gate.set()
+            self.assertTrue(done.wait(10))
+        self.assertEqual([(self.tmp, False), (other, True)], seen)
+
+    def test_player_script_is_bundled_with_its_settings_and_key(self):
+        import re
+        from utils import mpvnet
+        base = mpvnet.bundle_dir()
+        with open(os.path.join(base, "scripts", mpvnet.SKIP_SCRIPT), encoding="utf-8") as f:
+            lua = f.read()
+        # read_options' name is the settings file the Video Player tab writes.
+        name = re.search(r'read_options\(o, "([^"]+)"\)', lua).group(1)
+        self.assertEqual(os.path.join("script-opts", name + ".conf"), self.st.SETTINGS_FILE)
+        for key in ("opening", "ending"):
+            self.assertRegex(lua, rf'{key} = "{self.st.DEFAULTS[key]}"')
+        self.assertIn(self.st.SKIP_FILE, lua)
+        # K belongs to the script (forced, so it beats input.conf) while "Skip" is
+        # on screen, and to "ignore" otherwise -- unbound, mpv.net's own K opened
+        # input.conf when pressed after the prompt.
+        key = re.search(r'local KEY = "([^"]+)"', lua).group(1)
+        self.assertIn("add_forced_key_binding(KEY", lua)
+        with open(os.path.join(base, "input.conf"), encoding="utf-8") as f:
+            self.assertRegex(f.read(), rf"(?m)^{re.escape(key)}\s+ignore\s*$")
+        # The text shows for 10 s; K stays bound for the whole song (only clear()
+        # unbinds it, and the timed hide only removes the overlay).
+        self.assertIn("prompt_seconds = 10", lua)
+        timed = re.search(r"elseif text_until and t >= text_until then(.*?)\n\s*end", lua, re.S)
+        self.assertIsNotNone(timed)
+        self.assertIn("overlay:remove()", timed.group(1))
+        self.assertNotIn("remove_key_binding", timed.group(1))
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "tools", "build_release.py"), encoding="utf-8") as f:
+            self.assertIn('"aed-skip.lua"', f.read())
 
 
 

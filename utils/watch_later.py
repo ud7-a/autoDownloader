@@ -7,9 +7,12 @@ linked to an entry's part only when the user starts downloading it.
 Entry:
     {"url", "title", "domain", "cover", "status", "added",
      "parts": [{"label", "template", "max_ep", "first_ep", "profile", "watched": [eps],
-                "progress": {"<ep>": percent}}],
+                "progress": {"<ep>": percent},
+                "finished": [eps played to the end in mpv.net],
+                "cleaned": [eps deleted after watching (utils/storage.py)]}],
      "history": [{"date", "profile", "episodes", "status", "notes"}],
-     "last_played": {"profile", "ep", "ts"}}
+     "last_played": {"profile", "ep", "ts"},
+     "keep_all": true when its episodes are never deleted after watching}
 
 One entry per anime. A show with several seasons keeps them as parts; a flat show
 has a single part.
@@ -277,6 +280,8 @@ def merge_parts(old_parts, detected):
             "watched": list(old.get("watched", [])),
             "progress": dict(old.get("progress", {})),
             "sources": dict(old.get("sources", {})),
+            "finished": list(old.get("finished", [])),
+            "cleaned": list(old.get("cleaned", [])),
         })
     # A part the site no longer lists but that has a profile or watch state is kept.
     seen = {_part_key(p["template"]) for p in parts}
@@ -294,7 +299,7 @@ def _has_state(part):
     """The part carries something of the user's: a profile link, watched episodes,
     half-way progress, or where its episodes came from."""
     return bool(part.get("profile") or part.get("watched") or part.get("progress")
-                or part.get("sources"))
+                or part.get("sources") or part.get("cleaned"))
 
 
 def set_parts(url, detected):
@@ -343,6 +348,10 @@ def _fold(data, e, other, matched):
         sources = dict(theirs.get("sources") or {})
         sources.update(mine.get("sources") or {})
         mine["sources"] = sources
+        for key in ("finished", "cleaned"):
+            both = set(mine.get(key, [])) | set(theirs.get(key, []))
+            if both:
+                mine[key] = sorted(both)
     taken = {id(theirs) for _mine, theirs in matched}
     for p in other.get("parts", []):
         if id(p) not in taken and _has_state(p):
@@ -481,11 +490,15 @@ def write_folder_source(folder, template, episodes, when=None):
     eps = data.setdefault("episodes", {})
     for ep in episodes:
         eps[str(ep)] = episode_source(template, ep, when)
-    path = os.path.join(folder, SOURCE_FILE)
+    return write_hidden_json(os.path.join(folder, SOURCE_FILE), data)
+
+
+def write_hidden_json(path, data):
+    """Write a note the app keeps beside the episodes (source, skip times) and
+    mark it hidden. Written beside and moved over: Windows refuses to overwrite a
+    hidden file in place."""
     tmp = path + ".tmp"
     try:
-        # Written beside and moved over: Windows refuses to overwrite a hidden
-        # file in place, and the note is hidden.
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
@@ -638,13 +651,26 @@ def record_download(profile, episodes_str, status, notes):
         return True
 
 
-def _write_watched(e, part, after):
+def edit_watched(part, added=(), removed=()):
+    """Tick `added` and untick `removed` on `part`, in place. True when anything
+    was newly ticked.
+
+    Unticking says "I haven't seen this yet", so a later episode's half-way
+    progress goes too. Otherwise that episode stayed Continue's pick no matter
+    what was unticked: an accidental jump to Ep 28 kept every Next on 28, and the
+    episode grid had no way to undo it."""
+    removed = {int(x) for x in removed}
     before = set(part.get("watched", []))
+    after = (before - removed) | {int(x) for x in added}
+    progress = part.get("progress") or {}
+    if removed:
+        first = min(removed)
+        for key in [k for k in progress if str(k).isdigit() and int(k) > first]:
+            del progress[key]
     part["watched"] = sorted(after)
     for ep in after:
-        part.get("progress", {}).pop(str(ep), None)
-    if after - before:
-        _on_watched(e)
+        progress.pop(str(ep), None)
+    return bool(after - before)
 
 
 def clear_history(url):
@@ -659,7 +685,10 @@ def set_watched(url, part_index, episodes):
         e = _find(data, url)
         if e is None or not (0 <= part_index < len(e.get("parts", []))):
             return False
-        _write_watched(e, e["parts"][part_index], {int(x) for x in episodes})
+        part = e["parts"][part_index]
+        before, after = set(part.get("watched", [])), {int(x) for x in episodes}
+        if edit_watched(part, after - before, before - after):
+            _on_watched(e)
         _save(data)
         return True
 
@@ -671,6 +700,29 @@ def part_ident(part):
     return ("t", _part_key(t)) if t else ("f", safe_folder_name(part.get("profile") or "").lower())
 
 
+def _part_of(e, part_index, ident=None):
+    """e's part at `part_index`, or -- if the parts moved since it was read --
+    the one `ident` (part_ident) names."""
+    parts = e.get("parts") or []
+    part = parts[part_index] if 0 <= part_index < len(parts) else None
+    if ident is not None and (part is None or part_ident(part) != ident):
+        part = next((p for p in parts if part_ident(p) == ident), None)
+    return part
+
+
+def mark_cleaned(url, part_index, episodes, ident=None):
+    """Record episodes deleted after watching, so they don't count as missing."""
+    with _lock:
+        data = _load()
+        e = _find(data, url)
+        part = _part_of(e, part_index, ident) if e is not None else None
+        if part is None:
+            return False
+        part["cleaned"] = sorted(set(part.get("cleaned", [])) | {int(x) for x in episodes})
+        _save(data)
+        return True
+
+
 def change_watched(url, part_index, added=(), removed=(), ident=None):
     """Tick `added` and untick `removed`, leaving every other episode as it is
     now -- including ones mpv.net ticked meanwhile and ones the grid didn't show.
@@ -678,16 +730,11 @@ def change_watched(url, part_index, added=(), removed=(), ident=None):
     with _lock:
         data = _load()
         e = _find(data, url)
-        if e is None:
-            return False
-        parts = e.get("parts") or []
-        part = parts[part_index] if 0 <= part_index < len(parts) else None
-        if ident is not None and (part is None or part_ident(part) != ident):
-            part = next((p for p in parts if part_ident(p) == ident), None)
+        part = _part_of(e, part_index, ident) if e is not None else None
         if part is None:
             return False
-        after = (set(part.get("watched", [])) - {int(x) for x in removed}) | {int(x) for x in added}
-        _write_watched(e, part, after)
+        if edit_watched(part, added, removed):
+            _on_watched(e)
         _save(data)
         return True
 
@@ -784,6 +831,11 @@ def _apply_line(data, line):
     done = _earlier_episodes(part, ep)
     if eof or percent >= WATCHED_PERCENT:
         done.add(ep)
+        # Actually seen, not just implied by a later episode: only these are
+        # ever deleted on their own (utils/storage.py).
+        finished = set(part.get("finished", []))
+        if ep not in finished:
+            part["finished"] = sorted(finished | {ep})
     elif ep not in part.get("watched", []):
         progress[str(ep)] = round(max(0.0, min(percent, 100.0)), 1)
     if _mark_watched(part, done):
@@ -934,7 +986,8 @@ def missing_episodes(entry, download_dir):
         if not part.get("template"):
             continue
         files = episode_files(part_folder(part, download_dir))
-        missing = [ep for ep in _total_eps(part) if ep not in files]
+        cleaned = set(part.get("cleaned", []))
+        missing = [ep for ep in _total_eps(part) if ep not in files and ep not in cleaned]
         if missing:
             return i, missing
     return None
@@ -947,7 +1000,9 @@ def missing_from(entry, part_index, ep, download_dir):
     if not 0 <= part_index < len(parts):
         return []
     files = episode_files(part_folder(parts[part_index], download_dir))
-    missing = [e for e in _total_eps(parts[part_index]) if e >= ep and e not in files]
+    cleaned = set(parts[part_index].get("cleaned", []))
+    missing = [e for e in _total_eps(parts[part_index])
+               if e >= ep and e not in files and e not in cleaned]
     if ep not in files and ep not in missing:
         missing.insert(0, ep)
     return missing
@@ -958,6 +1013,61 @@ def playlist_from(entry, part_index, ep, download_dir):
     part = entry["parts"][part_index]
     files = episode_files(part_folder(part, download_dir))
     return [files[e] for e in sorted(files) if e >= ep]
+
+
+# Skip-time detection compares each episode with its neighbours and needs three
+# in the folder (utils/intro_detect.py), so clean-up never leaves fewer.
+MIN_EPISODES_KEPT = 3
+
+
+def cleanup_candidates(entry, download_dir, keep, finished_only=True):
+    """{part index: [(episode, path)]} of watched episodes to delete, keeping the
+    last `keep` (utils/storage.py deletes them).
+
+    Per season, everything at or below (furthest episode seen - keep) goes, but
+    never:
+      * with `finished_only` (the automatic pass), an episode not played to the
+        end in mpv.net -- ticked by hand, or implied by playing a later one (a
+        jump to Ep 28 by mistake ticks 1-27);
+      * an episode unticked, left part-way, or the last one played (it may be
+        open in mpv.net right now);
+      * anything of an anime marked keep_all;
+      * the folder below MIN_EPISODES_KEPT episodes, or the two episodes before
+        one still waiting for its skip times (detection needs them).
+    """
+    if entry.get("keep_all") or keep is None or keep < 0:
+        return {}
+    from utils.skip_times import SKIP_FILE, is_current, read_skip_file
+    last = entry.get("last_played") or {}
+    out = {}
+    for i, part in enumerate(entry.get("parts") or []):
+        folder = part_folder(part, download_dir)
+        files = episode_files(folder)
+        if len(files) <= MIN_EPISODES_KEPT:
+            continue
+        watched = set(part.get("watched", []))
+        seen = set(part.get("finished", [])) & watched if finished_only else watched
+        if not seen:
+            continue
+        line = max(seen) - keep
+        progress = {int(k) for k in (part.get("progress") or {}) if str(k).isdigit()}
+        playing = last.get("ep") if last.get("profile") == part.get("profile") else None
+        doomed = {ep for ep in files
+                  if ep in seen and ep <= line and ep not in progress and ep != playing}
+        if not doomed:
+            continue
+        if os.path.isfile(os.path.join(folder, SKIP_FILE)):
+            skips = read_skip_file(folder).get("episodes") or {}
+            order = sorted(files)
+            for ep in order:
+                if ep not in doomed and not is_current(
+                        skips.get(os.path.basename(files[ep])), files[ep]):
+                    doomed -= set([e for e in order if e < ep][-2:])
+        room = len(files) - MIN_EPISODES_KEPT
+        picked = sorted(doomed)[:max(0, room)]
+        if picked:
+            out[i] = [(ep, files[ep]) for ep in picked]
+    return out
 
 
 def summary(entry, download_dir):

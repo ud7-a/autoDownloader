@@ -95,6 +95,12 @@ def play_next():
     settings = _settings()
     exe = find_mpvnet()[0]     # also where the progress log is, whatever plays
     catch_up(exe)
+    try:
+        # Free up space, when turned on: episodes just finished push older ones out.
+        from utils import storage
+        storage.auto_clean(settings, settings.get("download_dir", ""))
+    except Exception:
+        pass
     found = decide(wl.entries(), settings.get("download_dir", ""))
     if found is None:
         return "nothing", ("Nothing to continue: no anime on your Watching list has an "

@@ -2,15 +2,11 @@ Shaders bundled in Shaders/ keep their original license headers.
 
   Anime4K_*.glsl            MIT License, (c) 2019-2021 bloc97
                             https://github.com/bloc97/Anime4K
-  FSRCNNX_x2_16-0-4-1.glsl  LGPL-3.0-or-later, (c) 2017-2021 igv
-  KrigBilateral.glsl        LGPL-3.0-or-later, by Shiandow (see file header)
-  SSimDownscaler-PK.glsl    LGPL-3.0-or-later, igv
+  FSRCNNX_x2_8-0-4-1.glsl   LGPL-3.0-or-later, (c) 2017-2021 igv
                             https://github.com/igv/FSRCNN-TensorFlow
-                            https://gist.github.com/igv
   adaptive-sharpen.glsl     BSD-2-Clause, (c) 2015-2021 bacondither
 
-The shaders are shipped as separate source files. SSimDownscaler-PK.glsl is a
-patched copy of SSimDownscaler.glsl: NATIVE_CROPPED is replaced with PREKERNEL
-in its WIDTH/WHEN expressions so it runs when downscaling after a prescaler.
-The modification is documented at the top of the bundled file. The full LGPL
-license text is at https://www.gnu.org/licenses/lgpl-3.0.txt.
+The shaders are shipped as separate source files. adaptive-sharpen.glsl is
+modified: its strength (curve_height) is 0.2 instead of 1.0, as noted at the
+top of the bundled file. The full LGPL license text is at
+https://www.gnu.org/licenses/lgpl-3.0.txt.

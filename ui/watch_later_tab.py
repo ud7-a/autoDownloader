@@ -6,6 +6,7 @@ episodes you've watched; nothing here creates a profile until you press Download
 Layout: a Continue watching strip on top (the next episode of everything you're
 watching, one click to play), then Watching / Watch later / Completed.
 """
+import copy
 import os
 import sys
 
@@ -17,7 +18,8 @@ from qfluentwidgets import (PushButton, PrimaryPushButton, SimpleCardWidget, Smo
                             ToolButton, PrimaryToolButton, FluentIcon as FIF, InfoBar,
                             InfoBarPosition, MessageBoxBase, SubtitleLabel, BodyLabel,
                             ComboBox, ProgressBar, SegmentedWidget, RoundMenu,
-                            Action, FlowLayout, IndeterminateProgressRing)
+                            Action, FlowLayout, IndeterminateProgressRing, CheckBox,
+                            MessageBox)
 
 from core.signals import signals
 from utils import watch_later as wl
@@ -40,6 +42,29 @@ STATUS_COLORS = {"Success": "#2ecc71", "Failed": "#e74c3c",
 
 def _download_dir():
     return app_settings.get("download_dir", "")
+
+
+def _settings():
+    with config_lock:
+        return dict(app_settings)
+
+
+def _announce_cleanup(report, permanent, parent, quiet_failures=False):
+    """What Free up space just deleted. Files in use (open in mpv.net) are only
+    mentioned when the user asked for the clean-up; the automatic pass simply
+    tries them again next time."""
+    from utils import storage
+    text = storage.describe(report)
+    failed = sum(r["failed"] for r in report)
+    if text:
+        title, body = text
+        if not permanent:
+            body += ". They stay in the Recycle Bin until you empty it."
+        InfoBar.success(title, body, position=InfoBarPosition.TOP, duration=6000, parent=parent)
+    elif failed and not quiet_failures:
+        InfoBar.warning("Nothing deleted", f"{failed} episode file(s) are in use. Close "
+                        "mpv.net and try again.", position=InfoBarPosition.TOP,
+                        duration=6000, parent=parent)
 
 
 def _poster(cover, w, h, radius=6):
@@ -609,6 +634,50 @@ class WatchedGrid(EpisodeGrid):
     CELL_H = 42           # room for the site line under each episode number
 
 
+class StorageDialog(MessageBoxBase):
+    """Free up space: delete episodes once watched, keeping the last few
+    (utils/storage.py). Off until the user picks a number."""
+
+    def __init__(self, keep, permanent, parent=None):
+        super().__init__(parent)
+        from utils import storage
+        self.viewLayout.addWidget(SubtitleLabel("Free up space"))
+        self.viewLayout.addWidget(_muted(
+            "Delete episodes after you watch them, keeping the last few in case you "
+            "want to see a scene again.", 12, wrap=True))
+        self._choices = list(storage.KEEP_CHOICES)
+        self.combo_keep = ComboBox()
+        for n in self._choices:
+            self.combo_keep.addItem("Off: keep every episode" if n == 0 else
+                                    f"Keep the last {n} watched" if n > 1 else
+                                    "Keep the last watched episode")
+        self.combo_keep.setCurrentIndex(self._choices.index(keep) if keep in self._choices else 0)
+        self.combo_where = ComboBox()
+        self.combo_where.addItem("Move to the Recycle Bin")
+        self.combo_where.addItem("Delete permanently")
+        self.combo_where.setCurrentIndex(1 if permanent else 0)
+        for label, box in (("After watching", self.combo_keep),
+                           ("Deleted episodes", self.combo_where)):
+            row = QHBoxLayout()
+            row.addWidget(BodyLabel(label))
+            row.addStretch(1)
+            box.setMinimumWidth(240)
+            row.addWidget(box)
+            self.viewLayout.addLayout(row)
+        self.viewLayout.addWidget(_muted(
+            "Only episodes you watched to the end in mpv.net are deleted, never the one "
+            "you're on, and always at least 3 per anime. An anime with \"Keep every "
+            "episode\" ticked in its details is left alone. In the Recycle Bin, episodes "
+            "still use space until it is emptied; deleted permanently, they can't be "
+            "restored.", 11, wrap=True))
+        self.widget.setMinimumWidth(460)
+        self.yesButton.setText("Save")
+        self.cancelButton.setText("Cancel")
+
+    def values(self):
+        return self._choices[self.combo_keep.currentIndex()], self.combo_where.currentIndex() == 1
+
+
 class PartPickDialog(MessageBoxBase):
     """Which season to download, for an anime with several."""
 
@@ -635,10 +704,13 @@ class EntryDialog(MessageBoxBase):
     download_part = pyqtSignal(int)    # part index
     refresh_parts = pyqtSignal()
 
-    def __init__(self, entry, parent=None):
+    def __init__(self, entry, parent=None, catch_up=None):
         super().__init__(parent)
         self.url = entry.get("url", "")
+        self._entry = entry
+        self._catch_up = catch_up         # reads mpv.net's progress log; see apply
         self._grids = []
+        self._opened = {}                 # part index -> watched when the dialog opened
         self._clear_history = False
 
         top = QHBoxLayout()
@@ -660,6 +732,12 @@ class EntryDialog(MessageBoxBase):
         row.addWidget(self.combo_status)
         row.addStretch(1)
         head.addLayout(row)
+        self._keep_all = bool(entry.get("keep_all"))
+        self.check_keep_all = CheckBox("Keep every episode")
+        self.check_keep_all.setChecked(self._keep_all)
+        self.check_keep_all.setToolTip("Never delete this anime's episodes after watching "
+                                       "(Library > Free up space)")
+        head.addWidget(self.check_keep_all)
         head.addStretch(1)
         top.addLayout(head, 1)
         self.viewLayout.addLayout(top)
@@ -692,9 +770,13 @@ class EntryDialog(MessageBoxBase):
                 lbl = BodyLabel(name)
                 lbl.setFont(QFont("Segoe UI Variable", 10, QFont.Weight.Bold))
                 head.addWidget(lbl)
+            cleaned = sorted(set(part.get("cleaned", [])) - set(files))
             if files:
                 head.addWidget(_muted(f"Downloaded: {compact_episode_spec(sorted(files))}", 11))
-            elif not part.get("profile"):
+            if cleaned:
+                head.addWidget(_muted(f"Deleted after watching: "
+                                      f"{compact_episode_spec(cleaned)}", 11))
+            if not files and not part.get("profile"):
                 head.addWidget(_muted("Not downloaded yet — no profile until you download.", 11))
             head.addStretch(1)
             btn = PushButton(FIF.DOWNLOAD, "Download")
@@ -714,10 +796,15 @@ class EntryDialog(MessageBoxBase):
                 # Saved on Done (see apply), not on every click.
                 self._grids.append((i, grid, set(eps), set(part.get("watched", [])),
                                     wl.part_ident(part)))
+                self._opened[i] = set(eps) & set(part.get("watched", []))
+                grid.changed.connect(self._update_next)
         if parts:
-            col.addWidget(_muted("Click an episode to mark it watched, then press Done. Episodes you play "
-                                 "in mpv.net are ticked automatically. Under each number is "
-                                 "the website it was downloaded from.", 11, wrap=True))
+            self.lbl_next = _muted("", 12, wrap=True)
+            col.addWidget(self.lbl_next)
+            self._update_next()
+            col.addWidget(_muted("Click an episode to tick or untick it, then press Done. Episodes "
+                                 "you play in mpv.net are ticked automatically. Under each number "
+                                 "is the website it was downloaded from.", 11, wrap=True))
 
         col.addSpacing(6)
         history = [h for h in entry.get("history") or [] if isinstance(h, dict)]
@@ -764,6 +851,19 @@ class EntryDialog(MessageBoxBase):
         self.buttonLayout.insertWidget(0, self.btn_refresh)
         # Found only as a folder on disk: there is no anime page to look up.
         self.btn_refresh.setVisible(not is_local(self.url))
+        # Watched episodes, minus the last few kept (Free up space's number).
+        from utils import storage
+        found = ([] if self._keep_all else
+                 [path for items in wl.cleanup_candidates(
+                     entry, _download_dir(), storage.keep_setting(_settings()),
+                     finished_only=False).values() for _ep, path in items])
+        size = sum(os.path.getsize(p) for p in found if os.path.isfile(p))
+        self.btn_free = PushButton(FIF.DELETE, f"Delete watched ({storage.size_text(size)})")
+        self.btn_free.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_free.setToolTip(f"{len(found)} watched episodes are still on disk")
+        self.btn_free.setVisible(bool(found))
+        self.btn_free.clicked.connect(self._on_free_space)
+        self.buttonLayout.insertWidget(1, self.btn_free)
         self.widget.setMinimumWidth(620)
         # Done saves the ticks and status; Close leaves without saving them.
         self.yesButton.setText("Done")
@@ -781,7 +881,17 @@ class EntryDialog(MessageBoxBase):
         """Save what changed: the episodes ticked or unticked here, then the status.
         Only those clicks are written -- episodes the grid doesn't show (past the
         known count, file since deleted) and anything mpv.net ticked while the
-        dialog was open stay as they are."""
+        dialog was open stay as they are.
+
+        mpv.net's progress log is read first. A line still unread there (Ep 28
+        played, log not yet looked at) was otherwise applied after these clicks,
+        by the Continue shortcut or the next poll, and put back what was just
+        unticked -- the shortcut went on playing Ep 28."""
+        if self._catch_up:
+            try:
+                self._catch_up()
+            except Exception:
+                pass
         for idx, grid, shown, before, ident in self._grids:
             selected = set(grid.selected()) & shown
             was = before & shown
@@ -792,12 +902,78 @@ class EntryDialog(MessageBoxBase):
         if status != self._status:
             wl.set_status(self.url, status)
             self._status = status
+        keep_all = self.check_keep_all.isChecked()
+        if keep_all != self._keep_all:
+            wl.update(self.url, keep_all=keep_all)
+            self._keep_all = keep_all
         if self._clear_history:
             wl.clear_history(self.url)
             self._clear_history = False
         # Applied once: a second call (Download, then Done) changes nothing.
         self._grids = [(i, g, shown, (set(g.selected()) & shown) | (before - shown), ident)
                        for i, g, shown, before, ident in self._grids]
+
+    def next_text(self):
+        """What Next and Continue will play once Done saves the ticks shown now. A
+        half-watched episode further on wins over everything, so it is named here
+        along with how to move back from it."""
+        entry = copy.deepcopy(self._entry)
+        parts = entry.get("parts") or []
+        for idx, grid, shown, _before, _ident in self._grids:
+            if idx < len(parts):
+                selected, was = set(grid.selected()) & shown, self._opened[idx]
+                wl.edit_watched(parts[idx], selected - was, was - selected)
+        nxt = wl.next_episode(entry, _download_dir())
+        if nxt is None:
+            return "Up next: nothing, every episode is ticked."
+        i, ep, file, percent = nxt
+        season = parts[i].get("label") if len(parts) > 1 else ""
+        text = f"Up next: {season + ' · ' if season else ''}Ep {ep}"
+        if percent:
+            text += ", started"
+        if not file:
+            text += ", not downloaded yet"
+        return text + ". To go back, untick the episodes you haven't seen."
+
+    def _update_next(self):
+        self.lbl_next.setText(self.next_text())
+
+    def _on_free_space(self):
+        """Delete this anime's watched episodes now, keeping the last few. Unlike
+        the automatic pass, ticked-by-hand and implied episodes count too -- so
+        it asks first, naming the episodes."""
+        from utils import storage
+        self.apply()                       # what's ticked here is what counts
+        if self._keep_all:
+            return
+        settings = _settings()
+        entry = wl.find(self.url) or {}
+        keep = storage.keep_setting(settings)
+        found = wl.cleanup_candidates(entry, _download_dir(), keep, finished_only=False)
+        if not found:
+            self.btn_free.hide()
+            return
+        parts = entry.get("parts") or []
+        names = "; ".join(
+            (f"{parts[i].get('label')} " if parts[i].get("label") else "")
+            + f"Ep {storage.episode_spec([ep for ep, _p in items])}"
+            for i, items in sorted(found.items()))
+        size = sum(os.path.getsize(p) for items in found.values() for _ep, p in items
+                   if os.path.isfile(p))
+        permanent = bool(settings.get(storage.PERMANENT_SETTING))
+        where = ("They are deleted permanently." if permanent else
+                 "They go to the Recycle Bin.")
+        box = MessageBox("Delete watched episodes?",
+                         f"{entry.get('title', 'Anime')}: {names} ({storage.size_text(size)}). "
+                         f"{where}", self.window())
+        box.yesButton.setText("Delete")
+        box.cancelButton.setText("Cancel")
+        if not box.exec():
+            return
+        report = storage.clean(_download_dir(), keep, permanent, url=self.url,
+                               finished_only=False)
+        _announce_cleanup(report, permanent, self.window())
+        self.accept()
 
     def _on_clear_history(self):
         """Cleared on Done, like every other change here (Close keeps it)."""
@@ -855,10 +1031,12 @@ class EntryRow(SimpleCardWidget):
     details = pyqtSignal(str)            # url
     move = pyqtSignal(str, str)          # url, status
     remove = pyqtSignal(str)             # url
+    find_skips = pyqtSignal(str)         # url -- look for openings/endings again
 
     def __init__(self, entry, parent=None):
         super().__init__(parent)
         self.url = entry.get("url", "")
+        self._parts = entry.get("parts") or []
         self.setFixedHeight(104)
         root = QHBoxLayout(self)
         root.setContentsMargins(12, 10, 14, 10)
@@ -929,7 +1107,7 @@ class EntryRow(SimpleCardWidget):
 
         more = _fixed(ToolButton(FIF.MORE))
         more.setFixedSize(36, 36)
-        more.setToolTip("Move or remove")
+        more.setToolTip("Move, find openings to skip, or remove")
         more.clicked.connect(lambda: self._menu(more, status))
         root.addWidget(more)
 
@@ -940,6 +1118,22 @@ class EntryRow(SimpleCardWidget):
                 act = Action(FIF.RIGHT_ARROW, f"Move to {wl.STATUS_LABELS[key]}")
                 act.triggered.connect(lambda _c=False, k=key: self.move.emit(self.url, k))
                 menu.addAction(act)
+        menu.addSeparator()
+        found = total = 0
+        try:
+            from utils.skip_times import skip_counts
+            for part in self._parts:
+                f, t = skip_counts(wl.part_folder(part, _download_dir()))
+                found, total = found + f, total + t
+        except Exception:
+            pass
+        label = "Find openings to skip"
+        if total:
+            label += f"  ({found} / {total} found)"
+        skips = Action(FIF.SKIP_FORWARD, label)
+        skips.setEnabled(total >= 3)          # two neighbours have to agree
+        skips.triggered.connect(lambda: self.find_skips.emit(self.url))
+        menu.addAction(skips)
         menu.addSeparator()
         rm = Action(FIF.DELETE, "Remove from Library")
         rm.triggered.connect(lambda: self.remove.emit(self.url))
@@ -985,6 +1179,11 @@ class WatchLaterWidget(QWidget):
         self.btn_shortcut.clicked.connect(self.edit_shortcut)
         self._update_shortcut_button()
         header.addWidget(self.btn_shortcut)
+        self.btn_storage = PushButton(FIF.DELETE, "")
+        self.btn_storage.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_storage.clicked.connect(self.edit_storage)
+        self._update_storage_button()
+        header.addWidget(self.btn_storage)
         btn_add = PushButton(FIF.SEARCH, "Add from Search")
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add.setToolTip("Press the Library button on any Search result to add it here")
@@ -1093,6 +1292,32 @@ class WatchLaterWidget(QWidget):
             QTimer.singleShot(0, lambda: self.scan_folder(announce=False))
         else:
             QTimer.singleShot(0, self.fetch_posters)
+        if first:
+            # Openings/endings of episodes downloaded before this (or elsewhere):
+            # background, one folder at a time, only files not done yet.
+            QTimer.singleShot(5000, self._queue_skip_times)
+
+    def _queue_skip_times(self):
+        try:
+            from utils.skip_times import queue_library
+            queue_library(_download_dir())
+        except Exception:
+            pass
+
+    def on_find_skip_times(self, url):
+        """Library menu: look for this anime's openings/endings again, now."""
+        from utils.skip_times import queue_folder
+        entry = wl.find(url) or {}
+        folders = [wl.part_folder(p, _download_dir()) for p in entry.get("parts") or []]
+        queued = sum(1 for f in folders if f and queue_folder(f, force=True))
+        if queued:
+            InfoBar.info("Finding openings and endings",
+                         "This runs in the background, about a second per episode. "
+                         "mpv.net offers \"Skip\" (K) once they're found.",
+                         position=InfoBarPosition.TOP, duration=5000, parent=self.window())
+        else:
+            InfoBar.warning("Nothing to look at", "No downloaded episodes found for this anime.",
+                            position=InfoBarPosition.TOP, duration=4000, parent=self.window())
 
     def fetch_posters(self):
         """Look up posters for entries without one, in the background. An entry
@@ -1244,6 +1469,43 @@ class WatchLaterWidget(QWidget):
             InfoBar.success("Keyboard shortcuts", " ".join(done),
                             position=InfoBarPosition.TOP, duration=6000, parent=self.window())
 
+    # ---- free up space (utils/storage.py)
+    def _update_storage_button(self):
+        from utils import storage
+        keep = storage.keep_setting(_settings())
+        self.btn_storage.setText(f"Free up space: keep {keep}" if keep else "Free up space")
+        self.btn_storage.setToolTip("Delete episodes after you watch them, keeping the last "
+                                    "few" + ("" if keep else " (off)"))
+
+    def edit_storage(self):
+        from utils import storage
+        settings = _settings()
+        dlg = StorageDialog(storage.keep_setting(settings),
+                            bool(settings.get(storage.PERMANENT_SETTING)), self.window())
+        if not dlg.exec():
+            return
+        keep, permanent = dlg.values()
+        with config_lock:
+            app_settings[storage.KEEP_SETTING] = keep
+            app_settings[storage.PERMANENT_SETTING] = permanent
+        save_config()
+        self._update_storage_button()
+        if self._auto_clean():
+            self.refresh()
+
+    def _auto_clean(self):
+        """The automatic pass: episodes finished in mpv.net, N behind. True when
+        anything was deleted."""
+        from utils import storage
+        settings = _settings()
+        try:
+            report = storage.auto_clean(settings, settings.get("download_dir", ""))
+        except Exception:
+            return False
+        _announce_cleanup(report, bool(settings.get(storage.PERMANENT_SETTING)),
+                          self.window(), quiet_failures=True)
+        return any(r["episodes"] for r in report)
+
     def _install_progress_script(self):
         try:
             from utils.mpvnet import ensure_progress_script
@@ -1261,8 +1523,10 @@ class WatchLaterWidget(QWidget):
         if not self._log_path:
             return
         try:
-            if wl.ingest_log(self._log_path) and refresh:
-                self.refresh()
+            if wl.ingest_log(self._log_path):
+                self._auto_clean()        # an episode may have just been finished
+                if refresh:
+                    self.refresh()
         except Exception:
             pass
 
@@ -1318,6 +1582,7 @@ class WatchLaterWidget(QWidget):
             row.details.connect(self.open_details)
             row.move.connect(self.on_move)
             row.remove.connect(self.on_remove)
+            row.find_skips.connect(self.on_find_skip_times)
             self.list_col.addWidget(row)
             self._rows.append(row)
         if items:
@@ -1515,11 +1780,20 @@ class WatchLaterWidget(QWidget):
         self.profile_ready.emit(name)
         return name
 
+    def _catch_up(self):
+        """Read mpv.net's progress log now, without rebuilding the list."""
+        try:
+            self._mpv_config_dir()        # sets the log path once mpv.net is found
+        except Exception:
+            pass
+        self._poll_progress(refresh=False)
+
     def open_details(self, url):
+        self._catch_up()                  # open on what was actually played
         entry = wl.find(url)
         if not entry:
             return
-        dlg = EntryDialog(entry, self.window())
+        dlg = EntryDialog(entry, self.window(), catch_up=self._catch_up)
         # Acted on once the dialog has closed, so the Downloader (or a reopened
         # dialog) never opens underneath a dialog that is still on screen.
         after = []

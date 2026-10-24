@@ -10,6 +10,51 @@ See [the release guide](docs/RELEASING.md).
 
 ## Unreleased
 
+### ⏭️ New: skip openings and endings
+- Once an anime has **three or more episodes** downloaded, the app finds each
+  episode's opening and ending by itself, from the audio: the songs repeat from
+  one episode to the next, wherever the episode puts them. It runs in the
+  background after each download (about a second per episode), works offline
+  and needs nothing extra installed.
+- In mpv.net, **"Skip opening ▸ K"** shows for 10 seconds; **K** jumps to the
+  end of the opening any time until it ends. Outside it, K does nothing.
+  Endings skip to the end of the song, so a scene after the credits still plays.
+- Video Player tab: openings and endings can each be **Off**, **Ask** (default
+  for openings) or **Skip automatically** (K within 5 seconds goes back).
+  Endings start Off.
+- Library: the **⋯** menu shows how many openings were found and can look again.
+
+### 🧹 New: free up space
+- Library → **Free up space**: delete episodes after you watch them, keeping the
+  last 1, 2, 3 or 5. Off until you choose a number. Deleted episodes go to the
+  **Recycle Bin** or are **deleted permanently**, your choice.
+- Only episodes you watched to the end in mpv.net are deleted on their own --
+  never ones ticked by hand or skipped over, never the one you're on, and always
+  at least 3 per anime. "Download missing" doesn't bring them back.
+- In an anime's details: **Keep every episode** for the shows you rewatch, and
+  **Delete watched** to clear one anime now (it asks first).
+
+### 🎬 Video Player
+- **Check for updates** for mpv.net: the button now also looks for a newer
+  mpv.net release and offers **Update** (through winget). If winget doesn't
+  have the new version yet, or mpv.net wasn't installed with it, you get a link
+  to the download page instead.
+- **Smoother playback on high-refresh screens**: every frame is now shown for
+  the same length of time (no uneven 12/13-refresh stepping on a 300 Hz
+  monitor), without inventing in-between frames. If a profile is too heavy for
+  your GPU and frames start dropping, the player switches that profile to the
+  old timing by itself (a message says so), and back for lighter profiles. F12
+  switches by hand.
+- **Better series and movie profile (F2)**: natural skin, foliage and faces
+  instead of the over-sharpened "oil painting" look, with detail at the
+  original's level and about a quarter less halo. Also lighter on the GPU.
+- **Best-quality anime profile (F1)**: Anime4K's largest models, tuned against
+  a clean release of the same episode: sharper and cleaner than before, no
+  over-sharpened outlines and no coloured fringes beside black lines. Needs a
+  high-end GPU (RTX 4090 class); on a weaker one, playback drops to the old
+  frame timing by itself. The first use takes a few seconds to prepare (up to
+  about 30 s on some systems). Two profiles now: F1 anime, F2 series and movies.
+
 ## 5.0.0 — 2026-10-12
 
 ### 📚 New: the Library tab (replaces History)

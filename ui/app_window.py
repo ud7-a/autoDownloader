@@ -944,6 +944,12 @@ class AppWindow(FluentWindow):
                 t.requestInterruption()   # cooperative: threads bail at loop boundaries
             except Exception:
                 pass
+        # Opening/ending detection: finish the episode being decoded (~1 s), no more.
+        try:
+            from utils.skip_times import stop as stop_skip_times
+            stop_skip_times(wait=1.5)
+        except Exception:
+            pass
 
         # Tear the shared search browser down OFF the UI thread. This also unblocks
         # any in-flight search/detail get() (it raises once the driver quits), so
