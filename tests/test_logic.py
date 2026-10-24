@@ -7518,6 +7518,70 @@ class SkipTimesTests(unittest.TestCase):
             self.assertIn('"aed-skip.lua"', f.read())
 
 
+class ReleaseBundleTests(unittest.TestCase):
+    """What an update ships: the release build bundles only the files the app reads
+    at run time. Whole "assets" and "tools" folders shipped the build scripts in
+    tools/ to every user, plus any stray local file."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _build_release(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "build_release_for_test", os.path.join(self.ROOT, "tools", "build_release.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _bundled(self, br):
+        """Every repo file the bundle data expands to, as repo paths."""
+        out = []
+        for src, _dest in br.BUNDLE_DATA:
+            path = os.path.join(self.ROOT, src)
+            self.assertTrue(os.path.exists(path), f"{src} is listed but missing")
+            if os.path.isdir(path):
+                for root, _dirs, files in os.walk(path):
+                    out += [os.path.relpath(os.path.join(root, f), self.ROOT).replace("\\", "/")
+                            for f in files]
+            else:
+                out.append(src)
+        return out
+
+    def test_only_runtime_files_are_bundled(self):
+        import subprocess
+        br = self._build_release()
+        adds = [br.APP_FLAGS[i + 1] for i, f in enumerate(br.APP_FLAGS) if f == "--add-data"]
+        self.assertEqual(len(br.BUNDLE_DATA), len(adds))
+        self.assertNotIn(f"assets{os.pathsep}assets", adds)
+        self.assertNotIn(f"tools{os.pathsep}tools", adds)
+        self.assertEqual("main.py", br.APP_FLAGS[-1])
+        bundled = self._bundled(br)
+        self.assertFalse([p for p in bundled if p.endswith((".py", ".pyc", ".zip", ".log"))])
+        # Every bundled file is in the repository, so a CI build ships the same.
+        tracked = set(subprocess.run(["git", "ls-files"], cwd=self.ROOT, capture_output=True,
+                                     text=True, encoding="utf-8").stdout.splitlines())
+        if tracked:
+            self.assertEqual([], [p for p in bundled if p not in tracked])
+
+    def test_every_file_the_app_opens_is_bundled(self):
+        br = self._build_release()
+        bundled = set(self._bundled(br))
+        for rel in ("assets/app_icon.ico", "assets/finishingDownloadSound.wav",
+                    "assets/more_dark.svg", "assets/more_light.svg",
+                    "assets/site_icons/witanime.site.png",
+                    "assets/mpvnet/mpv.conf", "assets/mpvnet/input.conf",
+                    "assets/mpvnet/mpvnet.conf", "assets/mpvnet/THIRD_PARTY.txt",
+                    "assets/mpvnet/scripts/aed-progress.lua", "assets/mpvnet/scripts/aed-skip.lua",
+                    "assets/mpvnet/scripts/sync-guard.lua",
+                    "assets/mpvnet/scripts/shader-toggle.lua",
+                    "tools/aria2c.exe", "tools/unrar.exe", "tools/ublock_lite.crx"):
+            self.assertIn(rel, bundled)
+        for name in os.listdir(os.path.join(self.ROOT, "assets", "mpvnet", "Shaders")):
+            self.assertIn(f"assets/mpvnet/Shaders/{name}", bundled)
+        for required in br.REQUIRED_IN_BUNDLE:
+            rel = os.path.relpath(required, "_internal").replace("\\", "/")
+            self.assertIn(rel, bundled)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

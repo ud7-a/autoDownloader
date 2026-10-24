@@ -18,7 +18,8 @@ Renaming the output here breaks in-app updates for every installed copy.
 
 exeCompile.py is intentionally untracked (maintainer-local deploy convenience), so
 the PyInstaller flags are duplicated here rather than imported -- this file is the
-one CI can actually see. Keep the two in sync when either changes.
+one CI can actually see. Keep the two in sync when either changes. The bundled
+data files are the exception: exeCompile.py takes them from data_flags() here.
 """
 
 import argparse
@@ -69,10 +70,35 @@ APP_FLAGS = [
     "--exclude-module", "IPython",
     "--exclude-module", "notebook",
     "--icon", ICON,
-    "--add-data", "assets;assets",
-    "--add-data", "tools;tools",
-    "main.py",
 ]
+
+# What the app reads at run time -- and nothing else. "assets;assets" and
+# "tools;tools" used to copy whole folders, which shipped the build and dev
+# scripts in tools/ to every user, and on a local build any stray file lying in
+# either folder (an old assets/ublock.zip, __pycache__). A new runtime file has
+# to be listed here. (source in the repo, folder inside the bundle)
+BUNDLE_DATA = [
+    ("assets/app_icon.ico", "assets"),                # window, tray and shortcut icon
+    ("assets/finishingDownloadSound.wav", "assets"),  # "downloads finished" sound
+    ("assets/more_dark.svg", "assets"),               # Profile Manager's menu button
+    ("assets/more_light.svg", "assets"),
+    ("assets/site_icons", "assets/site_icons"),       # Search's site badges
+    ("assets/mpvnet", "assets/mpvnet"),               # mpv.net config, shaders, scripts
+    ("tools/aria2c.exe", "tools"),                    # the downloader
+    ("tools/unrar.exe", "tools"),                     # RAR episodes
+    ("tools/ublock_lite.crx", "tools"),               # the browser's ad blocker
+]
+
+
+def data_flags():
+    """--add-data for BUNDLE_DATA (exeCompile.py's local build uses it too)."""
+    flags = []
+    for src, dest in BUNDLE_DATA:
+        flags += ["--add-data", f"{os.path.normpath(src)}{os.pathsep}{dest}"]
+    return flags
+
+
+APP_FLAGS = APP_FLAGS + data_flags() + ["main.py"]
 
 # Files that must survive into the bundle. A build that silently loses one of these
 # still launches, then fails at runtime on a user's machine -- so fail here instead.
@@ -143,6 +169,14 @@ def build_app():
     missing = [f for f in REQUIRED_IN_BUNDLE if not os.path.exists(os.path.join(out, f))]
     if missing:
         sys.exit("[build] bundle is missing required files:\n  " + "\n  ".join(missing))
+    # Nothing from the repo's dev side may ride along.
+    internal = os.path.join(out, "_internal")
+    extra = [os.path.relpath(os.path.join(root, f), internal)
+             for sub in ("assets", "tools")
+             for root, _dirs, files in os.walk(os.path.join(internal, sub))
+             for f in files if f.endswith((".py", ".pyc", ".zip", ".log"))]
+    if extra:
+        sys.exit("[build] bundle carries files the app doesn't use:\n  " + "\n  ".join(extra))
     log(f"app OK ({_dir_mb(out):.0f} MB)")
 
 

@@ -96,6 +96,7 @@ logs/
 crash_reports/
 
 # --- IDE & Editor Metadata ---
+.claude/
 .vscode/
 .idea/
 *.swp
