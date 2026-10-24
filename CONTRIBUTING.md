@@ -54,8 +54,27 @@ Desktop tests are split by area, so one area can run on its own, for example
 | `test_release.py` | What the build ships, the installed app's imports, release notes, the updater |
 | `test_isolation.py` | The suite never touching real data; every temp folder a test makes is removed |
 
+| `test_dev_run.py` | The sandbox below: sample data, pretend downloads, nothing reaching outside it |
+
 Each file imports the `tests` package before any app module, so the redirect
 above also applies when a single file runs.
+
+### Trying the app from source
+
+Run the app against a sandbox, never your own data:
+
+```powershell
+.\.venv\Scripts\python.exe tools/dev_run.py            # created with sample data on first run
+.\.venv\Scripts\python.exe tools/dev_run.py --fresh    # start over
+```
+
+The sandbox (`%TEMP%\AED-sandbox` by default) holds the app's data, a download
+folder with playable sample episodes, mpv.net's config as the app sees it, and the
+shortcut files. It has an anime part-way through, one on Watch later and a
+completed one. Downloads are pretended (`--real-downloads` downloads for real, into
+the sandbox). The start-up entry, the background watcher, the default-player and
+winget actions are switched off, and the sandbox runs beside the installed app
+under a `[SANDBOX]` title. See the top of `tools/dev_run.py` for the full list.
 
 ### Service changes
 

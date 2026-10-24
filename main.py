@@ -298,7 +298,10 @@ if __name__ == "__main__":
         kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
         kernel32.CreateMutexW.restype = wintypes.HANDLE
 
-        _main_app_mutex = kernel32.CreateMutexW(None, False, "Local\\AED_Main_App_Running_Mutex")
+        # One name for the lock, shared with utils/instance.py (tools/dev_run.py
+        # gives its sandbox another, so it runs beside the installed app).
+        from utils.instance import MUTEX_NAME
+        _main_app_mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
         if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
             # Another instance is already running -> bring it to front and exit
             try:
