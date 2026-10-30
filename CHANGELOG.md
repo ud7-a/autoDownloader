@@ -10,6 +10,8 @@ See [the release guide](docs/RELEASING.md).
 
 ## Unreleased
 
+## 5.1.0 — 2026-10-30
+
 ### ⏭️ New: skip openings and endings
 - Once an anime has **three or more episodes** downloaded, the app finds each
   episode's opening and ending by itself, from the audio: the songs repeat from
