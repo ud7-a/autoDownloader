@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
         worker_thread.start()
     yield
     stop_event.set()
+    store.close_pool()
 
 
 app = FastAPI(

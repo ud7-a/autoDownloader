@@ -115,19 +115,97 @@ def _ensure_schema(conn) -> None:
         _schema_ready = True
 
 
+# Connections are kept open and reused instead of opened per query. The database is
+# hosted outside Render, so every new connection was a TLS handshake plus a password
+# exchange billed as Render outbound bandwidth -- two or three per request, at a poll
+# every few seconds, used up the free 5 GB a month and got the service suspended.
+POOL_SIZE = 4                # idle connections kept; more open briefly under load
+POOL_PING_AFTER = 60         # seconds idle before a connection is checked before use
+POOL_MAX_AGE = 30 * 60       # seconds; then it is replaced, whatever the pooler allows
+
+_pool: list[tuple] = []      # (conn, key, opened_at, last_used)
+_pool_lock = threading.Lock()
+
+
+def _open_connection():
+    conn = psycopg.connect(dsn(), connect_timeout=20)
+    # Committed on its own: inside a later transaction a rollback would undo it and
+    # leave a reused connection pointing at "public".
+    conn.execute(f'SET search_path TO "{schema_name()}"')
+    conn.commit()
+    _ensure_schema(conn)
+    return conn
+
+
+def _discard(conn) -> None:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _checkout():
+    """An open connection for the current DATABASE_URL and schema, reused if possible."""
+    key = (dsn(), schema_name())
+    while True:
+        with _pool_lock:
+            if not _pool:
+                break
+            conn, conn_key, opened, used = _pool.pop()
+        now = time.monotonic()
+        if conn_key != key or conn.closed or now - opened > POOL_MAX_AGE:
+            _discard(conn)
+            continue
+        if now - used > POOL_PING_AFTER:
+            # Idle a while: the pooler may have dropped it. One tiny query is still far
+            # cheaper than a new connection.
+            try:
+                conn.execute("SELECT 1")
+                conn.commit()
+            except psycopg.Error:
+                _discard(conn)
+                continue
+        return conn, key, opened
+    return _open_connection(), key, time.monotonic()
+
+
+def _checkin(conn, key, opened) -> None:
+    if conn.closed or conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        _discard(conn)
+        return
+    with _pool_lock:
+        if len(_pool) < POOL_SIZE:
+            _pool.append((conn, key, opened, time.monotonic()))
+            return
+    _discard(conn)
+
+
+def close_pool() -> None:
+    """Close every idle connection (shutdown, and tests)."""
+    with _pool_lock:
+        idle = [entry[0] for entry in _pool]
+        _pool.clear()
+    for conn in idle:
+        _discard(conn)
+
+
 @contextmanager
 def get_db():
-    conn = psycopg.connect(dsn(), connect_timeout=20)
+    conn, key, opened = _checkout()
     try:
-        conn.execute(f'SET search_path TO "{schema_name()}"')
-        _ensure_schema(conn)
         yield conn
         conn.commit()
-    except Exception:
-        conn.rollback()
+    except Exception as e:
+        if isinstance(e, psycopg.OperationalError):
+            _discard(conn)              # the link itself failed; never hand it out again
+        else:
+            try:
+                conn.rollback()
+            except psycopg.Error:
+                _discard(conn)
         raise
     finally:
-        conn.close()
+        _checkin(conn, key, opened)
 
 
 def connect():

@@ -165,5 +165,68 @@ class SubscriberStoreTests(unittest.TestCase):
         self.assertNotIn("https://example.com/sat", due_urls_sun)
 
 
+class ConnectionReuseTests(unittest.TestCase):
+    """A new connection per query cost a TLS handshake and a password exchange each
+    time, billed as the host's outbound bandwidth; reuse must not change behaviour."""
+
+    def setUp(self):
+        store.close_pool()
+        store.reset_for_tests()
+
+    def tearDown(self):
+        store.close_pool()
+
+    def pid(self):
+        with store.get_db() as db:
+            return db.info.backend_pid
+
+    def test_consecutive_queries_share_one_connection(self):
+        first = self.pid()
+        self.assertEqual(first, self.pid())
+        sid, token = store.create_subscriber(URL)
+        self.assertTrue(store.authenticate(sid, token))
+        self.assertEqual(first, self.pid())
+
+    def test_a_failed_transaction_is_rolled_back_and_keeps_the_test_schema(self):
+        with self.assertRaises(ZeroDivisionError):
+            with store.get_db() as db:
+                db.execute("INSERT INTO anime (url, title) VALUES ('https://x/1', 'X')")
+                1 / 0
+        with store.get_db() as db:
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM anime").fetchone()[0])
+            self.assertIn("aed_test", db.execute("SHOW search_path").fetchone()[0])
+
+    def test_a_closed_connection_is_replaced(self):
+        with store.get_db() as db:
+            first = db.info.backend_pid
+        store._pool[-1][0].close()
+        self.assertNotEqual(first, self.pid())
+
+    def test_an_idle_connection_that_died_is_replaced(self):
+        from unittest import mock
+        first = self.pid()
+        conn = store._pool[-1][0]
+        with mock.patch.object(store, "POOL_PING_AFTER", -1), \
+             mock.patch.object(conn, "execute", side_effect=store.psycopg.OperationalError("gone")):
+            second = self.pid()
+        self.assertNotEqual(first, second)
+
+    def test_a_connection_for_another_schema_is_not_reused(self):
+        from unittest import mock
+        first = self.pid()
+        with mock.patch.object(store, "schema_name", return_value="aed_test_other"), \
+             mock.patch.object(store, "_ensure_schema"):
+            with store.get_db() as db:
+                self.assertNotEqual(first, db.info.backend_pid)
+        store.close_pool()
+
+    def test_the_pool_keeps_a_bounded_number_of_idle_connections(self):
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for _ in range(store.POOL_SIZE + 2):
+                stack.enter_context(store.get_db())
+        self.assertEqual(store.POOL_SIZE, len(store._pool))
+
+
 if __name__ == "__main__":
     unittest.main()
