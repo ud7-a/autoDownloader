@@ -12,7 +12,6 @@ Parsing lives here, away from Qt, so the matching rules can be unit-tested.
 """
 
 import re
-import threading
 import time
 
 DAY_ORDER = ["saturday", "sunday", "monday", "tuesday",
@@ -216,77 +215,6 @@ def fetch_schedule(driver, domain, settle=2.5):
     return items
 
 
-_cache = {"items": [], "at": 0.0}
-_cache_lock = threading.Lock()
-
-# A weekly schedule changes at most once a day, so a copy this old is still correct
-# and saves loading two pages -- which is slow enough to be felt if it happens while
-# the user is searching.
-CACHE_MAX_AGE = 12 * 3600
-
-
-def _disk_cache_path():
-    import os
-    from utils.config import APP_DIR
-    return os.path.join(APP_DIR, "schedule_cache.json")
-
-
-def cached_items(max_age=CACHE_MAX_AGE):
-    """Schedules already on hand, from memory or the last session's file. [] if stale.
-
-    Kept synchronous and cheap so callers can use it without starting a browser.
-    """
-    with _cache_lock:
-        if _cache["items"] and (time.time() - _cache["at"]) < max_age:
-            return list(_cache["items"])
-    try:
-        import json
-        with open(_disk_cache_path(), encoding="utf-8") as f:
-            blob = json.load(f)
-        if time.time() - float(blob.get("at", 0)) < max_age and blob.get("items"):
-            with _cache_lock:
-                _cache["items"] = list(blob["items"])
-                _cache["at"] = float(blob["at"])
-            return list(blob["items"])
-    except Exception:
-        pass
-    return []
-
-
-def _store(items):
-    now = time.time()
-    with _cache_lock:
-        _cache["items"] = list(items)
-        _cache["at"] = now
-    try:
-        import json
-        with open(_disk_cache_path(), "w", encoding="utf-8") as f:
-            json.dump({"at": now, "items": items}, f, ensure_ascii=False)
-    except Exception:
-        pass          # an unwritable cache just means we fetch again next time
-
-
-def load_all(driver, max_age=CACHE_MAX_AGE):
-    """Both sites' schedules, reusing a cached copy when one is recent enough."""
-    ready = cached_items(max_age)
-    if ready:
-        return ready
-    items = []
-    for domain in SCHEDULE_URLS:
-        try:
-            items += fetch_schedule(driver, domain)
-        except Exception:
-            continue          # one site being unreachable shouldn't lose the other
-    if items:
-        _store(items)
-    return items
-
-
-def is_scheduled(entry, items):
-    """True if this title appears in either site's weekly schedule (i.e. it is airing)."""
-    return find_day(entry, items) is not None
-
-
 def find_day(entry, items, season=None):
     """Which day this entry airs on, or None.
 
@@ -366,9 +294,3 @@ def _cross_site_day(entry, items):
                 and season_number(item.get("title")) == season):
             return item["day"]
     return None
-
-
-def is_season_scheduled(anime_title, season_label, items):
-    """True if this particular season of the anime is the one currently airing."""
-    return find_day({"title": anime_title, "url": ""}, items,
-                    season=season_number(season_label)) is not None

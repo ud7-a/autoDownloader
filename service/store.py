@@ -272,21 +272,6 @@ def authenticate(subscriber_id: str, token: str) -> bool:
     return hmac.compare_digest(row[0], crypto.hash_token(token))
 
 
-def get_webhook(subscriber_id: str) -> str | None:
-    with get_db() as db:
-        row = db.execute("SELECT webhook_enc FROM subscribers WHERE id=%s",
-                         (subscriber_id,)).fetchone()
-    if not row or not row[0]:
-        return None
-    return crypto.decrypt_webhook(bytes(row[0]))
-
-
-def set_webhook(subscriber_id: str, webhook_url: str) -> None:
-    with get_db() as db:
-        db.execute("UPDATE subscribers SET webhook_enc=%s WHERE id=%s",
-                   (crypto.encrypt_webhook(webhook_url), subscriber_id))
-
-
 def delete_subscriber(subscriber_id: str) -> None:
     """Remove the subscriber and everything belonging to them."""
     with get_db() as db:
@@ -343,12 +328,6 @@ def replace_follows(subscriber_id: str, items: list[dict]) -> int:
         count = db.execute("SELECT COUNT(*) FROM follows WHERE subscriber_id=%s",
                            (subscriber_id,)).fetchone()[0]
     return count
-
-
-def followers_of(anime_url: str) -> list[str]:
-    with get_db() as db:
-        return [r[0] for r in db.execute(
-            "SELECT subscriber_id FROM follows WHERE anime_url=%s", (anime_url,)).fetchall()]
 
 
 def due_anime(today_days: list[str] | str | None = None, limit: int = 200,
@@ -498,13 +477,3 @@ def ack_command(subscriber_id: str, command_id: int) -> bool:
             (command_id, subscriber_id)
         )
         return cur.rowcount > 0
-
-
-def get_subscriber_by_token(token: str) -> str | None:
-    th = crypto.hash_token(token)
-    with get_db() as db:
-        rows = db.execute("SELECT id, token_hash FROM subscribers").fetchall()
-    for sid, stored_hash in rows:
-        if stored_hash and hmac.compare_digest(th, stored_hash):
-            return sid
-    return None

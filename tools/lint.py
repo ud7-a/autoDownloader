@@ -27,11 +27,6 @@ IGNORE_PATTERNS = (
     r"redefinition of unused",
     r"f-string is missing placeholders",
     r"`global .*` is unused: name is never assigned in scope",
-    r"'ctypes' imported but unused",
-    r"'subprocess' imported but unused",
-    r"'urllib\.request' imported but unused",
-    r"'PyQt6\.QtCore\.Qt' imported but unused",
-    r"unable to detect undefined names",
 )
 
 

@@ -36,10 +36,6 @@ _native = None                  # kept open: faulthandler writes to it on a hard
 _lock = threading.Lock()
 
 
-def report_path():
-    return _path
-
-
 def _version():
     try:
         from utils.config import APP_VERSION

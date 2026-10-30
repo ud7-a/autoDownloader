@@ -19,6 +19,14 @@ __import__("tests")
 from utils.config import sites_data, config_lock  # noqa: E402
 
 
+def set_watched(wl, url, part_index, episodes):
+    """Make `episodes` a part's whole watched set, through change_watched as the
+    episode grid does."""
+    part = next(e for e in wl.entries() if e["url"] == url)["parts"][part_index]
+    before, after = set(part.get("watched", [])), {int(x) for x in episodes}
+    return wl.change_watched(url, part_index, after - before, before - after)
+
+
 class WatchLaterTests(unittest.TestCase):
     """Watch later's store (utils/watch_later.py): statuses, per-anime history,
     watched tracking from mpv.net's progress log, and what Continue plays."""
@@ -72,7 +80,7 @@ class WatchLaterTests(unittest.TestCase):
     def test_refreshing_seasons_keeps_profile_and_watched(self):
         wl = self.wl
         self._linked()
-        wl.set_watched(self.URL, 0, [1, 2])
+        set_watched(wl, self.URL, 0, [1, 2])
         wl.set_parts(self.URL, [{"template": self.TEMPLATE, "max_ep": 5}])
         part = wl.find(self.URL)["parts"][0]
         self.assertEqual("Test Anime", part["profile"])
@@ -116,7 +124,7 @@ class WatchLaterTests(unittest.TestCase):
         self.assertEqual(list(range(1, 10)), part["watched"])
         self.assertEqual({"10": 20.0}, part["progress"])
         # Manual ticks are left exactly as set.
-        wl.set_watched(self.URL, 0, [3])
+        set_watched(wl, self.URL, 0, [3])
         self.assertEqual([3], wl.find(self.URL)["parts"][0]["watched"])
 
     def test_season_starting_past_one_fills_from_its_first_episode(self):
@@ -135,7 +143,7 @@ class WatchLaterTests(unittest.TestCase):
         wl._save(data)
         self.assertTrue(wl.fill_earlier_watched())
         self.assertEqual(list(range(1, 8)), wl.find(self.URL)["parts"][0]["watched"])
-        wl.set_watched(self.URL, 0, [7])                         # user unticks 1-6
+        set_watched(wl, self.URL, 0, [7])                         # user unticks 1-6
         self.assertFalse(wl.fill_earlier_watched())              # never again
         self.assertEqual([7], wl.find(self.URL)["parts"][0]["watched"])
 
@@ -166,12 +174,12 @@ class WatchLaterTests(unittest.TestCase):
         wl = self.wl
         profile = self._linked(max_ep=4)
         self._files(profile, [1, 2, 3])
-        wl.set_watched(self.URL, 0, [1])
+        set_watched(wl, self.URL, 0, [1])
         wl.apply_progress([self._log(profile, 3, 30.0)])
         part, ep, file, percent = wl.next_episode(wl.find(self.URL), self.downloads)
         self.assertEqual((0, 3, 30.0), (part, ep, percent))
         self.assertTrue(file.endswith("Ep3.mp4"))
-        wl.set_watched(self.URL, 0, [1, 2, 3])
+        set_watched(wl, self.URL, 0, [1, 2, 3])
         part, ep, file, _ = wl.next_episode(wl.find(self.URL), self.downloads)
         self.assertEqual(4, ep)
         self.assertIsNone(file)                          # not downloaded yet
@@ -206,7 +214,7 @@ class WatchLaterTests(unittest.TestCase):
         wl.apply_progress([self._log(profile, 1, 100.0)])
         self.assertEqual(wl.COMPLETED, wl.find(self.URL)["status"])
         wl.set_status(self.URL, wl.WATCHING)             # rewatching
-        wl.set_watched(self.URL, 0, [1])                 # same ticks, nothing new
+        set_watched(wl, self.URL, 0, [1])                 # same ticks, nothing new
         self.assertEqual(wl.WATCHING, wl.find(self.URL)["status"])
 
     def test_a_deleted_profile_keeps_its_folder_link_until_replaced(self):
@@ -243,7 +251,6 @@ class WatchLaterTests(unittest.TestCase):
         with mock.patch.object(mpvnet, "find_mpvnet", return_value=(r"C:\x\mpvnet.exe", None)), \
                 mock.patch.object(mpvnet, "config_dir", return_value=cfg):
             self.assertTrue(mpvnet.ensure_progress_script())
-            self.assertEqual(os.path.join(cfg, mpvnet.PROGRESS_LOG), mpvnet.progress_log_path())
         self.assertEqual(["aed-progress.lua", "aed-skip.lua", "key-layouts.lua"],
                          sorted(os.listdir(os.path.join(cfg, "scripts"))))
         self.assertFalse(os.path.exists(os.path.join(cfg, "mpv.conf")))
@@ -434,7 +441,7 @@ class LibraryImportTests(unittest.TestCase):
         self._folder("Show A", [1, 2])
         import_library(self.downloads, {}, [], {}, duration=lambda _p: None)
         local = wl.entries()[0]["url"]
-        wl.set_watched(local, 0, [1])
+        set_watched(wl, local, 0, [1])
         page = "https://witanime.site/anime/show-a/"
         wl.add("Show A", page, "witanime.site")
         wl.set_parts(page, [{"template": self.TEMPLATE, "max_ep": 12}])
@@ -801,7 +808,7 @@ class LibraryEdgeCaseTests(unittest.TestCase):
         from ui.watch_later_tab import EntryDialog
         wl.add("Show X", self.PAGE, "witanime.site")
         wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 12}])
-        wl.set_watched(self.PAGE, 0, list(range(1, 14)))          # ep 13 played, file gone
+        set_watched(wl, self.PAGE, 0, list(range(1, 14)))          # ep 13 played, file gone
         dlg = EntryDialog(wl.find(self.PAGE), self.host)
         dlg.combo_status.setCurrentIndex(list(wl.STATUSES).index(wl.WATCHING))   # rewatching
         dlg.yesButton.click()
@@ -1047,7 +1054,7 @@ class LibraryEdgeCaseTests(unittest.TestCase):
         wl.set_parts(self.PAGE, [{"template": self.T1, "max_ep": 6, "label": "Season 1"},
                                  {"template": self.T2, "max_ep": 4, "label": "Season 2"}])
         wl.link_profile(self.PAGE, 0, "Show X")
-        wl.set_watched(self.PAGE, 0, range(1, 7))                 # S1 done, files deleted
+        set_watched(wl, self.PAGE, 0, range(1, 7))                 # S1 done, files deleted
         e = wl.find(self.PAGE)
         with mock.patch.object(tab, "_download_dir", return_value=self.downloads):
             nxt = wl.next_episode(e, self.downloads)
@@ -1307,29 +1314,31 @@ class LibraryShortcutTests(unittest.TestCase):
         program, args, cwd, _icon = shortcut.launch_target()
         self.assertTrue(args.endswith("--library"))
         self.assertTrue(os.path.isdir(cwd))
-        self.assertEqual(shortcut.SHORTCUT_NAME, os.path.basename(shortcut.shortcut_path()))
+        name = shortcut.ACTIONS["library"]["file"]
+        self.assertEqual(name, os.path.basename(shortcut.shortcut_path()))
         self.assertEqual(f"{program}|{args}", shortcut.target_signature())
         from unittest import mock
         # Outside the tests (patch.dict puts the variable back afterwards):
         with mock.patch.dict(os.environ, {"APPDATA": r"C:\Users\x\AppData\Roaming"}):
             os.environ.pop("AED_SHORTCUT_DIR")
             self.assertEqual(os.path.join(r"C:\Users\x\AppData\Roaming", "Microsoft", "Windows",
-                                          "Start Menu", "Programs", shortcut.SHORTCUT_NAME),
+                                          "Start Menu", "Programs", name),
                              shortcut.shortcut_path())
 
     def test_refresh_rewrites_only_a_stale_shortcut(self):
         from unittest import mock
         from utils import shortcut
+        target = shortcut.ACTIONS["library"]["target_setting"]
         self.assertFalse(shortcut.refresh({}))                       # no hotkey set
         with mock.patch.object(shortcut, "install", return_value=(True, "")) as install, \
                 mock.patch("os.path.exists", return_value=True):
             fresh = {shortcut.SETTING: "Ctrl+Alt+L",
-                     shortcut.TARGET_SETTING: shortcut.target_signature()}
+                     target: shortcut.target_signature()}
             self.assertFalse(shortcut.refresh(fresh))
             install.assert_not_called()
-            moved = {shortcut.SETTING: "Ctrl+Alt+L", shortcut.TARGET_SETTING: "C:\\old.exe|--library"}
+            moved = {shortcut.SETTING: "Ctrl+Alt+L", target: "C:\\old.exe|--library"}
             self.assertTrue(shortcut.refresh(moved))
-            self.assertEqual(shortcut.target_signature(), moved[shortcut.TARGET_SETTING])
+            self.assertEqual(shortcut.target_signature(), moved[target])
 
     def test_play_next_shortcut_launches_with_its_own_argument(self):
         from utils import shortcut
@@ -1784,7 +1793,7 @@ class QuickPlayTests(unittest.TestCase):
         wl.add(title, url, "witanime.site")
         wl.set_parts(url, [{"template": self.T.format(slug=title.lower()), "max_ep": max_ep}])
         wl.link_profile(url, 0, title)
-        wl.set_watched(url, 0, watched)
+        set_watched(wl, url, 0, watched)
         wl.update(url, status=status,
                   last_played={"profile": title, "ep": 1, "ts": played_ts} if played_ts else None)
         folder = os.path.join(self.downloads, title)
@@ -1794,30 +1803,29 @@ class QuickPlayTests(unittest.TestCase):
         return url
 
     def test_picks_the_most_recently_played_with_its_next_episode_on_disk(self):
-        from utils.quick_play import pick_next, decide
+        from utils.quick_play import decide
         wl = self.wl
         self._anime("Old Show", [3, 4], [1, 2], wl.WATCHING, played_ts=100)
         self._anime("Recent Show", [5, 6, 7], [1, 2, 3, 4], wl.WATCHING, played_ts=200)
         self._anime("All Watched", [1, 2], [1, 2], wl.WATCHING, played_ts=300, max_ep=2)
         self._anime("Saved For Later", [1], [], wl.LATER, played_ts=400)    # not being watched
-        entry, part, ep, files = pick_next(wl.entries(), self.downloads)
+        kind, entry, part, ep, files = decide(wl.entries(), self.downloads)
+        self.assertEqual("play", kind)
         # Nothing left of "All Watched": the next most recent one plays.
         self.assertEqual(("Recent Show", 0, 5), (entry["title"], part, ep))
         self.assertEqual(["Recent Show Ep5.mp4", "Recent Show Ep6.mp4", "Recent Show Ep7.mp4"],
                          [os.path.basename(f) for f in files])               # the rest queued
-        self.assertIsNone(pick_next([], self.downloads))
         self.assertIsNone(decide([], self.downloads))
 
     def test_a_missing_next_episode_is_downloaded_not_swapped_for_another_anime(self):
         """You watched A Ep3, then B Ep5. B Ep6 isn't on disk: Play next doesn't
         quietly play A Ep4 -- B's episodes from 6 are to be downloaded."""
-        from utils.quick_play import decide, pick_next
+        from utils.quick_play import decide
         wl = self.wl
         self._anime("Show A", [4, 5], [1, 2, 3], wl.WATCHING, played_ts=100)
         self._anime("Show B", [5, 9], [1, 2, 3, 4, 5], wl.WATCHING, played_ts=200)
         kind, entry, part, ep = decide(wl.entries(), self.downloads)
         self.assertEqual(("download", "Show B", 0, 6), (kind, entry["title"], part, ep))
-        self.assertIsNone(pick_next(wl.entries(), self.downloads))
         # The Downloader's range: from the missing one to the last, skipping
         # what's already on disk.
         self.assertEqual([6, 7, 8, 10, 11, 12],
@@ -1857,7 +1865,7 @@ class QuickPlayTests(unittest.TestCase):
             self.assertIn("episode 5", message)
 
             popen.reset_mock()
-            wl.set_watched(url, 0, [1, 2, 3, 4, 5, 6])
+            set_watched(wl, url, 0, [1, 2, 3, 4, 5, 6])
             status, message, request = quick_play.play_next()
             self.assertEqual("download", status)
             popen.assert_not_called()
@@ -1981,7 +1989,7 @@ class FreeUpSpaceTests(unittest.TestCase):
 
     def test_hand_ticked_episodes_go_only_when_asked(self):
         self.files(range(1, 25))
-        self.wl.set_watched(self.URL, 0, range(1, 11))
+        set_watched(self.wl, self.URL, 0, range(1, 11))
         self.assertEqual([], self.auto(keep=2))
         self.storage.clean(self.downloads, 2, url=self.URL, finished_only=False,
                            recycle=self.recycle)

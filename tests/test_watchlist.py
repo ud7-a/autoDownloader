@@ -171,9 +171,12 @@ class ScheduleMatchingTests(unittest.TestCase):
     def test_only_the_airing_season_of_an_animerco_show(self):
         items = [{"day": "sunday", "title": "Hell Mode Season 2",
                   "url": "https://eta.animerco.org/seasons/hell-mode-season-2/"}]
-        self.assertTrue(self.s.is_season_scheduled("Hell Mode", "Season 2", items))
+        def airing(label):
+            return self.s.find_day({"title": "Hell Mode", "url": ""}, items,
+                                   season=self.s.season_number(label)) is not None
+        self.assertTrue(airing("Season 2"))
         for label in ("Season 1", "Season 3"):
-            self.assertFalse(self.s.is_season_scheduled("Hell Mode", label, items), label)
+            self.assertFalse(airing(label), label)
 
     def test_animerco_anime_level_still_matches_by_title(self):
         """Its schedule never links the /animes/ page, so titles are all there is."""
@@ -330,7 +333,7 @@ class WatchlistPolishTests(unittest.TestCase):
         self.assertEqual([w["title"] for w in cfg.get_watchlist()], ["a", "c"])
         self.assertTrue(cfg.restore_watch(b, 1))
         self.assertEqual([w["title"] for w in cfg.get_watchlist()], ["a", "b", "c"])
-        self.assertEqual(cfg.find_watch("https://x/b")["seen_max"], 7)   # state kept
+        self.assertEqual(cfg.get_watchlist()[1]["seen_max"], 7)          # state kept
         self.assertFalse(cfg.restore_watch(b, 1))                         # no duplicate
 
 

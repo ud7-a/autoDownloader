@@ -71,8 +71,11 @@ class SubscriberStoreTests(unittest.TestCase):
         self.assertFalse(store.authenticate("nobody", "anything"))
 
     def test_webhook_round_trips(self):
+        from service import crypto
         sid, _ = store.create_subscriber(URL)
-        self.assertEqual(store.get_webhook(sid), URL)
+        with store.get_db() as db:
+            raw = db.execute("SELECT webhook_enc FROM subscribers WHERE id=%s", (sid,)).fetchone()[0]
+        self.assertEqual(crypto.decrypt_webhook(bytes(raw)), URL)
 
     def test_webhook_is_not_stored_in_the_clear(self):
         """The strongest guarantee this layer offers: a stolen database file does not
@@ -87,12 +90,6 @@ class SubscriberStoreTests(unittest.TestCase):
         with store.get_db() as db:
             stored = db.execute("SELECT token_hash FROM subscribers WHERE id=%s", (sid,)).fetchone()[0]
         self.assertNotIn(token, stored)
-
-    def test_set_webhook_replaces_it(self):
-        other = "https://discord.com/api/webhooks/999/zzzzzzzzzzzzzzzz9999"
-        sid, _ = store.create_subscriber(URL)
-        store.set_webhook(sid, other)
-        self.assertEqual(store.get_webhook(sid), other)
 
     def test_delete_subscriber_removes_follows_and_subscriber(self):
         sid, _ = store.create_subscriber(URL)
@@ -119,7 +116,6 @@ class SubscriberStoreTests(unittest.TestCase):
         with store.get_db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM anime").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM follows").fetchone()[0], 2)
-        self.assertEqual(len(store.followers_of("https://witanime.life/anime/bleach/")), 2)
 
     def test_notification_query_and_advancement(self):
         sid, _ = store.create_subscriber(URL)

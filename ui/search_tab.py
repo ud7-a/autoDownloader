@@ -620,18 +620,6 @@ try {
 }
 """
 
-_FETCH_IMG_JS = r"""
-var src = arguments[0];
-var callback = arguments[1];
-fetch(src)
-    .then(response => response.blob())
-    .then(blob => {
-        var reader = new FileReader();
-        reader.onloadend = function() { callback(reader.result); };
-        reader.readAsDataURL(blob);
-    })
-    .catch(err => callback("Error: " + err));
-"""
 
 # Fetch many cover images at once, in parallel inside the browser. Returns an
 # array of data: URLs (empty string for any that failed). One round-trip instead
@@ -1682,11 +1670,6 @@ class AnimeResultCard(SimpleCardWidget):
     def cover(self):
         """The cover as the card holds it: a QImage if it has one, else the path."""
         return self.cover_image if self.cover_image is not None else self.cover_path
-
-    def set_followable(self, followable):
-        if self.btn_follow is not None:
-            self.btn_follow.setVisible(bool(followable))
-            self.btn_watch_later.setVisible(bool(followable))
 
     def _trigger(self):
         if self._on_load is not None:

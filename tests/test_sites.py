@@ -551,32 +551,6 @@ class WitAnimeBrowserModeTests(unittest.TestCase):
         from PyQt6.QtWidgets import QApplication
         cls._app = QApplication.instance() or QApplication([])
 
-    def test_is_witanime_url_detection(self):
-        from utils.config import is_witanime_url
-        self.assertTrue(is_witanime_url("https://witanime.site/watch/slug/1"))
-        self.assertTrue(is_witanime_url("https://witanime.life/episode/slug-الحلقة-1/"))
-        self.assertTrue(is_witanime_url("https://www.witanime.site/watch/slug/{x}"))
-        self.assertTrue(is_witanime_url("witanime.site"))
-        self.assertFalse(is_witanime_url("https://eta.animerco.org/episode/show-1"))
-        self.assertFalse(is_witanime_url(""))
-        self.assertFalse(is_witanime_url(None))
-
-    def test_is_witanime_profile_detection(self):
-        from utils.config import is_witanime_profile, sites_data, config_lock
-        self.assertTrue(is_witanime_profile({"url": "https://witanime.site/watch/slug/1"}))
-        self.assertFalse(is_witanime_profile({"url": "https://eta.animerco.org/episode/show-1"}))
-        with config_lock:
-            sites_data["_test_wit_prof"] = {"url": "https://witanime.site/watch/slug/{x}"}
-            sites_data["_test_ani_prof"] = {"url": "https://eta.animerco.org/episode/slug-{x}"}
-        try:
-            self.assertTrue(is_witanime_profile("_test_wit_prof"))
-            self.assertFalse(is_witanime_profile("_test_ani_prof"))
-            self.assertFalse(is_witanime_profile("non_existent_profile"))
-        finally:
-            with config_lock:
-                sites_data.pop("_test_wit_prof", None)
-                sites_data.pop("_test_ani_prof", None)
-
     def test_create_browser_headless_options(self):
         from unittest import mock
         import core.selenium_engine as eng

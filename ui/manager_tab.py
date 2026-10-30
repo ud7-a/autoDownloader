@@ -6,7 +6,7 @@ from urllib.parse import unquote
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QDoubleValidator, QCursor, QIcon
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QFrame, QTabWidget, QFileDialog, QTabBar, QApplication)
+                             QFrame, QTabWidget, QFileDialog, QTabBar)
 
 # THE UPGRADE: We removed FluentIcon and will use standard Emojis for the menu!
 from qfluentwidgets import (PushButton, PrimaryPushButton, LineEdit, ComboBox,
@@ -411,9 +411,6 @@ class SiteManagerWidget(QWidget):
         finally:
             self._url_busy = False
 
-    def copy_x(self):
-        QApplication.clipboard().setText("{x}")
-        
     def format_url(self):
         current = self.url_entry.text().strip()
         if current.endswith('/'): current = current[:-1]

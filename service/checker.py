@@ -542,14 +542,6 @@ def process_anime(anime: dict, client: httpx.Client | None = None) -> int:
     return notifications_sent
 
 
-def today_key() -> str:
-    """Current day of week in canonical format: saturday, sunday, monday, etc."""
-    days = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"]
-    # Python tm_wday: Monday=0, Tuesday=1, ... Saturday=5, Sunday=6
-    # (tm_wday + 2) % 7 -> Monday is index 2, Saturday is index 0.
-    return days[(time.gmtime().tm_wday + 2) % 7]
-
-
 def active_day_keys() -> list[str]:
     """Returns [today, yesterday, tomorrow] in canonical format to account for timezone offsets across the globe."""
     days = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"]

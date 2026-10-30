@@ -104,21 +104,6 @@ def migrate_witanime_url(url):
                   url, flags=re.I)
 
 
-def is_witanime_url(url):
-    """Return True if the URL belongs to witanime."""
-    return bool(url and "witanime" in str(url).lower())
-
-
-def is_witanime_profile(profile_data_or_name):
-    """Return True if the profile uses a witanime URL."""
-    if isinstance(profile_data_or_name, dict):
-        return is_witanime_url(profile_data_or_name.get("url", ""))
-    with config_lock:
-        prof = sites_data.get(str(profile_data_or_name), {})
-        return is_witanime_url(prof.get("url", ""))
-
-
-
 def _add_witanime_mp4upload():
     """Give existing witanime profiles the built-in "FHD - mp4upload" path."""
     import copy
@@ -265,13 +250,6 @@ def load_config():
 def get_watchlist():
     with config_lock:
         return list(app_settings.get("watchlist", []))
-
-def find_watch(url):
-    with config_lock:
-        for w in app_settings.get("watchlist", []):
-            if w.get("url") == url:
-                return w
-    return None
 
 def add_watch(entry):
     """Add a followed anime (keyed by url). Returns False if already followed."""
@@ -538,21 +516,6 @@ def cloud_unsubscribe() -> tuple[bool, str]:
         app_settings["cloud_token"] = ""
     save_config()
     return True, "Cloud notifications disabled and removed from server"
-
-
-def is_windows_autostart_enabled() -> bool:
-    """Checks if the app is registered in Windows HKCU Run key."""
-    if sys.platform != "win32":
-        return False
-    import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as key:
-            winreg.QueryValueEx(key, "AutoEpisodesDownloader")
-            return True
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
 
 
 def set_windows_autostart(enabled: bool) -> bool:

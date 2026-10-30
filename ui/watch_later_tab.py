@@ -1416,9 +1416,6 @@ class WatchLaterWidget(QWidget):
             save_config()
         return out
 
-    def _current_shortcut(self):
-        return self._current_shortcuts().get("library", "")
-
     def _update_shortcut_button(self):
         from utils.shortcut import ACTIONS
         current = {a: k for a, k in self._current_shortcuts().items() if k}

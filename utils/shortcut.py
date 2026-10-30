@@ -49,11 +49,8 @@ ACTIONS = {
     },
 }
 
-# The Library shortcut's names, kept for the code that came first.
-SHORTCUT_NAME = ACTIONS["library"]["file"]
-LIBRARY_ARG = ACTIONS["library"]["arg"]
-SETTING = ACTIONS["library"]["setting"]
-TARGET_SETTING = ACTIONS["library"]["target_setting"]
+# The Library shortcut's setting name, kept for the code that came first.
+SETTING =ACTIONS["library"]["setting"]
 
 _MODS = ("Ctrl", "Alt", "Shift")
 _MOD_FLAGS = {"Alt": 0x1, "Ctrl": 0x2, "Shift": 0x4}      # RegisterHotKey's MOD_*

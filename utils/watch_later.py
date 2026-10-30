@@ -678,21 +678,6 @@ def clear_history(url):
     return update(url, history=[])
 
 
-def set_watched(url, part_index, episodes):
-    """Manual ticks from the episode grid: `episodes` is the full watched set."""
-    with _lock:
-        data = _load()
-        e = _find(data, url)
-        if e is None or not (0 <= part_index < len(e.get("parts", []))):
-            return False
-        part = e["parts"][part_index]
-        before, after = set(part.get("watched", [])), {int(x) for x in episodes}
-        if edit_watched(part, after - before, before - after):
-            _on_watched(e)
-        _save(data)
-        return True
-
-
 def part_ident(part):
     """What identifies a season across reloads: its episode link, or -- found
     only as a folder -- its folder."""

@@ -79,12 +79,6 @@ def decide(entries, download_dir):
     return None
 
 
-def pick_next(entries, download_dir):
-    """(entry, part index, episode, files) when the next episode can play now."""
-    found = decide(entries, download_dir)
-    return found[1:] if found and found[0] == "play" else None
-
-
 def play_next():
     """Do what the shortcut does. Returns (status, message, request):
 

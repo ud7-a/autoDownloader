@@ -379,12 +379,6 @@ LAYOUT_SCRIPT = "key-layouts.lua"
 APP_SCRIPTS = (PROGRESS_SCRIPT, SKIP_SCRIPT, LAYOUT_SCRIPT)
 
 
-def progress_log_path():
-    """Where mpv.net writes the progress log, or "" when mpv.net isn't installed."""
-    exe = find_mpvnet()[0]
-    return os.path.join(config_dir(exe), PROGRESS_LOG) if exe else ""
-
-
 def ensure_progress_script():
     """Install (or refresh) only the app's own scripts (APP_SCRIPTS: progress
     tracking, skip openings) in mpv.net's scripts folder.
