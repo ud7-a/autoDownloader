@@ -5,8 +5,8 @@ CPU usage: 0.0%.
 
 Functions:
 - Runs silently in the background (zero window / console).
-- Sends heartbeat to Cloud Notification Service every 15s so your PC is marked ONLINE 🟢 24/7.
-- Checks every 5s for pending remote download commands triggered from Discord.
+- Checks every 30s for pending remote download commands triggered from Discord; the
+  service counts each check as a heartbeat, so your PC shows as ONLINE 🟢.
 - When a command arrives, automatically launches the main AED app window to download it!
 - If the main AED app is already open, steps aside and lets the main app handle it.
 """
@@ -112,25 +112,6 @@ def load_cloud_credentials() -> tuple[str, str, str, bool]:
         return "", "", "", False
 
 
-def send_heartbeat(s_url: str, sub_id: str, token: str) -> bool:
-    endpoint = f"{s_url}/v1/subscribers/{sub_id}/heartbeat"
-    req = urllib.request.Request(
-        endpoint,
-        data=b"{}",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "AED-BackgroundWatcher/4.4.0"
-        }
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception as e:
-        log(f"Heartbeat failed: {e}")
-        return False
-
-
 def fetch_commands(s_url: str, sub_id: str, token: str) -> list[dict]:
     endpoint = f"{s_url}/v1/subscribers/{sub_id}/commands"
     req = urllib.request.Request(
@@ -168,12 +149,13 @@ def launch_main_app():
     log("Main app subprocess spawned!")
 
 
-# How quickly a click on Discord's download button reaches this PC while the app is
-# closed. Commands are checked every POLL_SECONDS; the heartbeat that keeps the PC
-# "online" only needs sending every HEARTBEAT_EVERY polls (15 s), well inside the
-# service's 180 s window -- so the faster reaction adds one light GET, not two.
-POLL_SECONDS = 5
-HEARTBEAT_EVERY = 3
+# How often the cloud service is asked for commands, here and in the main app
+# (ui/app_window.py uses this value too). The service records each request as a
+# heartbeat, so there is no separate heartbeat call, and 30 s keeps the PC well inside
+# its 180 s "online" window. It was 5 s plus a heartbeat every 15 s: about 23,000
+# requests a day per PC, which used up the service host's free monthly bandwidth.
+# A click on Discord's download button now takes up to 30 s to reach this PC.
+POLL_SECONDS = 30
 
 
 def run_watcher(single_pass: bool = False):
@@ -211,16 +193,13 @@ def run_watcher(single_pass: bool = False):
             if paused_for_gui:
                 log("Main app closed -> resuming heartbeats and command polling.")
                 paused_for_gui = False
-                loop_count = 0          # heartbeat straight away after taking over
+                loop_count = 0
 
-            # Send heartbeat so PC is ONLINE 🟢
-            if loop_count % HEARTBEAT_EVERY == 0 and send_heartbeat(s_url, sub_id, token):
-                if loop_count % (HEARTBEAT_EVERY * 12) == 0:
-                    log(f"Heartbeat sent successfully (Loop #{loop_count}). PC is ONLINE 🟢")
-            loop_count += 1
-
-            # Check for remote download commands
+            # Check for remote download commands (this also keeps the PC ONLINE 🟢)
             commands = fetch_commands(s_url, sub_id, token)
+            if loop_count % 120 == 0:   # about once an hour
+                log(f"Polling the cloud service (loop #{loop_count}).")
+            loop_count += 1
             if commands:
                 log(f"Received {len(commands)} remote download command(s)! Triggering UI...")
                 launch_main_app()

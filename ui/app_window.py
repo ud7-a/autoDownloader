@@ -249,12 +249,12 @@ class AppWindow(FluentWindow):
         if app_settings.get("cloud_notify_enabled"):
             from utils.config import _trigger_bg_cloud_sync
             QTimer.singleShot(2000, _trigger_bg_cloud_sync)
-            # Commands every 5 s, so a click on Discord's download button starts the
-            # download within seconds; the heartbeat rides along every third poll.
-            self._cloud_poll_count = 0
+            # Commands every 30 s, the same as the background watcher (see
+            # core/watcher.py for why). Each poll also counts as the heartbeat.
+            from core.watcher import POLL_SECONDS
             self._cloud_poll_timer = QTimer(self)
             self._cloud_poll_timer.timeout.connect(self._poll_cloud_commands)
-            self._cloud_poll_timer.start(5 * 1000)
+            self._cloud_poll_timer.start(POLL_SECONDS * 1000)
             # The first poll right after the window is up (in the background):
             # main.py no longer fetches commands before showing it.
             QTimer.singleShot(0, self._poll_cloud_commands)
@@ -291,21 +291,18 @@ class AppWindow(FluentWindow):
                 pass
 
     def _poll_cloud_commands(self):
-        """Background poller that sends heartbeat and checks for incoming remote download commands."""
+        """Background poller for remote download commands; the service also takes each
+        poll as this PC's heartbeat."""
         import threading
-        # One poll at a time: a slow or cold-starting service must not let 5 s ticks
-        # pile up threads behind it.
+        # One poll at a time: a slow or cold-starting service must not let ticks pile
+        # up threads behind it.
         if getattr(self, "_cloud_poll_busy", False):
             return
         self._cloud_poll_busy = True
-        beat = self._cloud_poll_count % 3 == 0          # every 15 s at a 5 s tick
-        self._cloud_poll_count += 1
 
         def _bg():
             try:
-                from utils.config import cloud_send_heartbeat, cloud_fetch_commands
-                if beat:
-                    cloud_send_heartbeat()
+                from utils.config import cloud_fetch_commands
                 cmds = cloud_fetch_commands()
                 if cmds:
                     signals.remote_commands_received.emit(cmds)

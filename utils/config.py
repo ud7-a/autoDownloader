@@ -632,33 +632,6 @@ def start_background_watcher() -> bool:
         return False
 
 
-def cloud_send_heartbeat() -> bool:
-    """Sends a lightweight online heartbeat to the cloud backend."""
-    import urllib.request
-    with config_lock:
-        s_url = (app_settings.get("cloud_service_url") or "").rstrip("/")
-    if not s_url:
-        return False
-
-    def _send(sub_id, token):
-        if not (sub_id and token):
-            raise RuntimeError("not registered with the cloud service")
-        req = urllib.request.Request(
-            f"{s_url}/v1/subscribers/{sub_id}/heartbeat",
-            data=b"{}",
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=5):
-            return True
-
-    try:
-        return cloud_request_with_recovery(_send)
-    except Exception as e:
-        _cloud_log(f"heartbeat failed: {type(e).__name__}: {e}")
-        return False
-
-
 def cloud_fetch_commands() -> list[dict]:
     """Fetches any pending remote download commands from the cloud queue."""
     import urllib.request

@@ -145,10 +145,60 @@ class WatcherDetectionTests(unittest.TestCase):
         self.assertFalse(self.run_with(procs, w.is_main_app_running))
         self.assertFalse(self.run_with(procs, w.is_other_watcher_running))
 
-    def test_polls_fast_but_heartbeats_inside_the_online_window(self):
+
+class CloudPollingTests(unittest.TestCase):
+    """Polling every 5 s plus a heartbeat every 15 s was about 23,000 requests a day
+    per PC, and it used up the service host's free monthly bandwidth. One request
+    every 30 s does both jobs: the service records a commands poll as a heartbeat."""
+
+    def test_poll_interval_keeps_the_pc_online(self):
         import core.watcher as w
-        self.assertLessEqual(w.POLL_SECONDS, 5)
-        self.assertLess(w.POLL_SECONDS * w.HEARTBEAT_EVERY, 180)   # service window
+        self.assertEqual(30, w.POLL_SECONDS)
+        # Two polls fit in the service's 180 s online window, so one lost request
+        # never shows the PC as offline.
+        self.assertLess(w.POLL_SECONDS * 2, 180)
+
+    def test_watcher_makes_one_request_per_poll(self):
+        from unittest import mock
+        import core.watcher as w
+        self.assertFalse(hasattr(w, "send_heartbeat"))
+        with mock.patch.object(w, "load_cloud_credentials", return_value=("https://svc", "sid", "tok", True)), \
+             mock.patch.object(w, "is_main_app_running", return_value=False), \
+             mock.patch.object(w, "fetch_commands", return_value=[]) as fetch, \
+             mock.patch.object(w.urllib.request, "urlopen") as urlopen, \
+             mock.patch.object(w, "log"):
+            w.run_watcher(single_pass=True)
+        fetch.assert_called_once_with("https://svc", "sid", "tok")
+        urlopen.assert_not_called()
+
+    def test_main_app_poll_is_one_request(self):
+        import threading
+        import types
+        from unittest import mock
+        from ui.app_window import AppWindow
+        import utils.config as config
+        self.assertFalse(hasattr(config, "cloud_send_heartbeat"))
+        done = threading.Event()
+        calls = []
+
+        def fetch():
+            calls.append("commands")
+            done.set()
+            return []
+
+        window = types.SimpleNamespace()
+        with mock.patch.object(config, "cloud_fetch_commands", fetch):
+            AppWindow._poll_cloud_commands(window)
+            self.assertTrue(done.wait(5))
+        self.assertEqual(["commands"], calls)
+
+    def test_main_app_uses_the_watcher_interval(self):
+        import inspect
+        from ui.app_window import AppWindow
+        src = inspect.getsource(AppWindow)
+        self.assertIn("from core.watcher import POLL_SECONDS", src)
+        self.assertIn("self._cloud_poll_timer.start(POLL_SECONDS * 1000)", src)
+        self.assertNotIn("start(5 * 1000)", src)
 
 
 class CloudRecoveryTests(unittest.TestCase):
