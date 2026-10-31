@@ -336,6 +336,44 @@ class NewsTabTests(unittest.TestCase):
         self.assertEqual([], w._rows)
         self.assertEqual("No shows here right now.", w.empty.text())
 
+    def test_only_an_airing_season_offers_find_in_search(self):
+        from ui.news_tab import NewsWidget
+        airing = m(10, "Clover", status="RELEASING", start=(2026, 10, 3),
+                   next_ep={"episode": 6, "airingAt": time.time() + 86400})
+        entries = [{"url": "u1", "title": "Show"},
+                   {"url": "u3", "title": "Clover 2nd Season", "domain": "witanime.site"}]
+        self.news.check(entries, fetch=FakeAniList({1: S1, 2: S2, 10: airing},
+                                                   {"show": [S1], "clover": [airing]}),
+                        gap=0, force=True, now=time.time())
+        with mock.patch("ui.news_tab.library_shows", return_value=entries):
+            w = NewsWidget()
+            w.refresh()
+            rows = {r.url: r for r in w._rows}
+            self.assertIsNone(rows["u1"].btn_find)                    # coming: not on the sites yet
+            self.assertEqual("Find in Search", rows["u3"].btn_find.text())
+            asked = []
+            w.search_requested.connect(lambda q, d: asked.append((q, d)))
+            rows["u3"].btn_find.click()
+        self.assertEqual([("clover", "witanime.site")], asked)
+
+    def test_find_in_search_opens_search_already_searching(self):
+        import types
+        from ui.app_window import AppWindow
+        from ui.search_tab import AnimeSearchWidget
+        window = types.SimpleNamespace(open_tab=mock.Mock(), search_interface=mock.Mock())
+        AppWindow._on_news_search(window, "clover", "witanime.site")
+        window.open_tab.assert_called_once_with("search_interface")
+        window.search_interface.search_for.assert_called_once_with("clover", "witanime.site")
+        tab = types.SimpleNamespace(refresh_domains=mock.Mock(), txt_query=mock.Mock(),
+                                    perform_search=mock.Mock())
+        AnimeSearchWidget.search_for(tab, "clover", "witanime.site")
+        tab.refresh_domains.assert_called_once_with(select="witanime.site")
+        tab.txt_query.setText.assert_called_once_with("clover")
+        tab.perform_search.assert_called_once_with()
+        tab.refresh_domains.reset_mock()
+        AnimeSearchWidget.search_for(tab, "clover", "")          # a local-folder show
+        tab.refresh_domains.assert_not_called()
+
     def test_notification_switch_is_saved(self):
         from ui.news_tab import NewsWidget
         from utils.config import app_settings

@@ -1890,6 +1890,14 @@ class AnimeSearchWidget(QWidget):
                          "Pick a website, type a title, and press Enter.")
 
     # ---- search ----
+    def search_for(self, query, domain=None):
+        """Search for `query` on `domain` (a supported site), or on the site already
+        picked. Used by Anime news to find a season that has started airing."""
+        if domain in SUPPORTED_SITES:
+            self.refresh_domains(select=domain)
+        self.txt_query.setText(query)
+        self.perform_search()
+
     def perform_search(self):
         self._current_page = 1
         self._execute_search()

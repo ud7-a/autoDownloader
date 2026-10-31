@@ -601,6 +601,11 @@ class AppWindow(FluentWindow):
         for _title, message in changes:
             self.notifier.notify("Anime news", message)
 
+    def _on_news_search(self, query, domain):
+        """Anime news' Find in Search: the Search tab, already searching."""
+        self.open_tab("search_interface")
+        self.search_interface.search_for(query, domain)
+
     def on_watch_later_add(self, title, url, domain, cover):
         # A Search result was saved for later -> add it (no profile) and show it.
         self.switchTo(self.watch_later_interface)
@@ -780,6 +785,7 @@ class AppWindow(FluentWindow):
         self.player_interface = PlayerWidget()
         self.news_interface = NewsWidget()
         self.news_interface.changes_found.connect(self._on_news_changes)
+        self.news_interface.search_requested.connect(self._on_news_search)
         # Anime news: a background check soon after start-up, then every few hours.
         # Each show is asked at most once a day (utils/anime_news.MAX_AGE).
         QTimer.singleShot(self.NEWS_CHECK_DELAY_MS, self.news_interface.check)

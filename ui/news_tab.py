@@ -2,7 +2,8 @@
 
 One card per Library anime with its state from AniList (utils/anime_news.py):
 airing now, a new season coming, waiting for news, or finished. A filter strip
-above narrows the list; "Not the right anime?" fixes a wrong match. The app checks
+above narrows the list; "Not the right anime?" fixes a wrong match; an airing
+season has "Find in Search", which searches the anime sites for it. The app checks
 once a day in the background and posts a Windows notification when a season is
 announced, gets a date or starts airing (AppWindow._on_news_changes).
 """
@@ -156,6 +157,7 @@ class MatchDialog(MessageBoxBase):
 class NewsRow(SimpleCardWidget):
     pick = pyqtSignal(str)                 # url -- choose the AniList entry
     recheck = pyqtSignal(str)              # url -- check this show now
+    find = pyqtSignal(str)                 # url -- look the airing season up in Search
 
     def __init__(self, entry, record, parent=None):
         super().__init__(parent)
@@ -198,6 +200,15 @@ class NewsRow(SimpleCardWidget):
             when = QLabel(state["when"])
             when.setStyleSheet("color: #e6e6e6; background: transparent; font-size: 13px;")
             root.addWidget(when)
+        if kind == news.AIRING:
+            # Airing means the sites have its episodes: one click to the season's
+            # page in Search, to follow it in the Watchlist or download it.
+            self.btn_find = _fixed(PushButton(FIF.SEARCH, "Find in Search"))
+            self.btn_find.setToolTip("Search the anime sites for this season")
+            self.btn_find.clicked.connect(lambda: self.find.emit(self.url))
+            root.addWidget(self.btn_find)
+        else:
+            self.btn_find = None
         btn_site = _fixed(PushButton(FIF.LINK, "AniList"))
         btn_site.setToolTip("Open this season on AniList")
         site = state.get("site_url") or ""
@@ -224,6 +235,8 @@ class NewsRow(SimpleCardWidget):
 class NewsWidget(QWidget):
     # [(title, notice)] from a background check, for the Windows notification.
     changes_found = pyqtSignal(list)
+    # query, site domain ("" for the one picked in Search): Find in Search.
+    search_requested = pyqtSignal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -348,6 +361,7 @@ class NewsWidget(QWidget):
             row = NewsRow(e, shows.get(e["url"]))
             row.pick.connect(self.pick_match)
             row.recheck.connect(self.recheck)
+            row.find.connect(self.find_in_search)
             self.list_col.addWidget(row)
             self._rows.append(row)
         if not entries:
@@ -397,6 +411,15 @@ class NewsWidget(QWidget):
         else:
             InfoBar.info("Anime news", "Checked. Nothing new since last time.",
                          position=InfoBarPosition.TOP, duration=4000, parent=self)
+
+    def find_in_search(self, url):
+        """Search the show's own site for it, without season words: the site lists
+        each season as its own result, and the new one is among them."""
+        entry = next((e for e in library_shows() if e["url"] == url), None)
+        if entry is None:
+            return
+        title = entry.get("title", "")
+        self.search_requested.emit(news._norm(title) or title, entry.get("domain") or "")
 
     def pick_match(self, url):
         entry = next((e for e in library_shows() if e["url"] == url), None)
