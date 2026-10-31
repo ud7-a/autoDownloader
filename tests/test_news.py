@@ -403,7 +403,14 @@ class NewsTabTests(unittest.TestCase):
                  m(3, "Fate/Zero", fmt="MOVIE"), m(4, "Hua Jianghu")]
         dlg = self.dialog(found, current_id=1)
         self.assertEqual("fate zero", dlg.search_box.text())
-        titles = [self.news.display_title(c.media) for c in dlg._cards]
+        # The Search tab's bar: a 40 px field and a 120 x 40 "Search" button.
+        self.assertEqual((40, "Search", 120, 40), (dlg.search_box.height(), dlg.btn_search.text(),
+                                                   dlg.btn_search.width(), dlg.btn_search.height()))
+        with mock.patch.object(dlg, "_search") as search:
+            dlg.btn_search.click()
+            dlg.search_box.returnPressed.emit()
+        self.assertEqual([mock.call("fate zero")] * 2, search.call_args_list)
+        titles =[self.news.display_title(c.media) for c in dlg._cards]
         self.assertEqual("Fate/Zero", titles[0])                  # closest name first
         self.assertEqual(3, len(titles))                          # the film is left out
         self.assertEqual("3 results. Click one to pick it, or double-click to use it right away.",

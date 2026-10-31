@@ -15,10 +15,10 @@ from PyQt6.QtGui import QColor, QDesktopServices, QFont, QImage, QPainter, QPen
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from qfluentwidgets import (Action, BodyLabel, CardWidget, FluentIcon as FIF,
-                            IndeterminateProgressRing, InfoBar, InfoBarPosition, MessageBoxBase,
-                            PushButton, RoundMenu, SearchLineEdit, SegmentedWidget,
-                            SimpleCardWidget, SmoothScrollArea, SubtitleLabel, SwitchButton,
-                            ToolButton)
+                            IndeterminateProgressRing, InfoBar, InfoBarPosition, LineEdit,
+                            MessageBoxBase, PrimaryPushButton, PushButton, RoundMenu,
+                            SegmentedWidget, SimpleCardWidget, SmoothScrollArea, SubtitleLabel,
+                            SwitchButton, ToolButton)
 
 from utils import anime_news as news
 from utils import watch_later as wl
@@ -212,17 +212,27 @@ class MatchDialog(MessageBoxBase):
                          "follows that entry from now on.")
         lead.setWordWrap(True)
         self.viewLayout.addWidget(lead)
-        self.search_box = SearchLineEdit()
-        self.search_box.setPlaceholderText("Search AniList by name")
-        self.search_box.setClearButtonEnabled(True)
+        # The Search tab's search bar (ui/search_tab.py): the same field and button,
+        # at the same size.
+        bar = QHBoxLayout()
+        bar.setSpacing(10)
+        self.search_box = LineEdit()
+        self.search_box.setPlaceholderText("Enter anime title to search...")
+        self.search_box.setFixedHeight(40)
         self.search_box.setText(news.search_text(title))
-        self.search_box.searchSignal.connect(self._search)       # Enter or the icon
+        self.search_box.returnPressed.connect(lambda: self._search(self.search_box.text()))
+        bar.addWidget(self.search_box, 1)
+        self.btn_search = PrimaryPushButton("Search")
+        self.btn_search.setFixedSize(120, 40)
+        self.btn_search.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_search.clicked.connect(lambda: self._search(self.search_box.text()))
+        bar.addWidget(self.btn_search)
         self._typing = QTimer(self)
         self._typing.setSingleShot(True)
         self._typing.setInterval(self.TYPE_DELAY_MS)
         self._typing.timeout.connect(lambda: self._search(self.search_box.text()))
         self.search_box.textEdited.connect(lambda _t: self._typing.start())
-        self.viewLayout.addWidget(self.search_box)
+        self.viewLayout.addLayout(bar)
 
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
