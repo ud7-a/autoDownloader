@@ -59,8 +59,9 @@ _MEDIA_FIELDS = """
 """
 _SEARCH_QUERY = """
 query ($search: String) {
-  Page(perPage: 8) {
-    media(search: $search, type: ANIME, sort: SEARCH_MATCH) {""" + _MEDIA_FIELDS + """}
+  Page(perPage: 10) {
+    media(search: $search, type: ANIME, sort: SEARCH_MATCH) {""" + _MEDIA_FIELDS + """
+      title { native } coverImage { medium } }
   }
 }"""
 _MEDIA_QUERY = """
@@ -119,6 +120,14 @@ def _norm(title):
     return normalize_title(title)
 
 
+def search_text(title):
+    """What to ask AniList for a Library title: no season words, and run-together
+    names split ("FateZero" -> "fate zero"), which AniList's search can't find."""
+    import re
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", title or "")
+    return _norm(spaced) or (title or "").strip()
+
+
 def display_title(m):
     t = (m or {}).get("title") or {}
     return t.get("english") or t.get("romaji") or "?"
@@ -138,8 +147,12 @@ def similarity(title, m):
     want = _norm(title)
     if not want:
         return 0.0
-    return max((difflib.SequenceMatcher(None, want, _norm(n)).ratio() for n in _names(m)),
-               default=0.0)
+
+    def ratio(a, b):
+        # Spaces ignored too: "fatezero" and "fate zero" (Fate/Zero) are one name.
+        return max(difflib.SequenceMatcher(None, a, b).ratio(),
+                   difflib.SequenceMatcher(None, a.replace(" ", ""), b.replace(" ", "")).ratio())
+    return max((ratio(want, _norm(n)) for n in _names(m)), default=0.0)
 
 
 def best_match(title, candidates):
@@ -160,11 +173,29 @@ def best_match(title, candidates):
     return scored[0][3]
 
 
+STATUS_WORDS = {"FINISHED": "Finished", "RELEASING": "Airing", "NOT_YET_RELEASED": "Not out yet",
+                "HIATUS": "On hiatus", "CANCELLED": "Cancelled"}
+
+
 def candidate_line(m):
-    """'TV · 2023' for a pick list."""
+    """'TV · 2011 · 13 episodes · Finished' for a pick list."""
     year = (m.get("startDate") or {}).get("year")
-    fmt = {"TV_SHORT": "TV short", "MOVIE": "Film"}.get(m.get("format"), m.get("format") or "")
-    return " · ".join(str(p) for p in (fmt, year) if p)
+    fmt = {"TV_SHORT": "TV short", "MOVIE": "Film", "SPECIAL": "Special"}.get(
+        m.get("format"), m.get("format") or "")
+    eps = m.get("episodes")
+    eps = f"{eps} episode{'s' if eps != 1 else ''}" if eps else ""
+    return " · ".join(str(p) for p in (fmt, year, eps, STATUS_WORDS.get(m.get("status"), "")) if p)
+
+
+def other_title(m):
+    """The entry's second name, shown under the first: romaji under English, or
+    native under romaji. '' when there is none."""
+    t = m.get("title") or {}
+    first = display_title(m)
+    for name in (t.get("romaji"), t.get("native")):
+        if name and name != first:
+            return name
+    return ""
 
 
 # ------------------------------------------------------------------ the newest season
@@ -338,7 +369,7 @@ def check_show(title, record, fetch=post, gap=REQUEST_GAP):
     newest season described."""
     record = dict(record or {})
     if not record.get("anilist_id"):
-        found = best_match(title, search(_norm(title) or title, fetch))
+        found = best_match(title, search(search_text(title), fetch))
         if found is None:
             record.update(anilist_id=None, match_title="", checked_at=time.time(),
                           state={"kind": UNKNOWN, "key": UNKNOWN, "when": "", "season_title": "",

@@ -10,14 +10,15 @@ announced, gets a date or starts airing (AppWindow._on_news_changes).
 import datetime
 import time
 
-from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QFont
-from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtCore import QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QImage, QPainter, QPen
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from qfluentwidgets import (Action, BodyLabel, FluentIcon as FIF, IndeterminateProgressRing,
-                            InfoBar, InfoBarPosition, MessageBoxBase, PushButton, RadioButton,
-                            RoundMenu, SearchLineEdit, SegmentedWidget, SimpleCardWidget,
-                            SmoothScrollArea, SubtitleLabel, SwitchButton, ToolButton)
+from qfluentwidgets import (Action, BodyLabel, CardWidget, FluentIcon as FIF,
+                            IndeterminateProgressRing, InfoBar, InfoBarPosition, MessageBoxBase,
+                            PushButton, RoundMenu, SearchLineEdit, SegmentedWidget,
+                            SimpleCardWidget, SmoothScrollArea, SubtitleLabel, SwitchButton,
+                            ToolButton)
 
 from utils import anime_news as news
 from utils import watch_later as wl
@@ -69,86 +70,255 @@ class CheckThread(QThread):
 
 
 class SearchThread(QThread):
-    results = pyqtSignal(list, str)        # media list, error ("" when fine)
+    results = pyqtSignal(int, list, str)   # generation, media list, error ("" when fine)
+    cover = pyqtSignal(int, int, bytes)    # generation, result index, image bytes
 
-    def __init__(self, query):
+    def __init__(self, query, generation):
         super().__init__()
-        self.query = query
+        self.query, self.generation = query, generation
 
     def run(self):
         try:
-            self.results.emit(news.search(self.query), "")
+            found = news.search(self.query)
         except Exception as e:
-            self.results.emit([], str(e))
+            self.results.emit(self.generation, [], str(e))
+            return
+        self.results.emit(self.generation, found, "")
+        # Covers after the list, so the names show at once; one failed cover
+        # just keeps its placeholder.
+        import urllib.request
+        for i, m in enumerate(found):
+            if self.isInterruptionRequested():
+                return
+            url = (m.get("coverImage") or {}).get("medium")
+            if not url:
+                continue
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "AutoEpisodesDownloader"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    self.cover.emit(self.generation, i, resp.read())
+            except Exception:
+                continue
+
+
+class ResultCard(CardWidget):
+    """One AniList entry in the pick list: cover, names, what it is. Click picks it,
+    double-click picks it and closes the dialog."""
+    chosen = pyqtSignal()
+
+    COVER_W, COVER_H = 46, 64
+
+    def __init__(self, m, current=False, parent=None):
+        super().__init__(parent)
+        self.media = m
+        self.selected = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(84)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 10, 14, 10)
+        row.setSpacing(12)
+        self.cover = QLabel("🎞️")
+        self.cover.setFixedSize(self.COVER_W, self.COVER_H)
+        self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover.setStyleSheet("border-radius: 5px; background-color: #1e1e1e; "
+                                 "color: #555555; font-size: 16px;")
+        row.addWidget(self.cover)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        text.addStretch(1)                  # centred, with or without a second name
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name = news.display_title(m)
+        title = QLabel(name)
+        title.setStyleSheet("color: #ffffff; background: transparent; font-size: 14px; "
+                            "font-weight: 600;")
+        title.setToolTip(name)
+        top.addWidget(title, 1)
+        if current:
+            # The QLabel.BadgeInfo look, inline: the dialog's own stylesheet keeps
+            # the app-wide class rule from reaching labels inside it.
+            tag = QLabel("Current match")
+            tag.setStyleSheet("background: rgba(76, 194, 255, 0.15); color: #4cc2ff; "
+                              "border: 1px solid rgba(76, 194, 255, 0.3); border-radius: 10px; "
+                              "padding: 2px 8px; font-size: 11px; font-weight: bold;")
+            top.addWidget(tag)
+        text.addLayout(top)
+        other = news.other_title(m)
+        if other:
+            text.addWidget(_muted(other, 12))
+        text.addWidget(_muted(news.candidate_line(m), 12))
+        text.addStretch(1)
+        row.addLayout(text, 1)
+        self.tick = QLabel()
+        self.tick.setPixmap(FIF.ACCEPT.icon(color=QColor("#4cc2ff")).pixmap(16, 16))
+        self.tick.setStyleSheet("background: transparent;")
+        self.tick.setFixedWidth(18)
+        self.tick.setVisible(False)
+        row.addWidget(self.tick)
+
+    def set_cover(self, data):
+        image = QImage.fromData(data)
+        if image.isNull():
+            return
+        from ui.styles import rounded_from_image
+        self.cover.setPixmap(rounded_from_image(image, self.COVER_W, self.COVER_H, 5))
+        self.cover.setText("")
+        self.cover.setStyleSheet("background: transparent;")
+
+    def set_selected(self, on):
+        self.selected = bool(on)
+        self.tick.setVisible(self.selected)
+        self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        super().mouseDoubleClickEvent(event)
+        self.chosen.emit()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.selected:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pen = QPen(QColor("#4cc2ff"))
+            pen.setWidthF(1.6)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 6, 6)
+            p.end()
 
 
 class MatchDialog(MessageBoxBase):
-    """Pick the AniList entry a Library anime really is."""
+    """Pick the AniList entry a Library anime really is.
 
-    def __init__(self, title, parent=None):
+    Searches as you type. Each result shows its cover, both its names and what it
+    is (format, year, episodes, finished or airing), since several seasons and
+    spin-offs share a name; the entry the show follows now is marked."""
+
+    TYPE_DELAY_MS = 450
+    ROW_STEP = 90                 # a result card and the gap after it
+    VISIBLE_ROWS = 4              # the list grows to this many, then scrolls
+
+    def __init__(self, title, current_id=None, parent=None):
         super().__init__(parent)
         self.picked = None
+        self.current_id = current_id
         self._threads = []
-        self._found = []
+        self._cards = []
+        self._order = []          # card position -> index in AniList's answer
+        self._generation = 0
+        self.viewLayout.setSpacing(12)
         self.viewLayout.addWidget(SubtitleLabel("Which anime is this?"))
-        lead = BodyLabel(f"Pick the AniList entry that “{title}” is. Its news follows that "
-                         "entry from now on.")
+        lead = BodyLabel(f"Pick the AniList entry for “{title}” from your Library. Its news "
+                         "follows that entry from now on.")
         lead.setWordWrap(True)
         self.viewLayout.addWidget(lead)
         self.search_box = SearchLineEdit()
-        self.search_box.setText(news._norm(title) or title)
+        self.search_box.setPlaceholderText("Search AniList by name")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setText(news.search_text(title))
         self.search_box.searchSignal.connect(self._search)       # Enter or the icon
+        self._typing = QTimer(self)
+        self._typing.setSingleShot(True)
+        self._typing.setInterval(self.TYPE_DELAY_MS)
+        self._typing.timeout.connect(lambda: self._search(self.search_box.text()))
+        self.search_box.textEdited.connect(lambda _t: self._typing.start())
         self.viewLayout.addWidget(self.search_box)
-        self.status = _muted("Searching…")
-        self.viewLayout.addWidget(self.status)
-        self.list_host = QWidget()
-        self.list_col = QVBoxLayout(self.list_host)
-        self.list_col.setContentsMargins(0, 0, 0, 0)
-        self.list_col.setSpacing(2)
-        self.viewLayout.addWidget(self.list_host)
-        self.group = QButtonGroup(self)
-        self.group.idClicked.connect(self._on_pick)
-        self.yesButton.setText("Use this")
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        self.spinner = IndeterminateProgressRing()
+        self.spinner.setFixedSize(16, 16)
+        self.spinner.setStrokeWidth(2)
+        status_row.addWidget(self.spinner)
+        self.status = _muted("", 12)
+        status_row.addWidget(self.status, 1)
+        self.viewLayout.addLayout(status_row)
+
+        self.scroll = SmoothScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.scroll.setFixedHeight(self.ROW_STEP)
+        host = QWidget()
+        host.setStyleSheet("background: transparent;")
+        self.list_col = QVBoxLayout(host)
+        self.list_col.setContentsMargins(0, 0, 8, 0)
+        self.list_col.setSpacing(6)
+        self.list_col.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.scroll.setWidget(host)
+        self.viewLayout.addWidget(self.scroll)
+
+        self.yesButton.setText("Use this anime")
         self.yesButton.setEnabled(False)
         self.cancelButton.setText("Cancel")
-        self.widget.setMinimumWidth(560)
+        self.widget.setMinimumWidth(600)
         self._search(self.search_box.text())
 
     def _search(self, query):
         query = (query or "").strip()
+        self._typing.stop()
         if not query:
             return
-        self.status.setText("Searching…")
-        self.status.show()
-        t = SearchThread(query)
+        self._generation += 1
+        for t in self._threads:
+            t.requestInterruption()
+        self.spinner.show()
+        self.status.setText(f"Searching AniList for “{query}”…")
+        t = SearchThread(query, self._generation)
         t.results.connect(self._show)
+        t.cover.connect(self._cover)
         t.finished.connect(lambda t=t: self._threads.remove(t) if t in self._threads else None)
         self._threads.append(t)
         t.start()
 
-    def _show(self, found, error):
-        for b in self.group.buttons():
-            self.group.removeButton(b)
-            b.deleteLater()
+    def _show(self, generation, found, error):
+        if generation != self._generation:
+            return                                  # an older search, typed over
+        self.spinner.hide()
+        for c in self._cards:
+            self.list_col.removeWidget(c)
+            c.deleteLater()
+        self._cards = []
         self.picked = None
         self.yesButton.setEnabled(False)
-        self._found = [m for m in found if m.get("format") in news.SERIES_FORMATS] or found
+        query = self.search_box.text()
+        series = [m for m in found if m.get("format") in news.SERIES_FORMATS] or found
+        # Closest name first; AniList's own order breaks ties.
+        ranked = sorted(enumerate(series), key=lambda im: (-round(news.similarity(query, im[1]), 1), im[0]))
         if error:
-            self.status.setText(error)
-        elif not self._found:
-            self.status.setText("Nothing found. Try another name.")
+            self.status.setText(f"{error}. Check your connection and press Enter to try again.")
+        elif not ranked:
+            self.status.setText(f"Nothing on AniList is called “{query.strip()}”. Try a shorter "
+                                "name, or its English or Japanese title.")
         else:
-            self.status.hide()
-        for i, m in enumerate(self._found[:8]):
-            btn = RadioButton(f"{news.display_title(m)}   ·   {news.candidate_line(m)}")
-            self.group.addButton(btn, i)
-            self.list_col.addWidget(btn)
+            n = len(ranked)
+            self.status.setText(f"{n} result{'s' if n != 1 else ''}. Click one to pick it, or "
+                                "double-click to use it right away.")
+        self._order = [found.index(m) for _i, m in ranked]
+        for _i, m in ranked:
+            card = ResultCard(m, current=bool(self.current_id) and m.get("id") == self.current_id)
+            card.clicked.connect(lambda c=card: self._pick(c))
+            card.chosen.connect(lambda c=card: (self._pick(c), self.accept()))
+            self.list_col.addWidget(card)
+            self._cards.append(card)
+        rows = min(max(len(self._cards), 1), self.VISIBLE_ROWS)
+        self.scroll.setFixedHeight(rows * self.ROW_STEP)
+        self.scroll.setVisible(bool(self._cards))
+        self.scroll.verticalScrollBar().setValue(0)
 
-    def _on_pick(self, index):
-        self.picked = self._found[index]
+    def _cover(self, generation, index, data):
+        if generation == self._generation and index in self._order:
+            self._cards[self._order.index(index)].set_cover(data)
+
+    def _pick(self, card):
+        for c in self._cards:
+            c.set_selected(c is card)
+        self.picked = card.media
         self.yesButton.setEnabled(True)
 
     def done(self, result):
+        for t in self._threads:
+            t.requestInterruption()
         for t in self._threads:
             t.wait(3000)
         super().done(result)
@@ -425,7 +595,8 @@ class NewsWidget(QWidget):
         entry = next((e for e in library_shows() if e["url"] == url), None)
         if entry is None:
             return
-        dlg = MatchDialog(entry.get("title", "Anime"), self.window())
+        current = (news.load()["shows"].get(url) or {}).get("anilist_id")
+        dlg = MatchDialog(entry.get("title", "Anime"), current, self.window())
         if dlg.exec() and dlg.picked:
             news.set_match(url, dlg.picked["id"], news.display_title(dlg.picked))
             self.refresh()

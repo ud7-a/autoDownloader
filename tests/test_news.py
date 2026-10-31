@@ -91,9 +91,19 @@ class MatchingTests(unittest.TestCase):
         self.assertIsNone(self.news.best_match("Sample Show", [m(7, "Completely Different")]))
         self.assertIsNone(self.news.best_match("", [S1]))
 
-    def test_candidate_line(self):
-        self.assertEqual("TV · 2023", self.news.candidate_line(S1))
-        self.assertEqual("Film · 2020", self.news.candidate_line(m(5, "X", fmt="MOVIE")))
+    def test_candidate_line_and_other_title(self):
+        self.assertEqual("TV · 2023 · 12 episodes · Finished", self.news.candidate_line(S1))
+        self.assertEqual("Film · 2020 · 12 episodes · Not out yet",
+                         self.news.candidate_line(m(5, "X", fmt="MOVIE", status="NOT_YET_RELEASED")))
+        self.assertEqual("Show", self.news.other_title(S1))           # romaji under English
+        self.assertEqual("", self.news.other_title(m(5, "X")))
+
+    def test_run_together_names_are_split_for_the_search(self):
+        """AniList finds nothing for "fatezero"; "fate zero" finds Fate/Zero."""
+        self.assertEqual("fate zero", self.news.search_text("FateZero"))
+        self.assertEqual("black clover", self.news.search_text("Black Clover 2nd Season"))
+        fate_zero = m(11, "Fate/Zero")
+        self.assertIs(fate_zero, self.news.best_match("FateZero", [fate_zero]))
 
 
 class NewestSeasonTests(unittest.TestCase):
@@ -373,6 +383,49 @@ class NewsTabTests(unittest.TestCase):
         tab.refresh_domains.reset_mock()
         AnimeSearchWidget.search_for(tab, "clover", "")          # a local-folder show
         tab.refresh_domains.assert_not_called()
+
+    def dialog(self, found, current_id=None):
+        from ui.news_tab import MatchDialog
+        from PyQt6.QtWidgets import QWidget
+        host = QWidget()
+        self.addCleanup(host.deleteLater)
+        with mock.patch.object(self.news, "search", return_value=found):
+            dlg = MatchDialog("FateZero", current_id, host)
+            for t in list(dlg._threads):
+                t.wait(5000)
+            self._app.processEvents()
+        return dlg
+
+    def test_pick_dialog_ranks_marks_and_picks(self):
+        found = [m(1, "Fate/stay night: Unlimited Blade Works"), m(2, "Fate/Zero"),
+                 m(3, "Fate/Zero", fmt="MOVIE"), m(4, "Hua Jianghu")]
+        dlg = self.dialog(found, current_id=1)
+        self.assertEqual("fate zero", dlg.search_box.text())
+        titles = [self.news.display_title(c.media) for c in dlg._cards]
+        self.assertEqual("Fate/Zero", titles[0])                  # closest name first
+        self.assertEqual(3, len(titles))                          # the film is left out
+        self.assertEqual("3 results. Click one to pick it, or double-click to use it right away.",
+                         dlg.status.text())
+        self.assertFalse(dlg.yesButton.isEnabled())
+        dlg._pick(dlg._cards[1])
+        self.assertTrue(dlg._cards[1].selected and not dlg._cards[0].selected)
+        self.assertEqual(1, dlg.picked["id"])
+        self.assertTrue(dlg.yesButton.isEnabled())
+        dlg.done(0)
+
+    def test_pick_dialog_ignores_an_older_search_and_says_when_nothing_is_found(self):
+        dlg = self.dialog([m(2, "Fate/Zero")])
+        dlg._generation += 1                                       # typed again
+        dlg._show(dlg._generation - 1, [m(9, "Old Result")], "")
+        self.assertEqual(["Fate/Zero"], [self.news.display_title(c.media) for c in dlg._cards])
+        dlg.search_box.setText("zzz")
+        dlg._show(dlg._generation, [], "")
+        self.assertEqual([], dlg._cards)
+        self.assertFalse(dlg.scroll.isVisibleTo(dlg))
+        self.assertIn("Nothing on AniList is called “zzz”", dlg.status.text())
+        dlg._show(dlg._generation, [], "AniList couldn't be reached (URLError)")
+        self.assertIn("press Enter to try again", dlg.status.text())
+        dlg.done(0)
 
     def test_notification_switch_is_saved(self):
         from ui.news_tab import NewsWidget
