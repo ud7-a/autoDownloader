@@ -253,10 +253,18 @@ def _date_text(d):
     year, month, day = d.get("year"), d.get("month"), d.get("day")
     if not year:
         return ""
-    if month and day:
-        return datetime.date(year, month, day).strftime("%d %B %Y").lstrip("0")
-    if month:
-        return datetime.date(year, month, 1).strftime("%B %Y")
+    # A date AniList holds wrongly (30 February, month 13) falls back to what of it
+    # is valid, instead of failing the whole check.
+    try:
+        if month and day:
+            return datetime.date(year, month, day).strftime("%d %B %Y").lstrip("0")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if month:
+            return datetime.date(year, month, 1).strftime("%B %Y")
+    except (TypeError, ValueError):
+        pass
     return str(year)
 
 
@@ -286,9 +294,8 @@ def describe(newest, source):
                 "detail": f"Started {started}" if started else "Airing now",
                 "key": f"{AIRING}|{newest.get('id')}"}
     if status == "NOT_YET_RELEASED":
-        start = newest.get("startDate") or {}
-        date = _date_text(start)
-        on = "on" if start.get("day") else "in"
+        date = _date_text(newest.get("startDate"))
+        on = "on" if len(date.split()) == 3 else "in"     # on 2 October 2027, in October 2027
         return {**base, "kind": COMING, "when": date or "No date yet",
                 "headline": f"{name} is coming {on} {date}." if date else f"{name} is coming.",
                 "detail": "Announced" if date else "Announced, with no release date yet",
@@ -316,10 +323,19 @@ def change_message(title, old, new):
     a season announced, given a date, or starting to air."""
     if not old or not new or old.get("key") == new.get("key"):
         return None
+    if old.get("kind") == UNKNOWN:
+        return None           # found on AniList at last: nothing about it changed
     kind = new.get("kind")
     if kind == COMING:
         if old.get("kind") == COMING and old.get("anilist_id") == new.get("anilist_id"):
-            return f"{title}: {new['season_title']} now has a date, {new['when']}."
+            when, before = new.get("when"), old.get("when")
+            if not when or when == "No date yet":
+                return None           # a date taken back isn't news
+            # "October 2027" -> "2 October 2027" is the same date made exact;
+            # anything else is the date changing.
+            if before and before != "No date yet" and before not in when:
+                return f"{title}: {new['season_title']} moved to {when}."
+            return f"{title}: {new['season_title']} now has a date, {when}."
         return f"{title}: {new['season_title']} has been announced" + (
             f" for {new['when']}." if new.get("when") and new["when"] != "No date yet" else ".")
     if kind == AIRING and old.get("kind") != AIRING:
@@ -334,6 +350,18 @@ def _load():
         with open(FILE, encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict) and isinstance(data.get("shows"), dict):
+            # A damaged record is dropped (checked again), never trusted.
+            shows = {}
+            for url, rec in data["shows"].items():
+                if isinstance(rec, dict):
+                    if not isinstance(rec.get("state"), dict):
+                        rec = dict(rec, state=None, checked_at=0)
+                    try:
+                        rec["checked_at"] = float(rec.get("checked_at") or 0)
+                    except (TypeError, ValueError):
+                        rec["checked_at"] = 0.0
+                    shows[url] = rec
+            data["shows"] = shows
             return data
     except (OSError, ValueError):
         pass
@@ -438,4 +466,8 @@ def check(entries, force=False, fetch=post, gap=REQUEST_GAP, now=None, progress=
 def is_fresh(record, now=None, window=7 * 24 * 3600):
     """True for a few days after a show's news changed: the row says so."""
     now = time.time() if now is None else now
-    return bool(record and record.get("changed_at") and now - record["changed_at"] < window)
+    try:
+        changed = float((record or {}).get("changed_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(changed) and 0 <= now - changed < window
