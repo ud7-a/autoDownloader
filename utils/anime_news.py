@@ -426,6 +426,7 @@ def check(entries, force=False, fetch=post, gap=REQUEST_GAP, now=None, progress=
         data = _load()
     shows = data["shows"]
     changes, errors = [], []
+    told = set()          # one notice per season, however many Library seasons lead to it
     def is_due(url):
         last = float((shows.get(url) or {}).get("checked_at") or 0)
         return force or not last or now - last >= MAX_AGE
@@ -443,7 +444,10 @@ def check(entries, force=False, fetch=post, gap=REQUEST_GAP, now=None, progress=
         new["checked_at"] = now
         msg = change_message(title, old.get("state"), new.get("state"))
         if msg:
-            changes.append((title, msg))
+            season = ((new.get("state") or {}).get("anilist_id"), new["state"].get("key"))
+            if season not in told:
+                told.add(season)
+                changes.append((title, msg))
             new["changed_at"] = now
         elif old.get("changed_at"):
             new["changed_at"] = old["changed_at"]

@@ -385,7 +385,7 @@ class TabBase(Base):
 
     def state(self, kind, headline="h", when="", site="https://anilist.co/anime/1"):
         return {"kind": kind, "key": kind, "headline": headline, "detail": "", "when": when,
-                "season_title": "S", "site_url": site, "anilist_id": 1}
+                "season_title": "S", "site_url": site, "anilist_id": None}   # each its own anime
 
     def shows(self, entries, records):
         self.write_file({"shows": records, "checked_at": time.time()})
@@ -704,6 +704,63 @@ class PickDialogEdgeTests(TabBase):
         dlg._show(dlg._generation, [m(4, "Other")], "")
         self.assertIsNone(dlg.picked)
         self.assertFalse(dlg.yesButton.isEnabled())
+
+
+class SeasonsOfOneAnimeTests(TabBase):
+    """Library entries for different seasons of one anime lead to the same newest
+    season: the tab shows it once, under the newest of those seasons."""
+
+    def record(self, newest_id, kind="coming"):
+        return {"state": dict(self.state(kind), anilist_id=newest_id), "checked_at": time.time()}
+
+    def test_grouping(self):
+        from ui.news_tab import newest_per_anime
+        entries = [{"url": "bc1", "title": "Black Clover", "added": 1},
+                   {"url": "mp", "title": "Mob Psycho 100", "added": 2},
+                   {"url": "bc2", "title": "Black Clover 2nd Season", "added": 3},
+                   {"url": "mp3", "title": "Mob Psycho 100 III", "added": 4},
+                   {"url": "fr_a", "title": "Frieren", "added": 5},
+                   {"url": "fr_b", "title": "Frieren", "added": 9},
+                   {"url": "new1", "title": "Not checked"}, {"url": "new2", "title": "Not checked"},
+                   {"url": "other", "title": "Black Clover Movie", "added": 6}]
+        shows = {"bc1": self.record(10), "bc2": self.record(10), "mp": self.record(20),
+                 "mp3": self.record(20), "fr_a": self.record(30), "fr_b": self.record(30),
+                 "other": self.record(11), "new2": {"state": None}}
+        groups = {e["url"]: [o["url"] for o in others] for e, others in newest_per_anime(entries, shows)}
+        self.assertEqual({"bc2": ["bc1"], "mp3": ["mp"], "fr_b": ["fr_a"],   # season, then newest added
+                          "new1": [], "new2": [], "other": []}, groups)
+
+    def test_the_tab_shows_one_row_per_anime(self):
+        entries = [{"url": "bc1", "title": "Black Clover", "added": 1},
+                   {"url": "bc2", "title": "Black Clover 2nd Season", "added": 2},
+                   {"url": "fr", "title": "Frieren", "added": 3}]
+        w = self.shows(entries, {"bc1": self.record(10, "airing"), "bc2": self.record(10, "airing"),
+                                 "fr": self.record(30)})
+        self.assertEqual(["bc2", "fr"], [r.url for r in w._rows])
+        self.assertEqual("All  2", w.seg.widget("all").text())
+        self.assertEqual("Airing  1", w.seg.widget("airing").text())
+        self.assertTrue(w.lead.text().startswith("2 shows from your Library"))
+        texts = [lbl.text() for lbl in w._rows[0].findChildren(type(w.lead))]
+        self.assertIn("Also in your Library: Black Clover", texts)
+        self.assertNotIn("Also in your Library", " ".join(
+            lbl.text() for lbl in w._rows[1].findChildren(type(w.lead))))
+        with mock.patch.object(w, "check") as check:
+            w.recheck("bc2")                                         # the row stands for both
+        self.assertEqual({"bc1", "bc2"}, {e["url"] for e in check.call_args.kwargs["entries"]})
+
+    def test_one_notice_per_season(self):
+        s2_done = m(2, "Black Clover Season 2", end=(2026, 1, 1), relations=[("SOURCE", manga("RELEASING"))])
+        s1_before = m(1, "Black Clover", relations=[("SEQUEL", {"id": 2, "format": "TV", "status": "FINISHED"})])
+        entries = [{"url": "bc1", "title": "Black Clover"}, {"url": "bc2", "title": "Black Clover 2nd Season"}]
+        before = FakeAniList({1: s1_before, 2: s2_done}, {"black clover": [s1_before]})
+        self.news.check(entries, fetch=before, gap=0, now=1000)
+        s2_done["relations"]["edges"].append(
+            {"relationType": "SEQUEL", "node": dict(m(3, "Black Clover Season 3", status="NOT_YET_RELEASED",
+                                                      start=None), type="ANIME")})
+        after = FakeAniList({1: s1_before, 2: s2_done}, {"black clover": [s1_before]})
+        shows, changes, _e = self.news.check(entries, fetch=after, gap=0, force=True, now=2000)
+        self.assertEqual([("Black Clover", "Black Clover: Black Clover Season 3 has been announced.")], changes)
+        self.assertTrue(all(self.news.is_fresh(shows[u], now=2000) for u in ("bc1", "bc2")))
 
 
 class NewsTimersTests(unittest.TestCase):

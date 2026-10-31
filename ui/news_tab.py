@@ -53,6 +53,30 @@ def library_shows():
     return [e for e in wl.entries() if e.get("url") and e.get("title")]
 
 
+def newest_per_anime(entries, shows):
+    """[(entry, [other entries])]: one per anime. Library entries for different
+    seasons of one anime ("Black Clover", "Black Clover 2nd Season") lead to the
+    same newest season, so they'd show the same news twice; the newest season of
+    them stands for all. Entries not matched or not checked yet stay on their own."""
+    from core.schedule import season_number
+    groups, order = {}, []
+    for e in entries:
+        state = (shows.get(e["url"]) or {}).get("state") or {}
+        key = ("anime", state["anilist_id"]) if state.get("anilist_id") else ("entry", e["url"])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+
+    def newest(e):
+        return (season_number(e.get("title")) or 1, float(e.get("added") or 0))
+    out = []
+    for key in order:
+        members = sorted(groups[key], key=newest, reverse=True)
+        out.append((members[0], members[1:]))
+    return out
+
+
 class CheckThread(QThread):
     done = pyqtSignal(list, list)          # [(title, notice)], [(title, error)]
 
@@ -339,7 +363,7 @@ class NewsRow(SimpleCardWidget):
     recheck = pyqtSignal(str)              # url -- check this show now
     find = pyqtSignal(str)                 # url -- look the airing season up in Search
 
-    def __init__(self, entry, record, parent=None):
+    def __init__(self, entry, record, also=(), parent=None):
         super().__init__(parent)
         self.url = entry.get("url", "")
         state = (record or {}).get("state") or {}
@@ -375,6 +399,10 @@ class NewsRow(SimpleCardWidget):
             detail += (" · " if detail else "") + f"matched to {match}"
         if detail:
             info.addWidget(_muted(detail, 12, wrap=True))
+        if also:
+            # The other seasons in the Library, which this row stands for.
+            info.addWidget(_muted("Also in your Library: " + ", ".join(e.get("title", "") for e in also),
+                                  12, wrap=True))
 
         if state.get("when"):
             when = QLabel(state["when"])
@@ -423,6 +451,7 @@ class NewsWidget(QWidget):
         self._threads = []
         self._filter = "all"
         self._rows = []
+        self._group = {}          # row's url -> the Library entries it stands for
         self._manual = False
 
         root = QVBoxLayout(self)
@@ -521,10 +550,13 @@ class NewsWidget(QWidget):
         data = news.load()
         shows = data.get("shows", {})
         kind_of = lambda e: ((shows.get(e["url"]) or {}).get("state") or {}).get("kind")
+        anime = newest_per_anime(entries, shows)
+        # Which Library entries each row stands for, for "Check this show".
+        self._group = {e["url"]: [e] + others for e, others in anime}
         for key, label, kinds in FILTERS:
-            n = sum(1 for e in entries if kind_of(e) in kinds or key == "all")
+            n = sum(1 for e, _o in anime if kind_of(e) in kinds or key == "all")
             self.seg.widget(key).setText(f"{label}  {n}")
-        n = len(entries)
+        n = len(anime)
         when = checked_text(max((float((shows.get(e["url"]) or {}).get("checked_at") or 0)
                                  for e in entries), default=0))
         self.lead.setText(f"{n} show{'s' if n != 1 else ''} from your Library · {when}"
@@ -535,10 +567,10 @@ class NewsWidget(QWidget):
             r.deleteLater()
         self._rows = []
         kinds = dict((k, ks) for k, _l, ks in FILTERS)[self._filter]
-        shown = [e for e in entries if self._filter == "all" or kind_of(e) in kinds]
-        shown.sort(key=lambda e: (ORDER.get(kind_of(e), len(ORDER)), e["title"].lower()))
-        for e in shown:
-            row = NewsRow(e, shows.get(e["url"]))
+        shown = [(e, o) for e, o in anime if self._filter == "all" or kind_of(e) in kinds]
+        shown.sort(key=lambda eo: (ORDER.get(kind_of(eo[0]), len(ORDER)), eo[0]["title"].lower()))
+        for e, others in shown:
+            row = NewsRow(e, shows.get(e["url"]), others)
             row.pick.connect(self.pick_match)
             row.recheck.connect(self.recheck)
             row.find.connect(self.find_in_search)
@@ -571,7 +603,10 @@ class NewsWidget(QWidget):
         return True
 
     def recheck(self, url):
-        self.check(force=True, manual=True, entries=[e for e in library_shows() if e["url"] == url])
+        """Check this show: the row's Library entry and the other seasons it
+        stands for."""
+        urls = {e["url"] for e in self._group.get(url, [])} or {url}
+        self.check(force=True, manual=True, entries=[e for e in library_shows() if e["url"] in urls])
 
     def _on_checked(self, changes, errors):
         self.btn_check.setEnabled(True)
