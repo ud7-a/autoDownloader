@@ -385,6 +385,8 @@ class NewsTabTests(unittest.TestCase):
         tab.refresh_domains.assert_not_called()
 
     def dialog(self, found, current_id=None):
+        """A pick dialog that has searched. Never closed with done(): that starts a
+        fade-out whose callback outlives the deleted dialog and crashes a later test."""
         from ui.news_tab import MatchDialog
         from PyQt6.QtWidgets import QWidget
         host = QWidget()
@@ -411,7 +413,6 @@ class NewsTabTests(unittest.TestCase):
         self.assertTrue(dlg._cards[1].selected and not dlg._cards[0].selected)
         self.assertEqual(1, dlg.picked["id"])
         self.assertTrue(dlg.yesButton.isEnabled())
-        dlg.done(0)
 
     def test_pick_dialog_ignores_an_older_search_and_says_when_nothing_is_found(self):
         dlg = self.dialog([m(2, "Fate/Zero")])
@@ -425,7 +426,6 @@ class NewsTabTests(unittest.TestCase):
         self.assertIn("Nothing on AniList is called “zzz”", dlg.status.text())
         dlg._show(dlg._generation, [], "AniList couldn't be reached (URLError)")
         self.assertIn("press Enter to try again", dlg.status.text())
-        dlg.done(0)
 
     def test_notification_switch_is_saved(self):
         from ui.news_tab import NewsWidget
