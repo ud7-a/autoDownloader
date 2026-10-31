@@ -169,6 +169,7 @@ class AppWindow(FluentWindow):
         self.watch_later_interface = None
         self.watchlist_interface = None
         self.player_interface = None
+        self.news_interface = None
         self._tabs_built = False
         self.notifier = Notifier(self)   # Windows notifications (finished runs, new episodes)
 
@@ -588,6 +589,18 @@ class AppWindow(FluentWindow):
             return
         self.switchTo(self.watchlist_interface)
 
+    def _on_news_changes(self, changes):
+        """Anime news found a season announced, dated or starting: one Windows
+        notification per show, or one summary when there are many."""
+        if not app_settings.get("news_notify", True) or not changes:
+            return
+        if len(changes) > 3:
+            self.notifier.notify("Anime news", f"News about {len(changes)} shows in your "
+                                               "Library. Open Anime news to see it.")
+            return
+        for _title, message in changes:
+            self.notifier.notify("Anime news", message)
+
     def on_watch_later_add(self, title, url, domain, cover):
         # A Search result was saved for later -> add it (no profile) and show it.
         self.switchTo(self.watch_later_interface)
@@ -615,12 +628,15 @@ class AppWindow(FluentWindow):
         ("search_interface", FIF.SEARCH, "Search Anime"),
         ("watchlist_interface", FIF.HEART, "Watchlist"),
         ("watch_later_interface", FIF.LIBRARY, "Library"),
+        ("news_interface", FIF.MEGAPHONE, "Anime news"),
         ("manager_interface", FIF.SETTING, "Profile Manager"),
         ("player_interface", FIF.VIDEO, "Video Player"),
     )
     DEFERRED_WIDTHS = {"search_interface": 1700, "watchlist_interface": 1300,
-                       "watch_later_interface": 1300, "manager_interface": 1300,
-                       "player_interface": 1200}
+                       "watch_later_interface": 1300, "news_interface": 1300,
+                       "manager_interface": 1300, "player_interface": 1200}
+    NEWS_CHECK_DELAY_MS = 20 * 1000          # first background check, after start-up
+    NEWS_CHECK_EVERY_MS = 6 * 3600 * 1000    # then; each show is asked once a day
 
     def init_navigation(self):
         # Active Tasks is the one tab added later (when a download starts). The
@@ -747,8 +763,8 @@ class AppWindow(FluentWindow):
         self.switchTo(getattr(self, key))
 
     def _build_tabs(self):
-        """Build Search, Watchlist, Library, Profile Manager and Video Player, and
-        wire them up. Runs once, right after the window's first paint."""
+        """Build Search, Watchlist, Library, Anime news, Profile Manager and Video
+        Player, and wire them up. Runs once, right after the window's first paint."""
         if self._tabs_built:
             return
         self._tabs_built = True
@@ -757,10 +773,19 @@ class AppWindow(FluentWindow):
         from ui.manager_tab import SiteManagerWidget
         from ui.watchlist_tab import WatchlistWidget
         from ui.player_tab import PlayerWidget
+        from ui.news_tab import NewsWidget
         self.search_interface = AnimeSearchWidget(self)
         self.watchlist_interface = WatchlistWidget()
         self.manager_interface = SiteManagerWidget()
         self.player_interface = PlayerWidget()
+        self.news_interface = NewsWidget()
+        self.news_interface.changes_found.connect(self._on_news_changes)
+        # Anime news: a background check soon after start-up, then every few hours.
+        # Each show is asked at most once a day (utils/anime_news.MAX_AGE).
+        QTimer.singleShot(self.NEWS_CHECK_DELAY_MS, self.news_interface.check)
+        self._news_timer = QTimer(self)
+        self._news_timer.timeout.connect(self.news_interface.check)
+        self._news_timer.start(self.NEWS_CHECK_EVERY_MS)
         self._ensure_library()            # already built when started with --library
         for key, _icon, _text in self.DEFERRED_TABS:
             if key == "watch_later_interface":
@@ -926,6 +951,10 @@ class AppWindow(FluentWindow):
             pass
         try:
             threads += self.watch_later_interface.stop_threads()   # episode look-ups
+        except Exception:
+            pass
+        try:
+            threads += self.news_interface.stop_threads()          # AniList checks
         except Exception:
             pass
         for obj, attr in ((self.watchlist_interface, "_check_thread"),

@@ -10,6 +10,20 @@ See [the release guide](docs/RELEASING.md).
 
 ## Unreleased
 
+### 📰 New: Anime news tab
+- A new **Anime news** tab says what's next for every anime in your Library:
+  **Airing now** (with the next episode's day), **New season coming** (with its
+  start date when there is one), **Waiting for news** (the anime has ended but
+  the manga or novel it adapts hasn't), or **Finished**.
+- The news comes from AniList, needs no account, and is checked once a day in
+  the background. **Check now** asks straight away.
+- A wrong match is fixed from the **⋯** menu: **Not the right anime?** lists
+  AniList's entries to pick from, and the show keeps that pick.
+- A Windows notification says when a season is announced, gets a date or starts
+  airing. It can be turned off at the bottom of the tab.
+- **Finished** means the anime and its source have both ended. AniList can't
+  tell whether the whole story was animated.
+
 ## 5.1.0 — 2026-10-30
 
 ### ⏭️ New: skip openings and endings
