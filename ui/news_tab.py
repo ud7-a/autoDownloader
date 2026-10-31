@@ -53,15 +53,42 @@ def library_shows():
     return [e for e in wl.entries() if e.get("url") and e.get("title")]
 
 
+def _season_rank(title):
+    """How late a season a Library title names: its number ("2nd Season", "III",
+    "Part 2"), with any "Final" season after every numbered one."""
+    import re
+    from core.schedule import season_number
+    n = season_number(title or "") or 1
+    return n + 100 if re.search(r"\bfinal\b", title or "", re.IGNORECASE) else n
+
+
+def _added(entry):
+    try:
+        return float(entry.get("added") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def group_record(members, shows):
+    """The record a row shows for these Library entries: the one checked most
+    recently (another may be a day old), marked new if any of them changed."""
+    records = [shows[e["url"]] for e in members if isinstance(shows.get(e["url"]), dict)]
+    if not records:
+        return None
+    best = max(records, key=lambda r: float(r.get("checked_at") or 0))
+    changed = [r.get("changed_at") for r in records if isinstance(r.get("changed_at"), (int, float))]
+    return dict(best, changed_at=max(changed)) if changed else best
+
+
 def newest_per_anime(entries, shows):
     """[(entry, [other entries])]: one per anime. Library entries for different
     seasons of one anime ("Black Clover", "Black Clover 2nd Season") lead to the
     same newest season, so they'd show the same news twice; the newest season of
     them stands for all. Entries not matched or not checked yet stay on their own."""
-    from core.schedule import season_number
     groups, order = {}, []
     for e in entries:
-        state = (shows.get(e["url"]) or {}).get("state") or {}
+        rec = shows.get(e["url"])
+        state = (rec.get("state") if isinstance(rec, dict) else None) or {}
         key = ("anime", state["anilist_id"]) if state.get("anilist_id") else ("entry", e["url"])
         if key not in groups:
             groups[key] = []
@@ -69,7 +96,7 @@ def newest_per_anime(entries, shows):
         groups[key].append(e)
 
     def newest(e):
-        return (season_number(e.get("title")) or 1, float(e.get("added") or 0))
+        return (_season_rank(e.get("title")), _added(e))
     out = []
     for key in order:
         members = sorted(groups[key], key=newest, reverse=True)
@@ -549,12 +576,13 @@ class NewsWidget(QWidget):
         entries = library_shows()
         data = news.load()
         shows = data.get("shows", {})
-        kind_of = lambda e: ((shows.get(e["url"]) or {}).get("state") or {}).get("kind")
-        anime = newest_per_anime(entries, shows)
+        anime = [(e, others, group_record([e] + others, shows))
+                 for e, others in newest_per_anime(entries, shows)]
+        kind_of = lambda rec: ((rec or {}).get("state") or {}).get("kind")   # noqa: E731
         # Which Library entries each row stands for, for "Check this show".
-        self._group = {e["url"]: [e] + others for e, others in anime}
+        self._group = {e["url"]: [e] + others for e, others, _r in anime}
         for key, label, kinds in FILTERS:
-            n = sum(1 for e, _o in anime if kind_of(e) in kinds or key == "all")
+            n = sum(1 for _e, _o, rec in anime if kind_of(rec) in kinds or key == "all")
             self.seg.widget(key).setText(f"{label}  {n}")
         n = len(anime)
         when = checked_text(max((float((shows.get(e["url"]) or {}).get("checked_at") or 0)
@@ -567,10 +595,10 @@ class NewsWidget(QWidget):
             r.deleteLater()
         self._rows = []
         kinds = dict((k, ks) for k, _l, ks in FILTERS)[self._filter]
-        shown = [(e, o) for e, o in anime if self._filter == "all" or kind_of(e) in kinds]
-        shown.sort(key=lambda eo: (ORDER.get(kind_of(eo[0]), len(ORDER)), eo[0]["title"].lower()))
-        for e, others in shown:
-            row = NewsRow(e, shows.get(e["url"]), others)
+        shown = [a for a in anime if self._filter == "all" or kind_of(a[2]) in kinds]
+        shown.sort(key=lambda a: (ORDER.get(kind_of(a[2]), len(ORDER)), a[0]["title"].lower()))
+        for e, others, rec in shown:
+            row = NewsRow(e, rec, others)
             row.pick.connect(self.pick_match)
             row.recheck.connect(self.recheck)
             row.find.connect(self.find_in_search)

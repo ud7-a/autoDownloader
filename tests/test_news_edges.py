@@ -763,6 +763,179 @@ class SeasonsOfOneAnimeTests(TabBase):
         self.assertTrue(all(self.news.is_fresh(shows[u], now=2000) for u in ("bc1", "bc2")))
 
 
+class SeasonGroupingEdgeTests(TabBase):
+    """Edge cases of showing one row per anime (ui/news_tab.newest_per_anime,
+    group_record) and one notice per season (utils/anime_news.check)."""
+
+    def rec(self, newest_id, kind="coming", checked=1000.0, **extra):
+        return dict({"state": dict(self.state(kind), anilist_id=newest_id), "checked_at": checked}, **extra)
+
+    def groups(self, entries, shows):
+        from ui.news_tab import newest_per_anime
+        return [(e["url"], [o["url"] for o in others]) for e, others in newest_per_anime(entries, shows)]
+
+    # ---- who stands for whom
+    def test_nothing_and_one(self):
+        self.assertEqual([], self.groups([], {}))
+        self.assertEqual([("a", [])], self.groups([{"url": "a", "title": "A"}], {"a": self.rec(1)}))
+
+    def test_a_final_season_is_the_newest(self):
+        entries = [{"url": "s3", "title": "Shingeki no Kyojin Season 3"},
+                   {"url": "fs", "title": "Shingeki no Kyojin: The Final Season"},
+                   {"url": "fp2", "title": "Shingeki no Kyojin: The Final Season Part 2"},
+                   {"url": "s1", "title": "Shingeki no Kyojin"}]
+        shows = {u: self.rec(1) for u in ("s3", "fs", "fp2", "s1")}
+        self.assertEqual([("fp2", ["fs", "s3", "s1"])], self.groups(entries, shows))
+        from ui.news_tab import _season_rank
+        self.assertEqual([1, 2, 10, 101, 102], [_season_rank(t) for t in (
+            None, "X Season 2", "X Season 10", "X Final", "X FINAL Season Part 2")])
+
+    def test_arabic_and_roman_seasons(self):
+        entries = [{"url": "a1", "title": "ون بيس"}, {"url": "a3", "title": "ون بيس الموسم 3"},
+                   {"url": "r2", "title": "Mushoku Tensei II"}, {"url": "r1", "title": "Mushoku Tensei"}]
+        shows = {"a1": self.rec(1), "a3": self.rec(1), "r2": self.rec(2), "r1": self.rec(2)}
+        self.assertEqual([("a3", ["a1"]), ("r2", ["r1"])], self.groups(entries, shows))
+
+    def test_ties_and_bad_dates_added(self):
+        same = [{"url": "x1", "title": "X"}, {"url": "x2", "title": "X"}]
+        self.assertEqual([("x1", ["x2"])], self.groups(same, {"x1": self.rec(1), "x2": self.rec(1)}))
+        odd = [{"url": "b", "title": "X", "added": "yesterday"}, {"url": "c", "title": "X", "added": None},
+               {"url": "d", "title": None, "added": 5}]
+        shows = {u: self.rec(1) for u in "bcd"}
+        self.assertEqual([("d", ["b", "c"])], self.groups(odd, shows))    # no crash; d added last
+
+    def test_what_never_groups(self):
+        entries = [{"url": u, "title": "X"} for u in ("none", "nostate", "noid", "bad", "unknown", "real")]
+        shows = {"nostate": {"state": None}, "noid": {"state": {"kind": "waiting"}},
+                 "bad": "garbage", "unknown": {"state": {"kind": "unknown", "anilist_id": None}},
+                 "real": self.rec(1)}
+        self.assertEqual([(u, []) for u in ("none", "nostate", "noid", "bad", "unknown", "real")],
+                         self.groups(entries, shows))
+
+    def test_a_pick_elsewhere_splits_the_group(self):
+        entries = [{"url": "bc1", "title": "Black Clover"}, {"url": "bc2", "title": "Black Clover 2nd Season"}]
+        self.assertEqual([("bc2", ["bc1"])], self.groups(entries, {"bc1": self.rec(10), "bc2": self.rec(10)}))
+        self.assertEqual([("bc1", []), ("bc2", [])],
+                         self.groups(entries, {"bc1": self.rec(99), "bc2": self.rec(10)}))
+
+    # ---- what the row shows
+    def test_the_row_shows_the_freshest_record_of_its_seasons(self):
+        from ui.news_tab import group_record
+        old = self.rec(10, "coming", checked=500, match_title="Old")
+        new = self.rec(10, "airing", checked=900, match_title="New")
+        members = [{"url": "bc2"}, {"url": "bc1"}]
+        self.assertIs(new, group_record(members, {"bc2": old, "bc1": new}))
+        self.assertIsNone(group_record(members, {}))
+        self.assertIsNone(group_record(members, {"bc2": "garbage"}))
+        w = self.shows([{"url": "bc1", "title": "Black Clover"}, {"url": "bc2", "title": "Black Clover 2nd Season"}],
+                       {"bc2": old, "bc1": new})
+        row, = w._rows
+        self.assertEqual("bc2", row.url)                             # the newest season's entry ...
+        self.assertEqual("Airing  1", w.seg.widget("airing").text())  # ... with the freshest news
+        self.assertEqual("Coming  0", w.seg.widget("coming").text())
+        self.assertIsNotNone(row.btn_find)
+
+    def test_new_since_last_check_if_any_season_changed(self):
+        from ui.news_tab import group_record
+        a = self.rec(10, checked=900)
+        b = self.rec(10, checked=500, changed_at=time.time())
+        merged = group_record([{"url": "a"}, {"url": "b"}], {"a": a, "b": b})
+        self.assertEqual(a["state"], merged["state"])
+        self.assertTrue(self.news.is_fresh(merged))
+        self.assertNotIn("changed_at", a)                            # the stored record is untouched
+        both_old = group_record([{"url": "a"}, {"url": "c"}],
+                                {"a": a, "c": self.rec(10, changed_at="soon")})
+        self.assertFalse(self.news.is_fresh(both_old))
+
+    def test_the_also_line_and_counts(self):
+        entries = [{"url": "x1", "title": "X"}, {"url": "x3", "title": "X Season 3"},
+                   {"url": "x2", "title": "X Season 2"}, {"url": "y", "title": "Y"}]
+        w = self.shows(entries, {"x1": self.rec(1), "x2": self.rec(1), "x3": self.rec(1), "y": self.rec(2, "airing")})
+        self.assertEqual(["y", "x3"], [r.url for r in w._rows])      # airing first, then coming
+        texts = [lbl.text() for lbl in w._rows[1].findChildren(type(w.lead))]
+        self.assertIn("Also in your Library: X Season 2, X", texts)
+        self.assertTrue(w.lead.text().startswith("2 shows from your Library"))
+        self.assertEqual(("All  2", "Coming  1"), (w.seg.widget("all").text(), w.seg.widget("coming").text()))
+        w._switch("coming")
+        self.assertEqual(["x3"], [r.url for r in w._rows])
+        with mock.patch.object(w, "check") as check:
+            w.recheck("x3")                                          # after a filter switch too
+        self.assertEqual({"x1", "x2", "x3"}, {e["url"] for e in check.call_args.kwargs["entries"]})
+
+    def test_check_this_show_for_a_row_that_is_gone(self):
+        w = self.shows([{"url": "a", "title": "A"}], {"a": self.rec(1)})
+        with mock.patch("ui.news_tab.CheckThread") as thread:
+            w.recheck("gone")
+        thread.assert_not_called()
+
+    def test_find_in_search_uses_the_newest_season(self):
+        entries = [{"url": "bc1", "title": "Black Clover", "domain": "eta.animerco.org"},
+                   {"url": "bc2", "title": "Black Clover 2nd Season", "domain": "witanime.site"}]
+        w = self.shows(entries, {"bc1": self.rec(10, "airing"), "bc2": self.rec(10, "airing")})
+        got = []
+        w.search_requested.connect(lambda q, d: got.append((q, d)))
+        w._rows[0].btn_find.click()
+        self.assertEqual([("black clover", "witanime.site")], got)
+
+    # ---- one notice per season
+    def chain(self, s3_start=None, extra_sequel=True):
+        """Show S1 -> S2 (finished) -> S3 announced, as FakeAniList answers it."""
+        edges = [("SOURCE", manga("RELEASING"))]
+        if extra_sequel:
+            edges.append(("SEQUEL", m(3, "Show Season 3", status="NOT_YET_RELEASED", start=s3_start)))
+        s2 = m(2, "Show Season 2", end=(2026, 1, 1), relations=edges)
+        s1 = m(1, "Show", relations=[("SEQUEL", {"id": 2, "format": "TV", "status": "FINISHED"})])
+        return {1: s1, 2: s2}, {"show": [s1]}
+
+    def test_one_failing_season_still_gives_one_notice(self):
+        entries = [{"url": "a", "title": "Show"}, {"url": "b", "title": "Show 2nd Season"}]
+        self.news.check(entries, fetch=FakeAniList(*self.chain(extra_sequel=False)), gap=0, now=1000)
+        media, results = self.chain()
+        calls = {"n": 0}
+
+        def flaky(query, variables):
+            calls["n"] += 1
+            if calls["n"] == 1:                                     # the first show's request fails
+                raise self.news.NewsError("AniList answered HTTP 502")
+            return FakeAniList(media, results)(query, variables)
+        _s, changes, errors = self.news.check(entries, fetch=flaky, gap=0, force=True, now=2000)
+        self.assertEqual(1, len(errors))
+        self.assertEqual(["Show 2nd Season: Show Season 3 has been announced."], [c[1] for c in changes])
+
+    def test_a_season_already_told_isnt_told_again_by_a_lagging_entry(self):
+        entries = [{"url": "a", "title": "Show"}, {"url": "b", "title": "Show 2nd Season"}]
+        self.news.check(entries[:1], fetch=FakeAniList(*self.chain(extra_sequel=False)), gap=0, now=1000)
+        self.news.check(entries, fetch=FakeAniList(*self.chain()), gap=0, force=True, now=2000)   # b: first check
+        _s, changes, _e = self.news.check(entries, fetch=FakeAniList(*self.chain()), gap=0, force=True, now=3000)
+        self.assertEqual([], changes)
+
+    def test_two_anime_changing_in_one_check_are_two_notices(self):
+        media, results = self.chain(extra_sequel=False)
+        other2 = m(12, "Other Season 2", end=(2025, 1, 1), relations=[("SOURCE", manga("RELEASING"))])
+        other1 = m(11, "Other", relations=[("SEQUEL", {"id": 12, "format": "TV", "status": "FINISHED"})])
+        media.update({11: other1, 12: other2})
+        results["other"] = [other1]
+        entries = [{"url": "a", "title": "Show"}, {"url": "o", "title": "Other"}]
+        self.news.check(entries, fetch=FakeAniList(media, results), gap=0, now=1000)
+        media2, results2 = self.chain()
+        other2b = m(12, "Other Season 2", end=(2025, 1, 1), relations=[
+            ("SOURCE", manga("RELEASING")), ("SEQUEL", m(13, "Other Season 3", status="NOT_YET_RELEASED", start=None))])
+        media2.update({11: other1, 12: other2b})
+        results2["other"] = [other1]
+        _s, changes, _e = self.news.check(entries, fetch=FakeAniList(media2, results2), gap=0, force=True, now=2000)
+        self.assertEqual(["Show", "Other"], [c[0] for c in changes])
+
+    def test_two_seasons_saying_different_things_about_one_season(self):
+        """One entry last saw Season 3 undated, the other saw it in October; now it
+        has a full date: the first notice wins, the second is the same news."""
+        entries = [{"url": "a", "title": "Show"}, {"url": "b", "title": "Show 2nd Season"}]
+        self.news.check(entries[:1], fetch=FakeAniList(*self.chain()), gap=0, now=1000)
+        self.news.check(entries[1:], fetch=FakeAniList(*self.chain(s3_start=(2027, 10, None))), gap=0, now=1500)
+        _s, changes, _e = self.news.check(entries, fetch=FakeAniList(*self.chain(s3_start=(2027, 10, 2))),
+                                          gap=0, force=True, now=2000)
+        self.assertEqual([("Show", "Show: Show Season 3 now has a date, 2 October 2027.")], changes)
+
+
 class NewsTimersTests(unittest.TestCase):
     def test_background_checks_are_spaced(self):
         from ui.app_window import AppWindow
