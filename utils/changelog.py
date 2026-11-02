@@ -7,8 +7,9 @@ workflow stamps the "Unreleased" section with the version before it builds.
 
     ## 5.2.0 — 2026-11-03            a version section
     ### 📰 New: Anime news tab        a feature: its emoji, its title
-    - **Bold** and `code` lines,      its points (continuation lines are indented)
-      wrapped onto more lines.
+    <!-- app: Short and plain. -->    what the window says about it (hidden on GitHub)
+    - **Bold** and `code` lines,      its points, the details (continuation lines
+      wrapped onto more lines.        are indented)
 
 Pure text handling, no Qt; tools/release_notes.py uses the same section reading.
 """
@@ -64,15 +65,31 @@ def _split_emoji(title):
     return (m.group(1), m.group(2)) if m else ("", title)
 
 
+_SUMMARY = re.compile(r"^<!--\s*app:\s*(.*?)\s*-->$")
+
+
+def _first_sentence(rich):
+    """A point's first sentence, as plain text: the short version of a feature
+    whose notes have no "app:" line (releases from before there was one)."""
+    plain = html.unescape(re.sub(r"<[^>]+>", "", rich))
+    m = re.match(r"(.+?[.!?])(\s|$)", plain)
+    return (m.group(1) if m else plain).strip()
+
+
 def features(body):
-    """A version section's features: [{"emoji", "title", "points": [rich text]}].
-    Points before the first '###' become one untitled feature."""
+    """A version section's features: [{"emoji", "title", "summary", "points"}]
+    (summary and points as rich text). Points before the first '###' become one
+    untitled feature."""
     out = []
 
     def add(emoji, title, lines):
-        points, current = [], None
+        points, current, summary = [], None, ""
         for line in lines:
             stripped = line.strip()
+            m = _SUMMARY.match(stripped)
+            if m:
+                summary = _inline(m.group(1))
+                continue
             if not stripped:
                 current = None
                 continue
@@ -85,8 +102,10 @@ def features(body):
                 current = [stripped]
                 points.append(current)
         if title or points:
-            out.append({"emoji": emoji, "title": title,
-                        "points": [_inline(" ".join(p)) for p in points]})
+            rich = [_inline(" ".join(p)) for p in points]
+            out.append({"emoji": emoji, "title": title, "points": rich,
+                        "summary": summary or (html.escape(_first_sentence(rich[0]), quote=False)
+                                               if rich else "")})
 
     marks = list(_FEATURE.finditer(body or ""))
     head = (body or "")[:marks[0].start()] if marks else (body or "")

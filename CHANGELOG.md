@@ -3,7 +3,9 @@
 What changed in each release. The section for a version is what appears on its
 GitHub release page.
 
-Add new entries under **Unreleased**. The manually dispatched Release workflow
+Add new entries under **Unreleased**. Under each `###` heading, an
+`<!-- app: ... -->` line is the short version the app's "What's new" window shows
+(hidden on the release page). The manually dispatched Release workflow
 stamps that section with the release version. For a manual tag release, run
 `python tools/release_notes.py --stamp X.Y.Z` before committing and tagging.
 See [the release guide](docs/RELEASING.md).
@@ -11,6 +13,7 @@ See [the release guide](docs/RELEASING.md).
 ## Unreleased
 
 ### ✨ New: What's new after an update
+<!-- app: After each update, this window shows what's new. To see it again, use Check for updates. -->
 - The first launch after an update shows what changed, one page per new
   feature: **Next**, the dots or the arrow keys move through them, and a button
   on a page opens the tab it's about. Skipped several updates? It covers them
@@ -19,9 +22,11 @@ See [the release guide](docs/RELEASING.md).
   has a **What's new** button.
 
 ### 🐛 Fixes
+<!-- app: Turning off Anime news notifications now stays off after a restart. -->
 - Turning off Anime news notifications now lasts after the app restarts.
 
 ### 🔁 witanime: Google Drive first
+<!-- app: witanime downloads now try Google Drive first. Your profiles switch over by themselves, unless you changed them. -->
 - New witanime profiles try **Google Drive first**, then Mediafire, wtsrv,
   Workupload, mp4upload, gofile and wahmi. The Google path is now called
   **"FHD - Google"**.
@@ -33,6 +38,7 @@ See [the release guide](docs/RELEASING.md).
   that keeps exactly what its file holds.
 
 ### 📰 New: Anime news tab
+<!-- app: A new tab shows what's next for every anime in your Library: airing now, a new season coming, or finished. -->
 - A new **Anime news** tab says what's next for every anime in your Library:
   **Airing now** (with the next episode's day), **New season coming** (with its
   start date when there is one), **Waiting for news** (the anime has ended but
@@ -49,6 +55,7 @@ See [the release guide](docs/RELEASING.md).
 ## 5.1.0 — 2026-10-30
 
 ### ⏭️ New: skip openings and endings
+<!-- app: The app finds each episode's opening and ending. Press K in the player to skip them. -->
 - Once an anime has **three or more episodes** downloaded, the app finds each
   episode's opening and ending by itself, from the audio: the songs repeat from
   one episode to the next, wherever the episode puts them. It runs in the
@@ -63,6 +70,7 @@ See [the release guide](docs/RELEASING.md).
 - Library: the **⋯** menu shows how many openings were found and can look again.
 
 ### 🧹 New: free up space
+<!-- app: Watched episodes can be deleted for you to save space. Turn it on in the Library. -->
 - Library → **Free up space**: delete episodes after you watch them, keeping the
   last 1, 2, 3 or 5. Off until you choose a number. Deleted episodes go to the
   **Recycle Bin** or are **deleted permanently**, your choice.
@@ -73,6 +81,7 @@ See [the release guide](docs/RELEASING.md).
   **Delete watched** to clear one anime now (it asks first).
 
 ### 🎬 Video Player
+<!-- app: Shortcuts work on any keyboard language, playback is smoother, and both picture profiles look better. -->
 - **Shortcuts work on Arabic, Russian and Hebrew keyboard layouts**: with one
   of those active, mpv.net ignored letter shortcuts (K, P, Ctrl+S...). They now
   do the same as on an English layout. Installed automatically.
@@ -99,6 +108,7 @@ See [the release guide](docs/RELEASING.md).
 ## 5.0.0 — 2026-10-12
 
 ### 📚 New: the Library tab (replaces History)
+<!-- app: Everything you watch, in one place: what you're watching, what's next, and one click to continue. -->
 - **Watching / Watch later / Completed** lists for every anime you download or
   save from Search, with a **Continue watching** strip that plays the next
   episode in one click.
@@ -130,11 +140,13 @@ See [the release guide](docs/RELEASING.md).
     that stopped working when it starts.
 
 ### ⚡ Opens faster
+<!-- app: The app opens about a third faster. -->
 - The window appears about a third sooner: it no longer waits for the cloud
   check before opening, the other tabs are built right after the window shows,
   and libraries the app never uses are no longer loaded at launch.
 
 ### ⬇️ Downloads
+<!-- app: Downloads try another server when a link is dead, and check for free space before they start. -->
 - A download link that turns out to be dead now makes the episode try its next
   server, instead of counting it as downloaded.
 - Episodes with no working FHD mirror fall back to HD.
@@ -149,6 +161,7 @@ See [the release guide](docs/RELEASING.md).
   making a copy, and its episode range grows as new episodes come out.
 
 ### 🔔 Notifications
+<!-- app: Windows notifications when downloads finish or new episodes come out, and no more repeated Discord posts. -->
 - **Windows notifications** when downloads finish and when new episodes are
   found (skipped while you are using the app).
 - **Discord: each new episode is posted once.** No more repeats every 30
@@ -157,11 +170,13 @@ See [the release guide](docs/RELEASING.md).
   Watchlist.
 
 ### ✨ Look and feel
+<!-- app: Smoother menus and tooltips that match the rest of the app. -->
 - Every hint now uses the app's own Fluent tooltip, and dropdowns open smoothly
   instead of stuttering.
 - mpv.net: **Ctrl+1** (shaders off/on) works again on newer mpv.net versions.
 
 ### 🔄 Updates
+<!-- app: Updates can be checked for any time, cancelled, and retried if they fail. -->
 - **Check for updates** button at the bottom of the sidebar.
 - The update download can be cancelled, and a stalled connection no longer
   freezes the app.

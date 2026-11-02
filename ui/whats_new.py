@@ -1,20 +1,24 @@
 """The "What's new" window: shown once, on the first launch after an update.
 
 One page per feature of the new version (or of each version since the one last
-shown), straight from the bundled CHANGELOG.md (utils/changelog.py): its emoji,
-title and points. Next / the pips / the arrow keys move between pages; "Show me"
-closes the window on the tab the feature is about. Closing it any way counts as
-seen. It can be opened again from "Check for updates" when the app is up to date.
+shown), from the bundled CHANGELOG.md (utils/changelog.py): a Fluent icon, the
+title and the short "app:" line written for users; "More details" opens the full
+notes. Next / the pips / the arrow keys move between pages; a page about a tab
+has a button that closes the window there. Closing it any way counts as seen. It
+can be opened again from "Check for updates" when the app is up to date.
 """
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QStackedWidget, QVBoxLayout, QWidget
 
-from qfluentwidgets import (BodyLabel, FluentIcon as FIF, MessageBoxBase, PipsPager,
+from qfluentwidgets import (FluentIcon as FIF, MessageBoxBase, PipsPager,
                             PipsScrollButtonDisplayMode, PushButton, SmoothScrollArea,
-                            SubtitleLabel)
+                            TransparentPushButton)
 
 from utils import changelog
 from utils.config import APP_VERSION, app_settings, config_lock, save_config
+
+ACCENT = "#4cc2ff"
 
 # Which tab a feature is about, by words in its title: (words, tab, button text).
 # First match wins, so the specific come before the general.
@@ -31,6 +35,24 @@ TARGETS = (
     ("download", "downloader_interface", "Open the Downloader"),
 )
 
+# The icon a feature gets, by words in its title (the changelog's emoji are not
+# used: Windows draws them poorly). First match wins.
+ICONS = (
+    ("what's new", FIF.TAG),
+    ("anime news", FIF.MEGAPHONE),
+    ("skip opening", FIF.PAGE_RIGHT),         # SKIP_FORWARD draws "30 s"
+    ("free up space", FIF.BROOM),
+    ("video player", FIF.VIDEO),
+    ("library", FIF.LIBRARY),
+    ("witanime", FIF.CLOUD_DOWNLOAD),
+    ("download", FIF.DOWNLOAD),
+    ("notification", FIF.RINGER),
+    ("faster", FIF.SPEED_HIGH),
+    ("look", FIF.PALETTE),
+    ("update", FIF.UPDATE),
+    ("fix", FIF.DEVELOPER_TOOLS),
+)
+
 
 def target_for(title):
     """(tab key, button text) for a feature title, or None."""
@@ -39,6 +61,11 @@ def target_for(title):
         if words in low:
             return key, label
     return None
+
+
+def icon_for(title):
+    low = (title or "").lower()
+    return next((icon for words, icon in ICONS if words in low), FIF.INFO)
 
 
 def pages_from(versions):
@@ -56,94 +83,123 @@ def _long_date(iso):
     return f"{d.day} {d.strftime('%B %Y')}"
 
 
+def _label(text, size, color="#ffffff", weight=400, rich=False):
+    label = QLabel(text)
+    label.setWordWrap(True)
+    if rich:
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setOpenExternalLinks(True)
+    label.setStyleSheet(f"color: {color}; background: transparent; font-size: {size}px; "
+                        f"font-weight: {weight};")
+    return label
+
+
 class FeaturePage(QWidget):
     show_me = pyqtSignal(str)            # tab key
+
+    DETAILS_HEIGHT = 230                 # px the notes open into, then scroll
 
     def __init__(self, version, date, feature, several_versions, parent=None):
         super().__init__(parent)
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 4, 0, 0)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 8, 0, 0)
+        root.setSpacing(16)
 
         head = QHBoxLayout()
-        head.setSpacing(14)
-        tile = QLabel(feature.get("emoji") or "✨")
-        tile.setFixedSize(52, 52)
+        head.setSpacing(18)
+        tile = QLabel()
+        tile.setFixedSize(64, 64)
         tile.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tile.setStyleSheet("background: rgba(255, 255, 255, 0.06); border-radius: 10px; "
-                           "font-size: 24px;")
+        tile.setPixmap(icon_for(feature.get("title")).icon(color=QColor(ACCENT)).pixmap(30, 30))
+        tile.setStyleSheet("background: rgba(76, 194, 255, 0.14); border-radius: 14px;")
         head.addWidget(tile, 0, Qt.AlignmentFlag.AlignTop)
+
         names = QVBoxLayout()
-        names.setSpacing(4)
+        names.setSpacing(6)
         title = feature.get("title") or "Other changes"
-        is_new = title.lower().startswith("new:")
         top = QHBoxLayout()
-        top.setSpacing(8)
-        if is_new:
+        top.setSpacing(10)
+        if title.lower().startswith("new:"):
             title = title[4:].strip()
             # The QLabel.BadgeSuccess look, inline: a dialog's own stylesheet keeps
             # the app-wide class rule from reaching labels inside it.
             badge = QLabel("New")
             badge.setStyleSheet("background: rgba(81, 207, 102, 0.15); color: #51cf66; "
-                                "border: 1px solid rgba(81, 207, 102, 0.3); border-radius: 10px; "
-                                "padding: 2px 8px; font-size: 11px; font-weight: bold;")
+                                "border: 1px solid rgba(81, 207, 102, 0.3); border-radius: 11px; "
+                                "padding: 3px 10px; font-size: 12px; font-weight: bold;")
             top.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.title = QLabel(title[:1].upper() + title[1:])
-        self.title.setWordWrap(True)
-        self.title.setStyleSheet("color: #ffffff; background: transparent; font-size: 17px; "
-                                 "font-weight: 600;")
+        self.title = _label(title[:1].upper() + title[1:], 22, weight=600)
         top.addWidget(self.title, 1)
         names.addLayout(top)
-        when = [f"Version {version}"] if several_versions else []
-        if date and several_versions:
-            when.append(_long_date(date))
-        if when:
-            sub = QLabel(" · ".join(p for p in when if p))
-            sub.setStyleSheet("color: #999999; background: transparent; font-size: 12px;")
-            names.addWidget(sub)
+        if several_versions:
+            when = " · ".join(p for p in (f"Version {version}", _long_date(date)) if p)
+            names.addWidget(_label(when, 13, "#999999"))
         head.addLayout(names, 1)
         root.addLayout(head)
 
-        scroll = SmoothScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        host = QWidget()
-        host.setStyleSheet("background: transparent;")
-        col = QVBoxLayout(host)
-        col.setContentsMargins(0, 0, 10, 0)
-        col.setSpacing(10)
-        col.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.points = []
-        for point in feature.get("points") or []:
-            row = QHBoxLayout()
-            row.setSpacing(10)
-            dot = QLabel("•")
-            dot.setStyleSheet("color: #4cc2ff; background: transparent; font-size: 14px;")
-            row.addWidget(dot, 0, Qt.AlignmentFlag.AlignTop)
-            text = QLabel(point)
-            text.setTextFormat(Qt.TextFormat.RichText)
-            text.setWordWrap(True)
-            text.setOpenExternalLinks(True)
-            text.setStyleSheet("color: #dddddd; background: transparent; font-size: 14px;")
-            row.addWidget(text, 1)
-            col.addLayout(row)
-            self.points.append(text)
-        scroll.setWidget(host)
-        root.addWidget(scroll, 1)
+        # The short version, for everyone; the full notes on request.
+        self.summary = _label(feature.get("summary") or "", 17, "#e8e8e8", rich=True)
+        root.addWidget(self.summary)
 
+        # Under it: the tab it's about, and the full notes on request.
+        actions = QHBoxLayout()
+        actions.setSpacing(12)
         target = target_for(feature.get("title"))
         self.button = None
         if target:
             key, label = target
             self.button = PushButton(FIF.RIGHT_ARROW, label)
             self.button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.button.setMinimumHeight(40)
             self.button.clicked.connect(lambda: self.show_me.emit(key))
-            root.addWidget(self.button, 0, Qt.AlignmentFlag.AlignLeft)
+            actions.addWidget(self.button)
+        self.details_button = None
+        self.details = None
+        self.points = []
+        if feature.get("points"):
+            self.details_button = TransparentPushButton(FIF.CHEVRON_RIGHT_MED, "More details")
+            self.details_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.details_button.setMinimumHeight(40)
+            self.details_button.clicked.connect(self.toggle_details)
+            actions.addWidget(self.details_button)
+        actions.addStretch(1)
+        root.addLayout(actions)
+        if feature.get("points"):
+            self.details = SmoothScrollArea()
+            self.details.setMaximumHeight(self.DETAILS_HEIGHT)
+            self.details.setWidgetResizable(True)
+            self.details.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.details.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+            host = QWidget()
+            host.setStyleSheet("background: transparent;")
+            col = QVBoxLayout(host)
+            col.setContentsMargins(4, 0, 10, 0)
+            col.setSpacing(10)
+            col.setAlignment(Qt.AlignmentFlag.AlignTop)
+            for point in feature["points"]:
+                row = QHBoxLayout()
+                row.setSpacing(10)
+                row.addWidget(_label("•", 15, ACCENT), 0, Qt.AlignmentFlag.AlignTop)
+                text = _label(point, 15, "#c8c8c8", rich=True)
+                row.addWidget(text, 1)
+                col.addLayout(row)
+                self.points.append(text)
+            self.details.setWidget(host)
+            self.details.hide()
+            root.addWidget(self.details)
+        root.addStretch(1)
+
+    def toggle_details(self):
+        show = not self.details.isVisibleTo(self)
+        self.details.setVisible(show)
+        self.details_button.setText("Fewer details" if show else "More details")
+        self.details_button.setIcon(FIF.CHEVRON_DOWN_MED if show else FIF.CHEVRON_RIGHT_MED)
 
 
 class WhatsNewDialog(MessageBoxBase):
     """Pages of features. `opened` (a tab key) is set when "Show me" closed it."""
+
+    MIN_WIDTH, MAX_WIDTH = 760, 980       # px; within these, 72% of the window
 
     def __init__(self, versions, parent=None):
         super().__init__(parent)
@@ -158,20 +214,20 @@ class WhatsNewDialog(MessageBoxBase):
             heading = f"What's new since version {self._previous(versions)}"
         else:
             heading = f"What's new in version {versions[0][0]}"
-        head.addWidget(SubtitleLabel(heading), 1)
-        self.counter = BodyLabel("")
-        self.counter.setStyleSheet("color: #999999;")
+        head.addWidget(_label(heading, 26, weight=600), 1)
+        self.counter = _label("", 14, "#999999")
+        self.counter.setWordWrap(False)
         head.addWidget(self.counter, 0, Qt.AlignmentFlag.AlignVCenter)
         self.viewLayout.addLayout(head)
         if not several and versions[0][1]:
-            released = QLabel(f"Released {_long_date(versions[0][1])}")
-            released.setStyleSheet("color: #999999; background: transparent; font-size: 13px;")
-            self.viewLayout.addWidget(released)
+            self.viewLayout.addWidget(_label(f"Released {_long_date(versions[0][1])}", 14, "#999999"))
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("whatsNewPages")
         self.stack.setStyleSheet("#whatsNewPages, #whatsNewPages > QWidget { background: transparent; }")
-        self.stack.setMinimumHeight(260)
+        # Tall enough for a page with its details open: opening them doesn't
+        # resize the window.
+        self.stack.setMinimumHeight(FeaturePage.DETAILS_HEIGHT + 220)
         self.pages = []
         for version, date, feature in pages:
             page = FeaturePage(version, date, feature, several)
@@ -190,7 +246,8 @@ class WhatsNewDialog(MessageBoxBase):
         self.viewLayout.addWidget(self.pager, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.cancelButton.setText("Close")
-        self.widget.setMinimumWidth(640)
+        width = int(parent.width() * 0.72) if parent is not None else self.MIN_WIDTH
+        self.widget.setFixedWidth(max(self.MIN_WIDTH, min(self.MAX_WIDTH, width)))
         self.go(0)
 
     @staticmethod
@@ -217,9 +274,8 @@ class WhatsNewDialog(MessageBoxBase):
         """Next turns the page; only the last page's button closes."""
         if self._closing_to:
             return True
-        index = self._index
-        if index < len(self.pages) - 1:
-            self.go(index + 1)
+        if self._index < len(self.pages) - 1:
+            self.go(self._index + 1)
             return False
         return True
 

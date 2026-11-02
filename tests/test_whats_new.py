@@ -33,6 +33,7 @@ Intro text.
 ## 5.2.0 — 2026-11-03
 
 ### 🔁 witanime: Google Drive first
+<!-- app: Downloads try **Google** first. -->
 - Google **first**.
 
 ## 5.1.0 — 2026-10-30
@@ -84,6 +85,21 @@ class ChangelogTests(unittest.TestCase):
         self.assertEqual(['One &lt;b&gt;fix&lt;/b&gt; &amp; <a href="https://example.com/x">a link</a>.'],
                          feats[2]["points"])                         # escaped, link kept
 
+    def test_the_short_version(self):
+        """The window shows each feature's "app:" line; notes from before there was
+        one get their first sentence, as plain text."""
+        feats = self.c.features(dict(self.c.sections(LOG))["5.2.0 — 2026-11-03"])
+        self.assertEqual("Downloads try <b>Google</b> first.", feats[0]["summary"])
+        self.assertEqual(["Google <b>first</b>."], feats[0]["points"])    # not a point itself
+        old = self.c.features(dict(self.c.sections(LOG))["5.1.0 — 2026-10-30"])
+        self.assertEqual("A loose point before any feature.", old[0]["summary"])
+        self.assertEqual("One &lt;b&gt;fix&lt;/b&gt; &amp; a link.", old[2]["summary"])   # plain, escaped
+        two = self.c.features("### X\n- First one. Second one.\n- Other.")[0]
+        self.assertEqual("First one.", two["summary"])
+        none = self.c.features("### Only a title\n")[0]
+        self.assertEqual(("", []), (none["summary"], none["points"]))
+        self.assertEqual("x", self.c.features("### Y\n<!--app:x-->\n- p")[0]["summary"])
+
     def test_inline_markup_and_wrapping(self):
         feats = self.c.features(dict(self.c.sections(LOG))["Unreleased"])
         self.assertEqual(["A new <b>Anime news</b> tab, see <code>news_tab.py</code>.",
@@ -131,6 +147,12 @@ class ChangelogTests(unittest.TestCase):
         for title, body in self.c.sections(text):
             for f in self.c.features(body):
                 self.assertTrue(f["points"], f"{title}: {f['title']} has no points")
+                self.assertTrue(f["summary"], f"{title}: {f['title']} has nothing short to say")
+        # The versions the window can show have a short version written for users.
+        from utils.changelog import MAX_VERSIONS
+        for _v, _d, feats in self.c.changes_since(text, "0", APP_VERSION)[:MAX_VERSIONS]:
+            for f in feats:
+                self.assertLess(len(f["summary"]), 160, f["title"])
         self.assertTrue(self.c.changes_since(text, "0", APP_VERSION))
 
     def test_the_release_tool_reads_sections_the_same_way(self):
@@ -185,9 +207,48 @@ class WindowTests(Qt):
         self.assertEqual("Open Profile Manager", dlg.pages[0].button.text())
         self.assertIsNone(dlg.pages[1].button)
         self.assertTrue(dlg.pages[3].points[0].openExternalLinks())
+        self.assertEqual("Downloads try <b>Google</b> first.", dlg.pages[0].summary.text())
         self.assertEqual("1 of 4", dlg.counter.text())
         self.assertEqual("Next", dlg.yesButton.text())
         self.assertTrue(dlg.pager.isVisibleTo(dlg))
+
+    def test_details_on_request(self):
+        dlg = self.dialog(self.versions())
+        page = dlg.pages[0]
+        self.assertFalse(page.details.isVisibleTo(page))             # short version first
+        self.assertEqual("More details", page.details_button.text())
+        page.details_button.click()
+        self.assertTrue(page.details.isVisibleTo(page))
+        self.assertEqual("Fewer details", page.details_button.text())
+        self.assertLessEqual(page.details.maximumHeight(), page.DETAILS_HEIGHT)
+        self.assertGreaterEqual(dlg.stack.minimumHeight(), page.DETAILS_HEIGHT)   # no resize
+        page.details_button.click()
+        self.assertFalse(page.details.isVisibleTo(page))
+
+    def test_fluent_icons_not_emoji(self):
+        from qfluentwidgets import FluentIcon as FIF
+        from ui.whats_new import icon_for
+        self.assertIs(FIF.MEGAPHONE, icon_for("New: Anime news tab"))
+        self.assertIs(FIF.PAGE_RIGHT, icon_for("New: skip openings and endings"))
+        self.assertIs(FIF.TAG, icon_for("New: What's new after an update"))
+        self.assertIs(FIF.DEVELOPER_TOOLS, icon_for("Fixes"))
+        self.assertIs(FIF.INFO, icon_for("Something else"))
+        from PyQt6.QtWidgets import QLabel
+        dlg = self.dialog(self.versions())
+        texts = " ".join(lbl.text() for lbl in dlg.findChildren(QLabel))
+        for emoji in ("🔁", "⏭️", "📰"):
+            self.assertNotIn(emoji, texts)
+
+    def test_size_follows_the_window(self):
+        from PyQt6.QtWidgets import QWidget
+        from ui.whats_new import WhatsNewDialog
+        for window_width, expected in ((900, WhatsNewDialog.MIN_WIDTH), (1200, 864),
+                                       (2560, WhatsNewDialog.MAX_WIDTH)):
+            host = QWidget()
+            host.resize(window_width, 900)
+            self.addCleanup(host.deleteLater)
+            dlg = WhatsNewDialog(self.versions(), host)
+            self.assertEqual(expected, dlg.widget.width(), window_width)
 
     def test_next_turns_pages_until_the_last(self):
         dlg = self.dialog(self.versions())
@@ -349,7 +410,7 @@ class AppWindowTests(unittest.TestCase):
         from PyQt6.QtCore import QTimer
         from PyQt6.QtWidgets import QApplication, QWidget
         from ui.app_window import AppWindow
-        app = QApplication.instance() or QApplication([])
+        app = type(self)._app = QApplication.instance() or QApplication([])   # outlives the test
         owner = QWidget()
         fired = []
         timer = AppWindow._later(owner, 50, lambda: fired.append(1))
