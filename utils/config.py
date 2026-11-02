@@ -48,6 +48,11 @@ app_settings = {
     "migrations_done": [],
     # Windows notifications for finished downloads and new episodes (ui/notifier.py).
     "windows_notifications": True,
+    # Anime news: notify when a season is announced, dated or starts (ui/news_tab.py).
+    # Every setting must be listed here: load_config reads back only these keys.
+    "news_notify": True,
+    # The version whose "What's new" was last shown (ui/whats_new.py); "" until then.
+    "whats_new_seen": "",
     # Followed anime for the new-episode watcher. Each entry:
     # {"title", "url", "domain", "seen_max", "latest_template", "latest_max", "checked"}
     "watchlist": [],
@@ -289,6 +294,8 @@ def load_config():
         # flows, so every migration counts as applied. Leaving the list empty let a
         # later launch run one -- re-adding a path the user had since deleted.
         app_settings["migrations_done"] = [mig_id for mig_id, _fn in _PROFILE_MIGRATIONS]
+        # Nothing is new to someone who has just installed it.
+        app_settings["whats_new_seen"] = APP_VERSION
         save_config()
 
 # --- Watchlist helpers (followed anime for the new-episode watcher) ---

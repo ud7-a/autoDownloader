@@ -87,6 +87,7 @@ BUNDLE_DATA = [
     ("tools/aria2c.exe", "tools"),                    # the downloader
     ("tools/unrar.exe", "tools"),                     # RAR episodes
     ("tools/ublock_lite.crx", "tools"),               # the browser's ad blocker
+    ("CHANGELOG.md", "."),                            # "What's new" after an update
 ]
 
 
@@ -103,6 +104,7 @@ APP_FLAGS = APP_FLAGS + data_flags() + ["main.py"]
 # Files that must survive into the bundle. A build that silently loses one of these
 # still launches, then fails at runtime on a user's machine -- so fail here instead.
 REQUIRED_IN_BUNDLE = [
+    os.path.join("_internal", "CHANGELOG.md"),          # read by "What's new"
     os.path.join("_internal", "tools", "aria2c.exe"),
     os.path.join("_internal", "tools", "unrar.exe"),
     os.path.join("_internal", "tools", "ublock_lite.crx"),

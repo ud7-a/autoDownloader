@@ -260,6 +260,8 @@ class AppWindow(FluentWindow):
             # main.py no longer fetches commands before showing it.
             QTimer.singleShot(0, self._poll_cloud_commands)
 
+        # Started by a remote download command: no "What's new" over it this launch.
+        self._remote_start = bool(autostart_commands)
         if autostart_commands:
             QTimer.singleShot(600, lambda: self._execute_remote_commands(autostart_commands))
         # Started by Play next for an episode that isn't downloaded: once the
@@ -477,9 +479,15 @@ class AppWindow(FluentWindow):
         threading.Thread(target=check_for_updates, kwargs={"manual": True}, daemon=True).start()
 
     def _show_update_check_result(self, level, message):
-        from qfluentwidgets import InfoBar, InfoBarPosition
+        from qfluentwidgets import InfoBar, InfoBarPosition, PushButton
         show = {"success": InfoBar.success, "error": InfoBar.error}.get(level, InfoBar.info)
-        show("Updates", message, position=InfoBarPosition.TOP, duration=5000, parent=self)
+        bar = show("Updates", message, position=InfoBarPosition.TOP, duration=5000, parent=self)
+        if level == "success":                # up to date: this version's notes, again
+            btn = PushButton("What's new")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda: (bar.close(), self.show_whats_new()))
+            bar.addWidget(btn)
+        return bar
 
     def prompt_update(self, info):
         """Offer a newer release (core/updater.py) and install it on Yes. Asked
@@ -601,6 +609,37 @@ class AppWindow(FluentWindow):
         for _title, message in changes:
             self.notifier.notify("Anime news", message)
 
+    def _later(self, msec, slot):
+        """Run `slot` once after `msec`, on a timer owned by this window: it goes
+        with the window, so it can never fire into one already destroyed (a bare
+        QTimer.singleShot can, and crashes the process)."""
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(slot)
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(msec)
+        return timer
+
+    def _maybe_show_whats_new(self):
+        """The first launch after an update shows what changed. Not over a
+        download (remote ones start right at launch) or an update prompt, nor for
+        a window that isn't on screen: then it waits for the next launch, unseen."""
+        from ui import whats_new
+        if self._download_running or self._update_busy or self._remote_start or not self.isVisible():
+            return
+        versions = whats_new.pending()
+        if versions:
+            whats_new.show(self, versions, self.open_tab)
+        elif (app_settings.get("whats_new_seen") or "") != APP_VERSION:
+            whats_new.mark_seen()             # nothing to tell (no notes, a downgrade)
+
+    def show_whats_new(self):
+        """This version's "What's new" on demand (the up-to-date notice's button)."""
+        from ui import whats_new
+        from utils import changelog
+        whats_new.show(self, changelog.whats_new(changelog.read_bundled(), "", APP_VERSION),
+                       self.open_tab)
+
     def _on_news_search(self, query, domain):
         """Anime news' Find in Search: the Search tab, already searching."""
         self.open_tab("search_interface")
@@ -642,6 +681,7 @@ class AppWindow(FluentWindow):
                        "manager_interface": 1300, "player_interface": 1200}
     NEWS_CHECK_DELAY_MS = 20 * 1000          # first background check, after start-up
     NEWS_CHECK_EVERY_MS = 6 * 3600 * 1000    # then; each show is asked once a day
+    WHATS_NEW_DELAY_MS = 1200                # after the tabs are built and painted
 
     def init_navigation(self):
         # Active Tasks is the one tab added later (when a download starts). The
@@ -788,7 +828,7 @@ class AppWindow(FluentWindow):
         self.news_interface.search_requested.connect(self._on_news_search)
         # Anime news: a background check soon after start-up, then every few hours.
         # Each show is asked at most once a day (utils/anime_news.MAX_AGE).
-        QTimer.singleShot(self.NEWS_CHECK_DELAY_MS, self.news_interface.check)
+        self._later(self.NEWS_CHECK_DELAY_MS, self.news_interface.check)
         self._news_timer = QTimer(self)
         self._news_timer.timeout.connect(self.news_interface.check)
         self._news_timer.start(self.NEWS_CHECK_EVERY_MS)
@@ -826,6 +866,9 @@ class AppWindow(FluentWindow):
             self._watchlist_timer = QTimer(self)
             self._watchlist_timer.timeout.connect(self.watchlist_interface.check_today)
             self._watchlist_timer.start(30 * 60 * 1000)  # Check today's releases every 30 minutes
+
+        # What's new: once, on the first launch after an update.
+        self._later(self.WHATS_NEW_DELAY_MS, self._maybe_show_whats_new)
 
         hook = getattr(self, "tabs_built_hook", None)     # main.py's startup log
         if hook:

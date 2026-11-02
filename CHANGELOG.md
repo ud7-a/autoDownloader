@@ -10,6 +10,17 @@ See [the release guide](docs/RELEASING.md).
 
 ## Unreleased
 
+### ✨ New: What's new after an update
+- The first launch after an update shows what changed, one page per new
+  feature: **Next**, the dots or the arrow keys move through them, and a button
+  on a page opens the tab it's about. Skipped several updates? It covers them
+  all, up to the last three.
+- To see it again, use **Check for updates**: when you're up to date, the notice
+  has a **What's new** button.
+
+### 🐛 Fixes
+- Turning off Anime news notifications now lasts after the app restarts.
+
 ### 🔁 witanime: Google Drive first
 - New witanime profiles try **Google Drive first**, then Mediafire, wtsrv,
   Workupload, mp4upload, gofile and wahmi. The Google path is now called

@@ -18,24 +18,11 @@ import re
 import sys
 from datetime import date
 
-CHANGELOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         "CHANGELOG.md")
-UNRELEASED = "Unreleased"
-_HEADING = re.compile(r"^## +(.+?)[ \t]*$", re.M)
-
-
-def _sections(text):
-    """[(title, body)] for every '## ' section, in file order."""
-    marks = list(_HEADING.finditer(text))
-    out = []
-    for i, m in enumerate(marks):
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        out.append((m.group(1), text[m.end():end].strip("\n")))
-    return out
-
-
-def _is_version(title, version):
-    return re.match(rf"^v?{re.escape(version)}(\s|$)", title) is not None
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CHANGELOG = os.path.join(ROOT, "CHANGELOG.md")
+sys.path.insert(0, ROOT)
+# The app reads its bundled changelog the same way for "What's new".
+from utils.changelog import UNRELEASED, is_version as _is_version, sections as _sections  # noqa: E402
 
 
 def notes_for(text, version):
