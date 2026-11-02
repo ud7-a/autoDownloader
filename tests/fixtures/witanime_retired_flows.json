@@ -1,0 +1,235 @@
+{
+    "_about": "Witanime flows the app shipped before the current one (from git history): profiles still holding one of these are moved to the current flow once.",
+    "flows": {
+        "ba06e51": {
+            "shipped": "2026-10-10",
+            "next_btn_xpath": "الحلقة التالية",
+            "step_paths": {
+                "FHD - Mediafire": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 1.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mediafire')]",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//*[@id=\"downloadButton\"]",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - Google Drive": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 2.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]",
+                        "delay": 3.0
+                    },
+                    {
+                        "xpath": "Download anyway",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - wtsrv": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 1.0
+                    },
+                    {
+                        "xpath": "(//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wtsrv')])[last()]",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//*[@id=\"downloadButton\"]",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - Workupload": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 2.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'workupload')]",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//*[@id=\"file\"]/div[3]/div/a",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - mp4upload": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 2.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mp4upload')]",
+                        "delay": 5.0
+                    },
+                    {
+                        "script": "if (window.location.href.includes('mp4upload.com') && !window.location.href.includes('embed-')) { window.location.href = window.location.href.replace(/mp4upload\\.com\\/([a-zA-Z0-9]+)/, 'mp4upload.com/embed-$1.html'); } return null;",
+                        "delay": 3.0
+                    },
+                    {
+                        "script": "let src = null; let v = document.querySelector('video'); if (v && v.src && !v.src.startsWith('blob:')) return v.src; let scripts = document.querySelectorAll('script'); for (let s of scripts) { let match = s.innerHTML.match(/eval\\((function\\(p,a,c,k,e,d\\)[\\s\\S]*?split\\('\\|'\\).*?)\\)/); if (match) { try { let unpacked = eval(match[1]); let m = unpacked.match(/player\\.src\\(\\\"([^\\\"]+)\\\"\\)/) || unpacked.match(/src:\\\"([^\\\"]+)\\\"/); if (m) src = m[1]; } catch(e) {} } } return src;",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - gofile": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 1.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gofile')]",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//button[@data-action='download']",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - wahmi": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 1.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wahmi')]",
+                        "delay": 4.0
+                    },
+                    {
+                        "script": "let csrf = document.querySelector('meta[name=\"csrf-token\"]')?.getAttribute('content'); let dlId = (typeof downloadId !== 'undefined' ? downloadId : null) || window.location.pathname.split('/')[1]; let base = (typeof config !== 'undefined' && config.baseURL ? config.baseURL : window.location.origin); let url = base + '/' + dlId + '/download/create'; return (async () => { try { let resp = await fetch(url, { method: 'POST', headers: { 'X-CSRF-TOKEN': csrf, 'Content-Type': 'application/json', 'Accept': 'application/json' } }); let data = await resp.json(); if (data && data.download_link) return data.download_link; } catch(e) {} let a = document.querySelector('a.download-link'); if (a && a.href) return a.href; return null; })();",
+                        "delay": 2.0
+                    }
+                ]
+            }
+        },
+        "cb5273b": {
+            "shipped": "2026-09-28",
+            "next_btn_xpath": "الحلقة التالية",
+            "step_paths": {
+                "FHD - Mediafire": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 1.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mediafire')]",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//*[@id=\"downloadButton\"]",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - Google Drive": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 2.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]",
+                        "delay": 3.0
+                    },
+                    {
+                        "xpath": "Download anyway",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - wtsrv": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 1.0
+                    },
+                    {
+                        "xpath": "(//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wtsrv')])[last()]",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//*[@id=\"downloadButton\"]",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - Workupload": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 2.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'workupload')]",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//*[@id=\"file\"]/div[3]/div/a",
+                        "delay": 2.0
+                    }
+                ],
+                "FHD - gofile": [
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                        "delay": 1.0
+                    },
+                    {
+                        "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gofile')]",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//button[@data-action='download']",
+                        "delay": 2.0
+                    }
+                ]
+            }
+        },
+        "88f84a6": {
+            "shipped": "2026-09-04",
+            "next_btn_xpath": "الحلقة التالية",
+            "step_paths": {
+                "mediafire": [
+                    {
+                        "xpath": "mediafire #last",
+                        "delay": 7.0
+                    },
+                    {
+                        "xpath": "//*[@id=\"downloadButton\"]",
+                        "delay": 3.0
+                    }
+                ],
+                "google drive": [
+                    {
+                        "xpath": "google drive #last",
+                        "delay": 3.0
+                    },
+                    {
+                        "xpath": "Download anyway",
+                        "delay": 2.0
+                    }
+                ],
+                "Workupload": [
+                    {
+                        "xpath": "workupload #last",
+                        "delay": 5.0
+                    },
+                    {
+                        "xpath": "//*[@id=\\\"file\\\"]/div[3]/div/a",
+                        "delay": 5.0
+                    }
+                ],
+                "rf": [
+                    {
+                        "xpath": "rf #last",
+                        "delay": 11.0
+                    },
+                    {
+                        "xpath": "//*[@id=\"downloadButton\"]",
+                        "delay": 2.0
+                    }
+                ]
+            }
+        }
+    }
+}

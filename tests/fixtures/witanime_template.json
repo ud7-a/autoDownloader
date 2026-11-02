@@ -1,7 +1,21 @@
 {
-    "url": "https://witanime.site/watch/mushoku-tensei-iii-isekai-ittara-honki-dasu/{x}",
+    "url": "https://witanime.site/watch/one-piece/{x}",
     "next_btn_xpath": "الحلقة التالية",
     "step_paths": {
+        "FHD - Google": [
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
+                "delay": 2.0
+            },
+            {
+                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]",
+                "delay": 3.0
+            },
+            {
+                "xpath": "Download anyway",
+                "delay": 2.0
+            }
+        ],
         "FHD - Mediafire": [
             {
                 "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
@@ -13,20 +27,6 @@
             },
             {
                 "xpath": "//*[@id=\"downloadButton\"]",
-                "delay": 2.0
-            }
-        ],
-        "FHD - Google Drive": [
-            {
-                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]",
-                "delay": 2.0
-            },
-            {
-                "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]",
-                "delay": 3.0
-            },
-            {
-                "xpath": "Download anyway",
                 "delay": 2.0
             }
         ],
@@ -105,5 +105,5 @@
             }
         ]
     },
-    "last_episodes": "1-13"
+    "last_episodes": "617"
 }

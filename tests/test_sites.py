@@ -1037,14 +1037,14 @@ class SiteConfigTests(unittest.TestCase):
         """Mirrors the maintained witanime profile export -- a dropped path here means
         episodes silently fail on whichever host went missing."""
         paths = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
-        self.assertEqual(set(paths), {"FHD - Google Drive", "FHD - Mediafire",
+        self.assertEqual(set(paths), {"FHD - Google", "FHD - Mediafire",
                                       "FHD - wtsrv", "FHD - Workupload", "FHD - mp4upload",
                                       "FHD - gofile", "FHD - wahmi"})
 
     def test_witanime_path_order_is_preserved(self):
         """The engine tries paths in order, so ordering is behaviour, not cosmetics."""
         paths = DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"]
-        self.assertEqual(list(paths), ["FHD - Mediafire", "FHD - Google Drive",
+        self.assertEqual(list(paths), ["FHD - Google", "FHD - Mediafire",
                                        "FHD - wtsrv", "FHD - Workupload", "FHD - mp4upload",
                                        "FHD - gofile", "FHD - wahmi"])
 

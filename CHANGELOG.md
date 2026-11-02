@@ -10,6 +10,16 @@ See [the release guide](docs/RELEASING.md).
 
 ## Unreleased
 
+### 🔁 witanime: Google Drive first
+- New witanime profiles try **Google Drive first**, then Mediafire, wtsrv,
+  Workupload, mp4upload, gofile and wahmi. The Google path is now called
+  **"FHD - Google"**.
+- Existing witanime profiles move to this order by themselves on the first launch
+  after the update, if they still hold a flow the app shipped. Profiles you
+  edited (a delay, an xpath, the order, a path added or removed) are left as they
+  are. Spaces typed by mistake at the start or end of an xpath field don't count
+  as an edit, and are cleaned up.
+
 ### 📰 New: Anime news tab
 - A new **Anime news** tab says what's next for every anime in your Library:
   **Airing now** (with the next episode's day), **New season coming** (with its

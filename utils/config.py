@@ -133,12 +133,52 @@ def _add_witanime_wahmi():
             paths["FHD - wahmi"] = copy.deepcopy(flow)
 
 
+def update_profile_flow(site_config, domain):
+    """Move a profile to the current built-in flow of `domain` if it still holds a
+    flow the app shipped before (core/site_flows.RETIRED_FLOWS), or the current one
+    with stray spaces -- i.e. its user never edited it. Compared ignoring spaces
+    around xpaths, scripts and names (a trailing space typed into an xpath field)
+    and 2 vs 2.0; path order counts, since a reordering is the user's choice of
+    fallback order. Returns True if changed."""
+    import copy
+    from core.site_flows import DEFAULT_SITE_FLOWS, RETIRED_FLOWS, flow_fingerprint
+    flow = DEFAULT_SITE_FLOWS.get(domain)
+    paths = site_config.get("step_paths") if isinstance(site_config, dict) else None
+    if not flow or not isinstance(paths, dict) or not paths:
+        return False
+    try:
+        mine = flow_fingerprint(paths)
+    except (TypeError, ValueError):
+        return False
+    current = flow_fingerprint(flow["step_paths"])
+    if mine not in RETIRED_FLOWS.get(domain, ()) and mine != current:
+        return False                              # edited by its user: theirs to keep
+    changed = list(paths.items()) != list(flow["step_paths"].items())
+    if changed:
+        site_config["step_paths"] = copy.deepcopy(flow["step_paths"])
+    nxt = site_config.get("next_btn_xpath")
+    if isinstance(nxt, str) and nxt != flow["next_btn_xpath"] and nxt.strip() == flow["next_btn_xpath"]:
+        site_config["next_btn_xpath"] = flow["next_btn_xpath"]
+        changed = True
+    return changed
+
+
+def _update_witanime_template():
+    """Existing witanime profiles still on an earlier shipped flow get the current
+    one: Google Drive first, its path named "FHD - Google"."""
+    for site_config in sites_data.values():
+        if isinstance(site_config, dict) and "witanime.site" in str(site_config.get("url", "")):
+            update_profile_flow(site_config, "witanime.site")
+
+
 # Profile migrations that run ONCE per install, recorded in
 # app_settings["migrations_done"]. Running them on every load re-added a path the
-# user had deliberately deleted.
+# user had deliberately deleted. In order: the template update comes after the
+# migrations that appended paths, so a profile they completed still matches.
 _PROFILE_MIGRATIONS = (
     ("witanime_mp4upload_v1", _add_witanime_mp4upload),
     ("witanime_wahmi_v1", _add_witanime_wahmi),
+    ("witanime_template_v2", _update_witanime_template),
 )
 
 

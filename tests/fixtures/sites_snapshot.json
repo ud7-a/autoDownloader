@@ -24,6 +24,12 @@
     "4shared": [
       "4shared.com"
     ],
+    "google": [
+      "drive.google.com",
+      "drive.usercontent.google.com",
+      "docs.google.com",
+      "googleusercontent.com"
+    ],
     "google drive": [
       "drive.google.com",
       "drive.usercontent.google.com",
@@ -84,7 +90,7 @@
     "witanime.site": {
       "next_btn_xpath": "الحلقة التالية",
       "step_paths": {
-        "FHD - Google Drive": [
+        "FHD - Google": [
           {
             "delay": 2.0,
             "xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]"

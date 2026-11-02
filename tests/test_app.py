@@ -99,7 +99,7 @@ class ReviewFixTests(unittest.TestCase):
         }
         with mock.patch.object(cfg, "sites_data", profiles):
             ran = cfg._run_profile_migrations(set())
-            self.assertEqual(["witanime_mp4upload_v1", "witanime_wahmi_v1"], ran)
+            self.assertEqual(["witanime_mp4upload_v1", "witanime_wahmi_v1", "witanime_template_v2"], ran)
             self.assertEqual(flow_mp4, profiles["wit"]["step_paths"]["FHD - mp4upload"])
             self.assertEqual(flow_wahmi, profiles["wit"]["step_paths"]["FHD - wahmi"])
             self.assertIsNot(flow_wahmi, profiles["wit"]["step_paths"]["FHD - wahmi"])  # a copy

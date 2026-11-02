@@ -2,6 +2,8 @@
 callers, the config migration and the tests -- one copy, so a fix here reaches
 every user of it. Pure data and helpers: no Qt, no Selenium, safe to import early.
 """
+import hashlib
+import json
 
 
 def site_of(host):
@@ -10,21 +12,23 @@ def site_of(host):
 
 
 DEFAULT_SITE_FLOWS = {
-    # Taken from a hand-tuned working profile ("template witanime.json"). Order is
-    # the fallback order: Mediafire first, then Google Drive, then witanime's own
-    # wtsrv mirror, then Workupload, then gofile.
+    # Taken from a hand-tuned working profile (tests/fixtures/witanime_template.json,
+    # exported from the app). Order is the fallback order: Google Drive first, then
+    # Mediafire, witanime's own wtsrv mirror, Workupload, mp4upload, gofile, wahmi.
+    # Existing profiles still on an earlier shipped version of this flow are moved
+    # to it once (utils/config._update_witanime_template, RETIRED_FLOWS below).
     "witanime.site": {
         "next_btn_xpath": "الحلقة التالية",
         "step_paths": {
+            "FHD - Google": [
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 2.0},
+                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]", "delay": 3.0},
+                {"xpath": "Download anyway", "delay": 2.0},
+            ],
             "FHD - Mediafire": [
                 {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 1.0},
                 {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'mediafire')]", "delay": 5.0},
                 {"xpath": '//*[@id="downloadButton"]', "delay": 2.0},
-            ],
-            "FHD - Google Drive": [
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//button[contains(., 'FHD')]", "delay": 2.0},
-                {"xpath": "//h2[contains(text(), 'تحميل')]/following-sibling::div//div[contains(@class, 'rounded-xl') and .//button[contains(., 'FHD')]]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'google')]", "delay": 3.0},
-                {"xpath": "Download anyway", "delay": 2.0},
             ],
             # An episode can offer wtsrv twice. The page is right-to-left and XPath
             # counts in source order, so [last()] is the button furthest LEFT on
@@ -86,5 +90,64 @@ DEFAULT_SITE_FLOWS = {
             ],
         },
     },
+}
+
+
+def _clean(value):
+    """A flow as compared: strings without stray spaces (a trailing space typed into
+    an xpath field), numbers as floats (2 and 2.0 are one delay)."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, list):
+        return [_clean(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k).strip(): _clean(v) for k, v in value.items()}
+    return value
+
+
+def flow_fingerprint(step_paths):
+    """Identifies a list of download paths: the same paths, in the same order (the
+    order is the fallback order, so a user's reordering is an edit), with the same
+    steps give the same fingerprint, whatever stray spaces or 2 vs 2.0."""
+    pairs = [[str(name).strip(), _clean(steps)] for name, steps in step_paths.items()]
+    text = json.dumps(pairs, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# Fingerprints of every witanime flow the app has shipped before the current one,
+# each also with the "FHD - mp4upload" and "FHD - wahmi" paths that one-time
+# migrations appended to existing profiles (at the end, in that order). A profile
+# matching one of these was
+# never edited by its user, so it is safe to move to the current flow; any other
+# profile was edited and is left alone. Worked out from the flows in git history;
+# when the flow changes again, the one it replaces is added here.
+RETIRED_FLOWS = {
+    "witanime.site": frozenset({
+        "5172d12e8549e2fe",   # 2026-10-10 (ba06e51): Mediafire first, "FHD - Google Drive"
+        "3303fb8c5c5e7e6d",   # 2026-09-28 (cb5273b)
+        "85b2682491204221",   # 2026-09-28 (cb5273b) + mp4upload
+        "2bd4231a9d0df5f0",   # 2026-09-28 (cb5273b) + wahmi
+        "bfe9feaa7bec1678",   # 2026-09-28 (cb5273b) + mp4upload + wahmi
+        "f07b524e46429600",   # 2026-09-23 (04f048d)
+        "30d2e40bee75388d",   # 2026-09-23 (04f048d) + mp4upload
+        "0d0c4c8f94664e7c",   # 2026-09-23 (04f048d) + wahmi
+        "86f16e8655a971e1",   # 2026-09-23 (04f048d) + mp4upload + wahmi
+        "558a85ed4ec212ba",   # 2026-09-04 (88f84a6): the old page, lowercase path names
+        "861fe28138cad0e8",   # 2026-09-04 (88f84a6) + mp4upload
+        "4017011fafcd8910",   # 2026-09-04 (88f84a6) + wahmi
+        "0d74d601936d72a9",   # 2026-09-04 (88f84a6) + mp4upload + wahmi
+        "e34e2074ab83aadc",   # 2026-08-18 (59734b0)
+        "e2b79b41058f7ba0",   # 2026-08-18 (59734b0) + mp4upload
+        "50a58f04dcbcc18d",   # 2026-08-18 (59734b0) + wahmi
+        "4d558908b378e083",   # 2026-08-18 (59734b0) + mp4upload + wahmi
+        "fd1d4eb673e88d8b",   # 2026-07-25 (6a2eaa7)
+        "3082ac87d8205e6f",   # 2026-07-25 (6a2eaa7) + mp4upload
+        "d0057348ae7b45a7",   # 2026-07-25 (6a2eaa7) + wahmi
+        "2ee184794ee2a948",   # 2026-07-25 (6a2eaa7) + mp4upload + wahmi
+    }),
 }
 

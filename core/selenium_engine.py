@@ -399,6 +399,9 @@ def rewrite_gdrive_to_direct_download(driver, download_dir):
 PATH_HOSTS = {
     "google drive": ("drive.google.com", "drive.usercontent.google.com",
                      "docs.google.com", "googleusercontent.com"),
+    # witanime's path is "FHD - Google" since its template changed; same hosts.
+    "google": ("drive.google.com", "drive.usercontent.google.com",
+               "docs.google.com", "googleusercontent.com"),
     "mediafire": ("mediafire.com",),
     "workupload": ("workupload.com",),
     "mega": ("mega.nz", "mega.io"),
