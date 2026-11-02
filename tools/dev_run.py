@@ -3,6 +3,7 @@
     py tools/dev_run.py                    # the sandbox, created with sample data on first run
     py tools/dev_run.py --fresh            # start over from the sample data
     py tools/dev_run.py --real-downloads   # real browser downloads (into the sandbox)
+    py tools/dev_run.py --whats-new 5.0.0  # as the first launch after updating from 5.0.0
     py tools/dev_run.py -- --library       # anything after -- is passed to the app
 
 Everything lives under one folder (default %TEMP%\\AED-sandbox, or --dir):
@@ -33,6 +34,7 @@ isn't ticked off in its Library), Windows notifications, and cloud notifications
 if you turn them on in the sandbox.
 """
 import argparse
+import json
 import os
 import runpy
 import shutil
@@ -291,6 +293,30 @@ def stub_outside_effects(root, real_downloads):
     AppWindow.__init__ = init
 
 
+def next_version(version):
+    """"5.2.0" after "5.1.0": the release the Unreleased notes will become."""
+    parts = [int(p) for p in version.split(".")] + [0, 0]
+    return f"{parts[0]}.{parts[1] + 1}.0"
+
+
+def pretend_update(root, seen):
+    """This launch acts as the first after updating from `seen`: the app takes the
+    next version's number when CHANGELOG.md has Unreleased notes (as a release
+    would), and the sandbox's settings say What's new was last shown for `seen`.
+    Must run before anything imports APP_VERSION by name. Returns the version."""
+    from utils import changelog, config
+    unreleased = dict((t.lower(), b) for t, b in changelog.sections(changelog.read_bundled()))
+    if changelog.features(unreleased.get(changelog.UNRELEASED.lower(), "")):
+        config.APP_VERSION = next_version(config.APP_VERSION)
+    path = os.path.join(paths(root)["app"], "sites_config.json")
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    data.setdefault("settings", {})["whats_new_seen"] = seen
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    return config.APP_VERSION
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--dir", default=os.path.join(tempfile.gettempdir(), "AED-sandbox"),
@@ -298,6 +324,9 @@ def main():
     parser.add_argument("--fresh", action="store_true", help="start over from the sample data")
     parser.add_argument("--real-downloads", action="store_true",
                         help="download for real (still into the sandbox's folders)")
+    parser.add_argument("--whats-new", metavar="FROM",
+                        help="start as the first launch after updating from version FROM "
+                             "(What's new shows; Unreleased notes count as the next version)")
     parser.add_argument("app_args", nargs="*", help="arguments for the app, after --")
     args = parser.parse_args()
     root = os.path.abspath(args.dir)
@@ -313,6 +342,9 @@ def main():
     if not os.path.isfile(os.path.join(root, MARKER)):
         print(f"[sandbox] creating sample data in {root} ...")
         seed(root)
+    if args.whats_new:
+        version = pretend_update(root, args.whats_new)
+        print(f"[sandbox] acting as the first launch after updating {args.whats_new} -> {version}")
     stub_outside_effects(root, args.real_downloads)
     print(f"[sandbox] {root}")
 

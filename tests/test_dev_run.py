@@ -74,6 +74,40 @@ class DevRunTests(unittest.TestCase):
                          got["files"])
         self.assertTrue(got["marker"])
 
+    def test_pretending_an_update_shows_whats_new(self):
+        """--whats-new FROM: the app takes the next version (Unreleased notes exist)
+        and starts as the first launch after updating from FROM."""
+        got = run_python(f"""
+            import dev_run
+            root = {self.root!r}
+            dev_run.point_at_sandbox(root)
+            dev_run.seed(root)
+            from utils import config
+            before = config.APP_VERSION
+            version = dev_run.pretend_update(root, "5.0.0")
+            config.load_config()
+            from ui import whats_new
+            print(json.dumps({{"before": before, "version": version, "now": config.APP_VERSION,
+                              "seen": config.app_settings["whats_new_seen"],
+                              "shown": [v for v, _d, _f in whats_new.pending()]}}))
+        """)
+        self.assertEqual("5.0.0", got["seen"])
+        self.assertEqual(got["version"], got["now"])
+        from utils import changelog
+        has_unreleased = changelog.features(dict(
+            (t.lower(), b) for t, b in changelog.sections(changelog.read_bundled())).get("unreleased", ""))
+        if has_unreleased:
+            import tools.dev_run as dr
+            self.assertEqual(dr.next_version(got["before"]), got["version"])
+        self.assertEqual(got["version"], got["shown"][0])
+        self.assertGreater(len(got["shown"]), 1)                     # every version since 5.0.0
+
+    def test_next_version(self):
+        import tools.dev_run as dr
+        self.assertEqual("5.2.0", dr.next_version("5.1.0"))
+        self.assertEqual("6.1.0", dr.next_version("6.0.9"))
+        self.assertEqual("5.1.0", dr.next_version("5"))
+
     def test_outside_effects_are_stubbed_and_downloads_are_pretend(self):
         got = run_python(f"""
             import os, dev_run
