@@ -18,7 +18,8 @@ See [the release guide](docs/RELEASING.md).
   after the update, if they still hold a flow the app shipped. Profiles you
   edited (a delay, an xpath, the order, a path added or removed) are left as they
   are. Spaces typed by mistake at the start or end of an xpath field don't count
-  as an edit, and are cleaned up.
+  as an edit, and are cleaned up. This happens once: a profile imported after
+  that keeps exactly what its file holds.
 
 ### 📰 New: Anime news tab
 - A new **Anime news** tab says what's next for every anime in your Library:

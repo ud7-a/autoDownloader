@@ -165,7 +165,12 @@ def update_profile_flow(site_config, domain):
 
 def _update_witanime_template():
     """Existing witanime profiles still on an earlier shipped flow get the current
-    one: Google Drive first, its path named "FHD - Google"."""
+    one: Google Drive first, its path named "FHD - Google".
+
+    Only here, in a one-time migration: profiles are compared and replaced on the
+    first launch after an update, never after. A profile imported later (Profile
+    Manager > Import) keeps exactly what its file holds until the next update that
+    ships a new migration."""
     for site_config in sites_data.values():
         if isinstance(site_config, dict) and "witanime.site" in str(site_config.get("url", "")):
             update_profile_flow(site_config, "witanime.site")

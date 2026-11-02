@@ -282,6 +282,51 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(["witanime_mp4upload_v1", "witanime_template_v2", "witanime_wahmi_v1"],
                          sorted(self.saved()["settings"]["migrations_done"]))
 
+    def test_a_profile_imported_after_the_update_is_never_touched(self):
+        """Profiles are compared and replaced only on the first launch after an
+        update. An old profile imported later stays exactly as its file is."""
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        type(self)._app = QApplication.instance() or QApplication([])
+        import types
+        import ui.manager_tab as mt
+        from core.site_flows import DEFAULT_SITE_FLOWS
+        self.write({"One Piece": profile(RETIRED["ba06e51"]["step_paths"])}, [])
+        self.cfg.load_config()                                     # the update's launch
+        self.assertEqual(DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"],
+                         self.cfg.sites_data["One Piece"]["step_paths"])
+        # Then the user imports an old export, stray spaces and all.
+        old = profile(spaced(RETIRED["ba06e51"]["step_paths"]))
+        path = os.path.join(self.tmp, "Bleach.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(old, f, ensure_ascii=False)
+        page = types.SimpleNamespace(refresh_combo=mock.Mock(), profile_saved_signal=mock.Mock())
+        dialog = mock.Mock()
+        dialog.return_value.exec.return_value = True
+        dialog.return_value.result_text = "Bleach"
+        with mock.patch.object(mt.QFileDialog, "getOpenFileName", return_value=(path, "")), \
+                mock.patch.object(mt, "FluentInputDialog", dialog), \
+                mock.patch.object(mt, "sites_data", self.cfg.sites_data):
+            mt.SiteManagerWidget.import_profile(page)
+        self.assertEqual(old, self.cfg.sites_data["Bleach"])
+        for _launch in range(2):                                   # and on every later launch
+            self.cfg.sites_data.clear()
+            self.cfg.load_config()
+            self.assertEqual(old, self.cfg.sites_data["Bleach"])
+        self.assertEqual(old, self.saved()["sites"]["Bleach"])
+
+    def test_the_next_update_moves_an_imported_profile_then(self):
+        """"Until the next update": a later migration with a new id does run once."""
+        self.write({"Imported": profile(RETIRED["ba06e51"]["step_paths"])},
+                   ["witanime_mp4upload_v1", "witanime_wahmi_v1", "witanime_template_v2"])
+        later = self.cfg._PROFILE_MIGRATIONS + (("witanime_template_v3", self.cfg._update_witanime_template),)
+        with mock.patch.object(self.cfg, "_PROFILE_MIGRATIONS", later):
+            self.cfg.load_config()
+        from core.site_flows import DEFAULT_SITE_FLOWS
+        self.assertEqual(DEFAULT_SITE_FLOWS["witanime.site"]["step_paths"],
+                         self.cfg.sites_data["Imported"]["step_paths"])
+        self.assertIn("witanime_template_v3", self.saved()["settings"]["migrations_done"])
+
     def test_a_fresh_install_counts_it_as_done(self):
         self.cfg.load_config()                                     # no file yet
         self.assertIn("witanime_template_v2", self.saved()["settings"]["migrations_done"])
