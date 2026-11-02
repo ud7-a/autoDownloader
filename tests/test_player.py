@@ -92,6 +92,38 @@ class MpvnetTests(unittest.TestCase):
         # Re-applying the same thing has nothing to back up.
         self.assertIsNone(self.mpvnet.apply_config(self.cfg, r"C:\x\animes"))
 
+    def test_config_current_notices_an_update(self):
+        """Apply is manual, so a config change in an update (swapchain-depth for
+        smooth timing on mid-range GPUs) reaches nobody unless the tab says so."""
+        from unittest import mock
+        current = self.mpvnet.config_current
+        self.assertFalse(current(self.cfg, r"C:\x\animes"))             # never applied
+        self.mpvnet.apply_config(self.cfg, r"C:\x\animes")
+        self.assertTrue(current(self.cfg, r"C:\x\animes"))
+        self.assertFalse(current(self.cfg, r"C:\x\Anime Downloads"))    # folder changed since
+        real = self.mpvnet._bundle_plan
+        newer = lambda d: [(r, b + b"\n# newer\n" if r == "mpv.conf" else b) for r, b in real(d)]  # noqa: E731
+        with mock.patch.object(self.mpvnet, "_bundle_plan", newer):
+            self.assertFalse(current(self.cfg, r"C:\x\animes"))         # the app was updated
+            self.mpvnet.apply_config(self.cfg, r"C:\x\animes")
+            self.assertTrue(current(self.cfg, r"C:\x\animes"))
+        with open(os.path.join(self.cfg, "scripts", "sync-guard.lua"), "a") as f:
+            f.write("-- edited\n")
+        self.assertFalse(current(self.cfg, r"C:\x\animes"))             # any shipped file counts
+        with mock.patch.object(self.mpvnet, "_bundle_plan", side_effect=FileNotFoundError):
+            self.assertFalse(current(self.cfg, r"C:\x\animes"))
+
+    def test_smooth_timing_on_mid_range_gpus(self):
+        """Display sync with the UL anime chain needs the GPU to work ahead: with 3
+        frames queued an RTX 3050 delayed 476 frames per 20 s at 300 Hz, with 8
+        none -- and only on D3D11 (Vulkan still delayed 600+)."""
+        with open(os.path.join(self.mpvnet.bundle_dir(), "mpv.conf"), encoding="utf-8") as f:
+            conf = f.read()
+        self.assertRegex(conf, r"(?m)^gpu-api=d3d11\s*$")
+        self.assertRegex(conf, r"(?m)^swapchain-depth=8\s*$")
+        self.assertRegex(conf, r"(?m)^video-sync=display-resample\s*$")
+        self.assertNotIn("4090", conf)
+
     def test_shaders_applied_needs_conf_to_load_them(self):
         self.mpvnet.apply_config(self.cfg)
         with open(os.path.join(self.cfg, "mpv.conf"), "w") as f:
@@ -333,6 +365,18 @@ class MpvnetTests(unittest.TestCase):
         # Re-reading the tab shows what's saved.
         w.refresh_status()
         self.assertEqual("Off", boxes["opening"].currentText())
+
+    def test_the_tab_offers_a_config_update(self):
+        from unittest import mock
+        w, _state = self._player_tab()
+        self.assertEqual(("Not applied", "Apply shaders"), (w.shader_pill.text(), w.btn_apply.text()))
+        self.mpvnet.apply_config(self.cfg, None)
+        with mock.patch.object(self.mpvnet, "config_current", return_value=True):
+            w.refresh_status()
+        self.assertEqual(("Applied", "Re-apply shaders"), (w.shader_pill.text(), w.btn_apply.text()))
+        with mock.patch.object(self.mpvnet, "config_current", return_value=False):
+            w.refresh_status()
+        self.assertEqual(("Update ready", "Apply the update"), (w.shader_pill.text(), w.btn_apply.text()))
 
     def test_page_fits_the_tab_side_by_side(self):
         """The page never scrolls sideways, so a page wider than the tab is cut

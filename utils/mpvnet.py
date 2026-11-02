@@ -721,13 +721,8 @@ def _read_bytes(path):
         return None
 
 
-def apply_config(cfg_dir, download_dir=None):
-    """Copy the bundled config into cfg_dir.
-
-    Every file that would be overwritten with different content is first copied
-    to cfg_dir/backup/<timestamp>/ (same relative path). Returns that backup
-    folder, or None when nothing needed backing up.
-    """
+def _bundle_plan(download_dir):
+    """[(relative path, bytes)] that Apply writes into the config folder."""
     src_root = bundle_dir()
     plan = []   # (relative path, bytes to write)
     for name in BUNDLE_FILES:
@@ -747,7 +742,28 @@ def apply_config(cfg_dir, download_dir=None):
                 plan.append((os.path.join(folder, name), data))
     if not plan:
         raise FileNotFoundError(f"The bundled mpv.net config is missing: {src_root}")
+    return plan
 
+
+def config_current(cfg_dir, download_dir=None):
+    """True when every file Apply writes is in cfg_dir exactly as this version of
+    the app would write it. False after an update that changed the config (or a
+    hand edit): the Video Player tab then offers to apply it again."""
+    try:
+        plan = _bundle_plan(download_dir)
+    except FileNotFoundError:
+        return False
+    return all(_read_bytes(os.path.join(cfg_dir, rel)) == data for rel, data in plan)
+
+
+def apply_config(cfg_dir, download_dir=None):
+    """Copy the bundled config into cfg_dir.
+
+    Every file that would be overwritten with different content is first copied
+    to cfg_dir/backup/<timestamp>/ (same relative path). Returns that backup
+    folder, or None when nothing needed backing up.
+    """
+    plan = _bundle_plan(download_dir)
     backup = os.path.join(cfg_dir, "backup", time.strftime("%Y-%m-%d_%H%M%S"))
     backed_up = False
     for rel, data in plan:

@@ -542,9 +542,15 @@ class PlayerWidget(QWidget):
 
         cfg = mpvnet.config_dir(exe)
         applied = mpvnet.shaders_applied(cfg)
-        self.shader_pill.set_state("ok" if applied else "off",
-                                   "Applied" if applied else "Not applied")
-        self.btn_apply.setText("Re-apply shaders" if applied else "Apply shaders")
+        # Applied, but by an older version of the app: its config has changed since.
+        stale = applied and not mpvnet.config_current(cfg, app_settings.get("download_dir"))
+        if stale:
+            self.shader_pill.set_state("busy", "Update ready")
+            self.btn_apply.setText("Apply the update")
+        else:
+            self.shader_pill.set_state("ok" if applied else "off",
+                                       "Applied" if applied else "Not applied")
+            self.btn_apply.setText("Re-apply shaders" if applied else "Apply shaders")
         self.btn_apply.setEnabled(bool(exe))
         self.btn_apply.setToolTip("" if exe else "Install mpv.net first")
         self.btn_open_config.setEnabled(os.path.isdir(cfg))

@@ -21,6 +21,19 @@ See [the release guide](docs/RELEASING.md).
 - To see it again, use **Check for updates**: when you're up to date, the notice
   has a **What's new** button.
 
+### 🎬 Video Player: smooth on mid-range GPUs
+<!-- app: The best-quality anime profile now plays with smooth timing on mid-range graphics cards too. Press "Apply the update" in the Video Player tab. -->
+- The anime profile's smooth frame timing no longer needs a high-end GPU. The
+  player now prepares frames ahead (up to 8 queued instead of 3), so each new
+  frame's work is spread over the time it's on screen. Same shaders, same
+  picture. Measured on an RTX 3050 at 300 Hz with a 720p episode: from 476
+  late and 192 mistimed frames in 20 seconds to none.
+- A 1080p episode on a 1440p screen is still too much for an RTX 3050-class
+  card (the picture work alone takes 92% of it): the player keeps falling back
+  to normal timing for it, as before.
+- The Video Player tab now says **Update ready** when the app ships a newer
+  player config than the one installed, with an **Apply the update** button.
+
 ### 🐛 Fixes
 <!-- app: Turning off Anime news notifications now stays off after a restart. -->
 - Turning off Anime news notifications now lasts after the app restarts.
