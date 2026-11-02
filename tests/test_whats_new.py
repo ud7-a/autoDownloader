@@ -336,6 +336,68 @@ class ShowAndSeenTests(Qt):
     def test_closed_without_show_me(self):
         self.assertEqual([], self.run_show(opened=None))
 
+    def run_show_from(self, page, opened):
+        """show() where the user presses a page's tab button on `page`."""
+        from PyQt6.QtWidgets import QWidget
+        from ui import whats_new
+        host = QWidget()
+        self.addCleanup(host.deleteLater)
+        opened_tabs = []
+
+        def fake_exec(dlg):
+            dlg.go(page)
+            dlg.opened = opened
+            return 1
+        with mock.patch.object(whats_new.WhatsNewDialog, "exec", fake_exec), \
+                mock.patch.object(whats_new, "offer_to_continue") as offer:
+            whats_new.show(host, self.versions(), opened_tabs.append)
+        return host, opened_tabs, offer
+
+    def test_a_tab_button_leaves_a_way_back_to_the_rest(self):
+        """Opening a tab from a page used to end the tour there: the pages after it
+        couldn't be seen any more."""
+        host, opened, offer = self.run_show_from(0, "manager_interface")
+        self.assertEqual(["manager_interface"], opened)
+        offer.assert_called_once()
+        self.assertEqual((host, 1, 4), (offer.call_args.args[0], offer.call_args.args[3],
+                                        offer.call_args.args[4]))      # next page, of 4
+
+    def test_from_the_last_page_there_is_nothing_to_continue(self):
+        _host, opened, offer = self.run_show_from(3, "player_interface")
+        self.assertEqual(["player_interface"], opened)
+        offer.assert_not_called()
+        _host, _opened, offer = self.run_show_from(0, None)            # Close / Got it
+        offer.assert_not_called()
+
+    def test_continue_picks_up_at_the_next_page(self):
+        from PyQt6.QtWidgets import QWidget
+        from ui import whats_new
+        import qfluentwidgets
+        host = QWidget()
+        self.addCleanup(host.deleteLater)
+        bar = mock.Mock()
+        versions, open_tab = self.versions(), mock.Mock()
+        with mock.patch.object(qfluentwidgets.InfoBar, "info", return_value=bar) as info, \
+                mock.patch.object(whats_new, "show") as again:
+            whats_new.offer_to_continue(host, versions, open_tab, 1, 4)
+            self.assertEqual("3 more to see.", info.call_args.args[1])
+            self.assertEqual(-1, info.call_args.kwargs["duration"])      # stays until used
+            button = bar.addWidget.call_args.args[0]
+            self.assertEqual("Continue", button.text())
+            button.click()
+        bar.close.assert_called_once()
+        again.assert_called_once_with(host, versions, open_tab, 1)
+
+    def test_the_window_can_open_on_any_page(self):
+        from PyQt6.QtWidgets import QWidget
+        from ui.whats_new import WhatsNewDialog
+        host = QWidget()
+        self.addCleanup(host.deleteLater)
+        dlg = WhatsNewDialog(self.versions(), host, start=2)
+        self.assertEqual((2, 2, "3 of 4"), (dlg.current, dlg.stack.currentIndex(), dlg.counter.text()))
+        last = WhatsNewDialog(self.versions(), host, start=99)          # past the end: the last
+        self.assertEqual((3, "Got it"), (last.current, last.yesButton.text()))
+
     def test_nothing_to_show_shows_nothing(self):
         from utils.config import app_settings
         self.assertEqual([], self.run_show(versions=[]))

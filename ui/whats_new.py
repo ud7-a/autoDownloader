@@ -4,7 +4,8 @@ One page per feature of the new version (or of each version since the one last
 shown), from the bundled CHANGELOG.md (utils/changelog.py): a Fluent icon, the
 title and the short "app:" line written for users; "More details" opens the full
 notes. Next / the pips / the arrow keys move between pages; a page about a tab
-has a button that closes the window there. Closing it any way counts as seen. It
+has a button that closes the window there, where a notice offers to continue
+with the next page. Closing it any way counts as seen. It
 can be opened again from "Check for updates" when the app is up to date.
 """
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -201,7 +202,7 @@ class WhatsNewDialog(MessageBoxBase):
 
     MIN_WIDTH, MAX_WIDTH = 760, 980       # px; within these, 72% of the window
 
-    def __init__(self, versions, parent=None):
+    def __init__(self, versions, parent=None, start=0):
         super().__init__(parent)
         self.opened = None
         self._closing_to = False
@@ -248,7 +249,12 @@ class WhatsNewDialog(MessageBoxBase):
         self.cancelButton.setText("Close")
         width = int(parent.width() * 0.72) if parent is not None else self.MIN_WIDTH
         self.widget.setFixedWidth(max(self.MIN_WIDTH, min(self.MAX_WIDTH, width)))
-        self.go(0)
+        self.go(start)
+
+    @property
+    def current(self):
+        """The page showing (0-based)."""
+        return self._index
 
     @staticmethod
     def _previous(versions):
@@ -306,14 +312,35 @@ def pending():
                                app_settings.get("whats_new_seen") or "", APP_VERSION)
 
 
-def show(window, versions, open_tab):
-    """Show the window for `versions` over `window`; afterwards it counts as seen,
-    and "Show me" opens its tab through open_tab(key)."""
+def show(window, versions, open_tab, start=0):
+    """Show the window for `versions` over `window`, from page `start`; afterwards
+    it counts as seen. A page's tab button opens its tab through open_tab(key), and
+    when pages are left, a notice there offers to continue from the next one."""
     if not versions:
         return None
-    dlg = WhatsNewDialog(versions, window)
+    dlg = WhatsNewDialog(versions, window, start)
     dlg.exec()
     mark_seen()
     if dlg.opened:
         open_tab(dlg.opened)
+        if dlg.current < len(dlg.pages) - 1:
+            offer_to_continue(window, versions, open_tab, dlg.current + 1, len(dlg.pages))
     return dlg
+
+
+def offer_to_continue(window, versions, open_tab, start, total):
+    """A notice at the bottom of the tab just opened: the tour isn't over. It stays
+    until used or closed."""
+    from qfluentwidgets import InfoBar, InfoBarPosition
+    left = total - start
+    bar = InfoBar.info("What's new", f"{left} more to see.", isClosable=True,
+                       position=InfoBarPosition.BOTTOM, duration=-1, parent=window)
+    button = PushButton(FIF.RIGHT_ARROW, "Continue")
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def resume():
+        bar.close()
+        show(window, versions, open_tab, start)
+    button.clicked.connect(resume)
+    bar.addWidget(button)
+    return bar
