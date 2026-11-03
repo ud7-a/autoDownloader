@@ -5,9 +5,8 @@
 -- This watches for that and falls back to audio sync for that shader set, then
 -- goes back to smooth timing when the profile (shader set) changes to a lighter one.
 --
--- Measured on an RTX 3050 at 300 Hz, with mpv.conf's swapchain-depth=8: the UL
--- anime chain on a 720p source drops/delays 0 per 20 s; on a 1080p source (38 ms
--- of GPU work per frame) ~600. The threshold sits far from both.
+-- Measured on an RTX 3050 at 300 Hz: the former Large anime chain drops/delays
+-- ~0 per 20 s; the UL chain ~500 per 20 s. The threshold sits far from both.
 local CHECK_SECONDS = 1
 local WINDOW = 4          -- seconds of history looked at
 local LIMIT = 8           -- dropped + late frames in WINDOW that mean "too slow"
