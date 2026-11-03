@@ -104,9 +104,9 @@ See [the release guide](docs/RELEASING.md).
 - **Best-quality anime profile (F1)**: Anime4K's largest models, tuned against
   a clean release of the same episode: sharper and cleaner than before, no
   over-sharpened outlines and no coloured fringes beside black lines. Needs a
-  high-end GPU (RTX 4090 class); on a weaker one, playback drops to the old
-  frame timing by itself. The first use takes a few seconds to prepare (up to
-  about 30 s on some systems). Two profiles now: F1 anime, F2 series and movies.
+  high-end GPU; on a weaker one, playback drops to the old frame timing by
+  itself. The first use takes a few seconds to prepare (up to about 30 s on some
+  systems). Two profiles now: F1 anime, F2 series and movies.
 
 ## 5.0.0 — 2026-10-12
 

@@ -69,7 +69,7 @@ The **Video Player** tab can install mpv.net, apply shader presets, and help con
 
 | mpv.net shortcut | Action |
 | --- | --- |
-| `F1` | Anime shader profile: Anime4K's largest (UL) models with the soft restore, no colour fringes beside lines. Needs a high-end GPU (RTX 4090 class) |
+| `F1` | Anime shader profile: Anime4K's largest (UL) models with the soft restore, no colour fringes beside lines. Needs a high-end GPU |
 | `F2` | Series and movie shader profile: FSRCNNX with light adaptive sharpening |
 | `Ctrl+1` | Toggle shaders |
 | `P` | Show active shaders |
