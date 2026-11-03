@@ -1898,7 +1898,7 @@ class QuickPlayTests(unittest.TestCase):
     def test_play_next_frees_up_space_after_reading_the_log(self):
         from unittest import mock
         from utils import quick_play, storage
-        settings = {"download_dir": self.downloads, "cleanup_keep": 2}
+        settings = {"download_dir": self.downloads, "cleanup_keep": 3}
         order = []
         with mock.patch.object(quick_play, "_settings", return_value=settings), \
                 mock.patch("utils.mpvnet.find_mpvnet", return_value=(None, None)), \
@@ -1953,30 +1953,30 @@ class FreeUpSpaceTests(unittest.TestCase):
     def on_disk(self):
         return sorted(self.wl.episode_files(self.folder))
 
-    def auto(self, keep=2, **extra):
+    def auto(self, keep=3, **extra):
         return self.storage.auto_clean(dict({"cleanup_keep": keep}, **extra), self.downloads,
                                        recycle=self.recycle)
 
     def test_finishing_an_episode_deletes_the_ones_n_behind(self):
         self.files(range(1, 25))
         self.finish(*range(1, 20))                     # watched up to Ep 19
-        report = self.auto(keep=2)
-        self.assertEqual(list(range(1, 18)), self.binned)
-        self.assertEqual(list(range(18, 25)), self.on_disk())
+        report = self.auto(keep=3)
+        self.assertEqual(list(range(1, 17)), self.binned)
+        self.assertEqual(list(range(17, 25)), self.on_disk())
         part = self.wl.find(self.URL)["parts"][0]
-        self.assertEqual(list(range(1, 18)), part["cleaned"])
-        self.assertEqual("Freed " + self.storage.size_text(17000),
+        self.assertEqual(list(range(1, 17)), part["cleaned"])
+        self.assertEqual("Freed " + self.storage.size_text(16000),
                          self.storage.describe(report)[0])
-        self.assertIn("Space Show Ep 1-17", self.storage.describe(report)[1])
+        self.assertIn("Space Show Ep 1-16", self.storage.describe(report)[1])
 
     def test_episodes_only_implied_by_a_jump_are_never_deleted_on_their_own(self):
         """Ep 28 opened by mistake ticks 1-27; only what was really seen goes."""
         self.files(range(1, 25))
-        self.finish(1, 2, 3)
+        self.finish(1, 2, 3, 4)
         self.finish(24, percent=0.5)                   # the accidental jump
         self.assertEqual(list(range(1, 24)), self.wl.find(self.URL)["parts"][0]["watched"])
-        self.auto(keep=2)
-        self.assertEqual([1], self.binned)             # 3 - 2; nothing of 4-23
+        self.auto(keep=3)
+        self.assertEqual([1], self.binned)             # 4 - 3; nothing of 5-23
 
     def test_off_by_default_and_never_for_a_kept_anime(self):
         self.files(range(1, 25))
@@ -1984,21 +1984,21 @@ class FreeUpSpaceTests(unittest.TestCase):
         self.assertEqual([], self.storage.auto_clean({}, self.downloads, recycle=self.recycle))
         self.assertEqual([], self.auto(keep=0))
         self.wl.update(self.URL, keep_all=True)
-        self.assertEqual([], self.auto(keep=2))
+        self.assertEqual([], self.auto(keep=3))
         self.assertEqual([], self.binned)
 
     def test_hand_ticked_episodes_go_only_when_asked(self):
         self.files(range(1, 25))
         set_watched(self.wl, self.URL, 0, range(1, 11))
-        self.assertEqual([], self.auto(keep=2))
-        self.storage.clean(self.downloads, 2, url=self.URL, finished_only=False,
+        self.assertEqual([], self.auto(keep=3))
+        self.storage.clean(self.downloads, 3, url=self.URL, finished_only=False,
                            recycle=self.recycle)
-        self.assertEqual(list(range(1, 9)), self.binned)
+        self.assertEqual(list(range(1, 8)), self.binned)
 
     def test_deleted_after_watching_is_not_missing_but_deleted_by_hand_is(self):
         self.files(range(1, 25))
         self.finish(*range(1, 11))
-        self.auto(keep=2)                              # 1-8 cleaned
+        self.auto(keep=3)                              # 1-7 cleaned
         os.remove(os.path.join(self.folder, f"{self.PROFILE} Ep20.mp4"))
         entry = self.wl.find(self.URL)
         self.assertEqual((0, [20]), self.wl.missing_episodes(entry, self.downloads))
@@ -2031,31 +2031,31 @@ class FreeUpSpaceTests(unittest.TestCase):
         self.files(range(1, 25))
         self.finish(*range(1, 6))
         busy = os.path.join(self.folder, f"{self.PROFILE} Ep1.mp4")
-        report = self.storage.clean(self.downloads, 2, recycle=lambda p: p != busy and self.recycle(p))
-        self.assertEqual([2, 3], self.binned)
+        report = self.storage.clean(self.downloads, 3, recycle=lambda p: p != busy and self.recycle(p))
+        self.assertEqual([2], self.binned)
         self.assertEqual(1, report[0]["failed"])
-        self.assertEqual([2, 3], self.wl.find(self.URL)["parts"][0]["cleaned"])
-        self.auto(keep=2)
-        self.assertEqual([2, 3, 1], self.binned)
+        self.assertEqual([2], self.wl.find(self.URL)["parts"][0]["cleaned"])
+        self.auto(keep=3)
+        self.assertEqual([2, 1], self.binned)
 
     def test_permanent_deletion_skips_the_recycle_bin(self):
         from unittest import mock
         self.files(range(1, 25))
         self.finish(*range(1, 6))
         bin_ = mock.Mock(return_value=True)
-        self.storage.auto_clean({"cleanup_keep": 2, "cleanup_permanent": True}, self.downloads,
+        self.storage.auto_clean({"cleanup_keep": 3, "cleanup_permanent": True}, self.downloads,
                                 recycle=bin_)
         bin_.assert_not_called()
-        self.assertEqual(list(range(4, 25)), self.on_disk())
+        self.assertEqual(list(range(3, 25)), self.on_disk())
 
     def test_finished_and_cleaned_survive_a_season_refresh(self):
         self.files(range(1, 25))
         self.finish(*range(1, 6))
-        self.auto(keep=2)
+        self.auto(keep=3)
         self.wl.set_parts(self.URL, [{"template": self.TEMPLATE, "max_ep": 26}])
         part = self.wl.find(self.URL)["parts"][0]
         self.assertEqual([1, 2, 3, 4, 5], part["finished"])
-        self.assertEqual([1, 2, 3], part["cleaned"])
+        self.assertEqual([1, 2], part["cleaned"])
 
     def test_the_windows_delete_call_works(self):
         """The real SHFileOperationW call, minus FOF_ALLOWUNDO so the temp file is
@@ -2077,19 +2077,19 @@ class FreeUpSpaceTests(unittest.TestCase):
         type(self)._app = QApplication.instance() or QApplication([])
         from ui import watch_later_tab as tab
         host = QWidget()
-        dlg = tab.StorageDialog(2, True, host)
-        self.assertEqual((2, True), dlg.values())
+        dlg = tab.StorageDialog(3, True, host)
+        self.assertEqual((3, True), dlg.values())
         dlg.combo_keep.setCurrentIndex(0)
         dlg.combo_where.setCurrentIndex(0)
         self.assertEqual((0, False), dlg.values())
 
         self.files(range(1, 25))
         self.finish(*range(1, 11))
-        with mock.patch.object(tab, "_settings", return_value={"cleanup_keep": 2}), \
+        with mock.patch.object(tab, "_settings", return_value={"cleanup_keep": 3}), \
                 mock.patch.object(tab, "_download_dir", return_value=self.downloads):
             dlg = tab.EntryDialog(self.wl.find(self.URL), host)
-            self.assertTrue(dlg.btn_free.isVisibleTo(dlg))         # 1-8 can go
-            self.assertIn("8 watched", dlg.btn_free.toolTip())
+            self.assertTrue(dlg.btn_free.isVisibleTo(dlg))         # 1-7 can go
+            self.assertIn("7 watched", dlg.btn_free.toolTip())
             dlg.check_keep_all.setChecked(True)
             dlg.yesButton.click()
             self.assertTrue(self.wl.find(self.URL)["keep_all"])
@@ -2103,6 +2103,9 @@ class FreeUpSpaceTests(unittest.TestCase):
         self.assertEqual(0, keep({"cleanup_keep": "x"}))
         self.assertEqual(0, keep({"cleanup_keep": -1}))
         self.assertEqual(3, keep({"cleanup_keep": 3}))
+        self.assertEqual(5, keep({"cleanup_keep": 5}))
+        self.assertEqual(3, keep({"cleanup_keep": 1}))     # 1 and 2 (5.1) read as 3
+        self.assertEqual(3, keep({"cleanup_keep": 2}))
         self.assertEqual("1-3, 7, 9-10", self.storage.episode_spec([9, 1, 2, 3, 7, 10]))
         self.assertEqual("1.5 GB", self.storage.size_text(int(1.5 * 1024 ** 3)))
         self.assertIsNone(self.storage.describe([{"episodes": [], "freed": 0, "failed": 1,

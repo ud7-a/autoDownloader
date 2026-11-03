@@ -651,8 +651,7 @@ class StorageDialog(MessageBoxBase):
         self.combo_keep = ComboBox()
         for n in self._choices:
             self.combo_keep.addItem("Off: keep every episode" if n == 0 else
-                                    f"Keep the last {n} watched" if n > 1 else
-                                    "Keep the last watched episode")
+                                    f"Keep the last {n} watched")
         self.combo_keep.setCurrentIndex(self._choices.index(keep) if keep in self._choices else 0)
         self.combo_where = ComboBox()
         self.combo_where.addItem("Move to the Recycle Bin")

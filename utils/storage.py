@@ -3,6 +3,7 @@ decides which, `cleanup_candidates`); this module removes the files and records 
 
 Two settings in sites_config.json's "settings":
     cleanup_keep        0 = off (default), else how many watched episodes to keep
+                        (3 or 5; a 1 or 2 saved by 5.1 reads as 3)
     cleanup_permanent   False = Recycle Bin (default), True = delete for good
 
 Runs after mpv.net's progress log is read -- in the Library tab and in the Continue
@@ -16,7 +17,9 @@ from utils import watch_later as wl
 
 KEEP_SETTING = "cleanup_keep"
 PERMANENT_SETTING = "cleanup_permanent"
-KEEP_CHOICES = (0, 1, 2, 3, 5)
+# No 1 or 2: a folder never goes below 3 episodes (wl.MIN_EPISODES_KEPT, for skip
+# times), so once caught up they kept the same 3 files as "keep 3".
+KEEP_CHOICES = (0, 3, 5)
 
 # SHFileOperationW: FO_DELETE and its flags.
 _FO_DELETE = 3
@@ -36,7 +39,7 @@ def keep_setting(settings):
         keep = int((settings or {}).get(KEEP_SETTING) or 0)
     except (TypeError, ValueError):
         return 0
-    return keep if keep > 0 else 0
+    return max(keep, KEEP_CHOICES[1]) if keep > 0 else 0
 
 
 def _recycle(path):
