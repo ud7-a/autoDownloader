@@ -345,6 +345,19 @@ class MpvnetTests(unittest.TestCase):
         self.assertEqual(w._panels.direction(), w._panels.Direction.LeftToRight)
         self.assertLessEqual(page.minimumSizeHint().width(), w.width() - 20)
 
+    def test_the_page_scrolls_like_every_other_tab(self):
+        """One eased animation per wheel turn (SmoothScrollArea). ScrollArea moves
+        the page from a 60 fps timer, which looked jerky on a 300 Hz screen."""
+        import re
+        from qfluentwidgets import SmoothScrollArea
+        w, _state = self._player_tab()
+        self.assertIsInstance(w.scroll, SmoothScrollArea)
+        ui = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui")
+        for name in os.listdir(ui):
+            if name.endswith(".py"):
+                with open(os.path.join(ui, name), encoding="utf-8") as f:
+                    self.assertIsNone(re.search(r"(?<![A-Za-z])ScrollArea\(", f.read()), name)
+
     def test_check_button_offers_a_newer_mpvnet(self):
         from ui import player_tab
         w, _state = self._player_tab()

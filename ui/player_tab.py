@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QG
 from qfluentwidgets import (CardWidget, IconWidget, SubtitleLabel, StrongBodyLabel,
                             BodyLabel, CaptionLabel, PrimaryPushButton, PushButton,
                             HyperlinkButton, IndeterminateProgressBar, InfoBar, InfoBarPosition,
-                            ScrollArea, SwitchButton, ComboBox, FluentIcon as FIF)
+                            SmoothScrollArea, SwitchButton, ComboBox, FluentIcon as FIF)
 
 from utils import mpvnet
 from utils.config import app_settings
@@ -161,7 +161,10 @@ class PlayerWidget(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        self.scroll = scroll = ScrollArea(self)
+        # The other tabs' scroll area: one eased animation, drawn at the display's
+        # rate. ScrollArea steps the page from a 60 fps timer instead, which
+        # looked jerky on a high-refresh screen.
+        self.scroll = scroll = SmoothScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.enableTransparentBackground()
         # Text wraps instead; a sideways scrollbar only ever hid the right column.
