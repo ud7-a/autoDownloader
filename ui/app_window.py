@@ -637,8 +637,14 @@ class AppWindow(FluentWindow):
         """This version's "What's new" on demand (the up-to-date notice's button)."""
         from ui import whats_new
         from utils import changelog
-        whats_new.show(self, changelog.whats_new(changelog.read_bundled(), "", APP_VERSION),
-                       self.open_tab)
+        versions = changelog.whats_new(changelog.read_bundled(), "", APP_VERSION)
+        if not versions:
+            # A build whose changelog says nothing about it: the button still answers.
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            InfoBar.info("What's new", f"There are no notes for version {APP_VERSION}.",
+                         position=InfoBarPosition.TOP, duration=4000, parent=self)
+            return
+        whats_new.show(self, versions, self.open_tab)
 
     def _on_news_search(self, query, domain):
         """Anime news' Find in Search: the Search tab, already searching."""

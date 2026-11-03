@@ -121,7 +121,7 @@ class FeaturePage(QWidget):
         top = QHBoxLayout()
         top.setSpacing(10)
         if title.lower().startswith("new:"):
-            title = title[4:].strip()
+            title = title[4:].strip() or "New feature"
             # The QLabel.BadgeSuccess look, inline: a dialog's own stylesheet keeps
             # the app-wide class rule from reaching labels inside it.
             badge = QLabel("New")

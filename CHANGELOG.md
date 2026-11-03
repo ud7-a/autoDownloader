@@ -21,10 +21,6 @@ See [the release guide](docs/RELEASING.md).
 - To see it again, use **Check for updates**: when you're up to date, the notice
   has a **What's new** button.
 
-### 🐛 Fixes
-<!-- app: Turning off Anime news notifications now stays off after a restart. -->
-- Turning off Anime news notifications now lasts after the app restarts.
-
 ### 🔁 witanime: Google Drive first
 <!-- app: witanime downloads now try Google Drive first. Your profiles switch over by themselves, unless you changed them. -->
 - New witanime profiles try **Google Drive first**, then Mediafire, wtsrv,

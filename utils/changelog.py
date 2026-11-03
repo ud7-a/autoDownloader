@@ -44,6 +44,16 @@ def version_key(version):
     return tuple(int(p) for p in m.group(1).split(".")) if m else None
 
 
+def _same(key):
+    """A version key without its trailing zeros: 5.2 and 5.2.0 are one version."""
+    if key is None:
+        return None
+    key = list(key)
+    while len(key) > 1 and key[-1] == 0:
+        key.pop()
+    return tuple(key)
+
+
 def section_date(title):
     """"2026-11-03" from "5.2.0 — 2026-11-03", else ""."""
     m = re.search(r"(\d{4}-\d{2}-\d{2})\s*$", title or "")
@@ -60,12 +70,17 @@ def _inline(text):
 
 
 def _split_emoji(title):
-    """("📰", "New: Anime news tab") -- the leading symbol(s), if any, apart."""
+    """("📰", "New: Anime news tab") -- the leading symbol(s), if any, apart. A
+    title of symbols only is all emoji, with no words."""
     m = re.match(r"^([^\w\s(\"'“]+)\s+(.+)$", title)
-    return (m.group(1), m.group(2)) if m else ("", title)
+    if m:
+        return m.group(1), m.group(2)
+    return (title, "") if not re.search(r"\w", title) else ("", title)
 
 
-_SUMMARY = re.compile(r"^<!--\s*app:\s*(.*?)\s*-->$")
+_SUMMARY = re.compile(r"^<!--\s*app:\s*(.*?)\s*-->$", re.S)
+# A list item: "- ", "* ", "+ ", or numbered, "1. " / "1) ".
+_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 
 
 def _first_sentence(rich):
@@ -84,17 +99,25 @@ def features(body):
 
     def add(emoji, title, lines):
         points, current, summary = [], None, ""
+        comment = None            # an HTML comment's lines while it is open
         for line in lines:
             stripped = line.strip()
-            m = _SUMMARY.match(stripped)
-            if m:
-                summary = _inline(m.group(1))
+            # Comments are hidden on GitHub, so never shown here either; an "app:"
+            # one, on one line or several, is the feature's short version.
+            if comment is not None or stripped.startswith("<!--"):
+                comment = (comment or []) + [stripped]
+                if "-->" in stripped:
+                    m = _SUMMARY.match(" ".join(comment))
+                    if m:
+                        summary = _inline(m.group(1))
+                    comment = None
                 continue
             if not stripped:
                 current = None
                 continue
-            if re.match(r"^[-*] ", stripped):
-                current = [stripped[2:].strip()]
+            bullet = _BULLET.match(stripped)
+            if bullet:
+                current = [stripped[bullet.end():].strip()]
                 points.append(current)
             elif current is not None:
                 current.append(stripped)          # a wrapped line of the same point
@@ -122,15 +145,16 @@ def changes_since(text, seen, current):
     """[(version, date, features)] newest first, for every version section after
     `seen` up to `current`. When `current` has no section of its own yet (a build
     from source), its Unreleased section stands for it."""
-    now, before = version_key(current), version_key(seen)
+    now, before = _same(version_key(current)), _same(version_key(seen))
     if now is None:
         return []
     out, has_current = [], False
     for title, body in sections(text):
         key = version_key(title)
-        if key is None or key > now or (before is not None and key <= before):
+        same = _same(key)
+        if key is None or same > now or (before is not None and same <= before):
             continue
-        has_current = has_current or key == now
+        has_current = has_current or same == now
         feats = features(body)
         if feats:
             out.append((".".join(map(str, key)), section_date(title), feats))
@@ -139,7 +163,7 @@ def changes_since(text, seen, current):
         feats = features(unreleased)
         if feats:
             out.insert(0, (current, "", feats))
-    out.sort(key=lambda v: version_key(v[0]), reverse=True)
+    out.sort(key=lambda v: _same(version_key(v[0])), reverse=True)
     return out
 
 
@@ -151,15 +175,15 @@ def whats_new(text, seen, current):
     version last shown, newest first, at most MAX_VERSIONS. Nothing when this
     version was shown already or the app was downgraded. `seen` empty (an install
     from before the window existed) shows this version's changes only."""
-    now = version_key(current)
+    now = _same(version_key(current))
     if now is None or (seen or "").strip() == current:
         return []
-    before = version_key(seen)
+    before = _same(version_key(seen))
     if before is not None and before >= now:
         return []
     found = changes_since(text, seen if before is not None else None, current)
     if before is None:
-        found = [v for v in found if version_key(v[0]) == now]
+        found = [v for v in found if _same(version_key(v[0])) == now]
     return found[:MAX_VERSIONS]
 
 
