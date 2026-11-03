@@ -37,6 +37,7 @@ class Notifier:
     def __init__(self, window):
         self._window = window
         self._tray = None
+        self._on_click = None     # the last notification's own action, if any
 
     def _ensure_tray(self):
         if self._tray is None and QSystemTrayIcon.isSystemTrayAvailable():
@@ -46,7 +47,7 @@ class Notifier:
             self._tray = QSystemTrayIcon(icon, self._window)
             self._tray.setToolTip(self._window.windowTitle())
             self._tray.activated.connect(self._bring_back)
-            self._tray.messageClicked.connect(self._bring_back)
+            self._tray.messageClicked.connect(self._clicked)
             self._tray.show()
         return self._tray
 
@@ -58,9 +59,15 @@ class Notifier:
         w.raise_()
         w.activateWindow()
 
-    def notify(self, title, text):
+    def _clicked(self):
+        self._bring_back()
+        if self._on_click:
+            self._on_click()
+
+    def notify(self, title, text, on_click=None):
         """Post a notification unless turned off or the app is in use. Returns
-        True if one was shown."""
+        True if one was shown. Clicking it brings the window back, then runs
+        `on_click` (Windows reports only the last one's click)."""
         if not app_settings.get("windows_notifications", True):
             return False
         if self._window.isActiveWindow() and not self._window.isMinimized():
@@ -68,5 +75,6 @@ class Notifier:
         tray = self._ensure_tray()
         if tray is None:
             return False
+        self._on_click = on_click
         tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Information, 8000)
         return True

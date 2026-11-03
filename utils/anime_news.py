@@ -150,6 +150,13 @@ def display_title(m):
     return t.get("english") or t.get("romaji") or t.get("native") or "?"
 
 
+def site_name(m):
+    """The name the anime sites list it under: romaji, as the Library's titles are
+    ("Sousou no Frieren", not "Frieren: Beyond Journey's End")."""
+    t = (m or {}).get("title") or {}
+    return t.get("romaji") or display_title(m)
+
+
 def _names(m):
     """Every name AniList knows the entry by, and each one's short form before a
     subtitle: the sites often say "Frieren" for "Frieren: Beyond Journey's End"."""
@@ -307,7 +314,9 @@ def describe(newest, source):
             when = _when_epoch(nxt["airingAt"])
         else:
             headline, when = f"{name} is airing.", ""
+        # next_at: when the next episode airs, for the tab's order (soonest first).
         return {**base, "kind": AIRING, "headline": headline, "when": when,
+                "next_at": int(nxt["airingAt"]) if nxt.get("airingAt") else None,
                 "detail": f"Started {started}" if started else "Airing now",
                 "key": f"{AIRING}|{newest.get('id')}"}
     if status == "NOT_YET_RELEASED":
@@ -406,7 +415,8 @@ def load():
 
 def followed():
     """The anime followed from the tab's search, not in the Library: entries shaped
-    like the Library's ({"url": "anilist:<id>", "title", "cover", "added"})."""
+    like the Library's ({"url": "anilist:<id>", "title", "cover", "added"}), plus
+    "site_name", what Find in Search asks the anime sites for."""
     return load()["followed"]
 
 
@@ -422,7 +432,8 @@ def follow(m, cover=""):
         data = _load()
         if any(e["url"] == url for e in data["followed"]):
             return None
-        entry = {"url": url, "title": display_title(m), "cover": cover or "", "added": time.time()}
+        entry = {"url": url, "title": display_title(m), "site_name": site_name(m),
+                 "cover": cover or "", "added": time.time()}
         data["followed"].append(entry)
         data["shows"][url] = {"anilist_id": int(m["id"]), "manual": True,
                               "match_title": display_title(m), "state": None, "checked_at": 0}
@@ -504,6 +515,9 @@ def check(entries, force=False, fetch=post, gap=REQUEST_GAP, now=None, progress=
             continue
         new["checked_at"] = now
         msg = change_message(title, old.get("state"), new.get("state"))
+        if msg and is_followed(url) and (new.get("state") or {}).get("kind") == AIRING:
+            # Not in the Library: say how to get its episodes.
+            msg += " Find it in Search to download it."
         if msg:
             season = ((new.get("state") or {}).get("anilist_id"), new["state"].get("key"))
             if season not in told:

@@ -27,8 +27,10 @@ from utils import watch_later as wl
 from utils.config import app_settings, config_lock, save_config
 from ui.watch_later_tab import _fixed, _muted, _poster, _title
 
-# Filter strip: key, label, the states it shows.
+# Filter strip: key, label, the states it shows ("new": any state, news from the
+# last few days -- the rows marked "New since last check").
 FILTERS = (("all", "All", news.KINDS),
+           ("new", "New", news.KINDS),
            ("airing", "Airing", (news.AIRING,)),
            ("coming", "Coming", (news.COMING,)),
            ("waiting", "Waiting", (news.WAITING, news.PAUSED)),
@@ -48,6 +50,26 @@ def checked_text(ts, now=None):
     today = datetime.datetime.fromtimestamp(now or time.time()).date()
     day = "today" if when.date() == today else f"{when.day} {when.strftime('%b')}"
     return f"checked {day} at {when.strftime('%H:%M')}"
+
+
+def in_filter(key, rec):
+    """Does a row with this record belong under filter `key`?"""
+    if key == "all":
+        return True
+    if key == "new":
+        return news.is_fresh(rec)
+    kinds = dict((k, ks) for k, _l, ks in FILTERS)[key]
+    return ((rec or {}).get("state") or {}).get("kind") in kinds
+
+
+def row_order(entry, rec):
+    """Rows by state (airing first), airing ones by their next episode, soonest
+    first, then by name."""
+    state = (rec or {}).get("state") or {}
+    kind = state.get("kind")
+    soon = state.get("next_at") if kind == news.AIRING else None
+    return (ORDER.get(kind, len(ORDER)), soon if isinstance(soon, (int, float)) else float("inf"),
+            entry["title"].lower())
 
 
 def library_shows():
@@ -582,9 +604,15 @@ class NewsRow(SimpleCardWidget):
             root.addWidget(when)
         if kind == news.AIRING:
             # Airing means the sites have its episodes: one click to the season's
-            # page in Search, to follow it in the Watchlist or download it.
-            self.btn_find = _fixed(PushButton(FIF.SEARCH, "Find in Search"))
-            self.btn_find.setToolTip("Search the anime sites for this season")
+            # page in Search, to follow it in the Watchlist or download it. A
+            # followed anime has no episodes here yet, so that's what it offers.
+            if self.lead_followed:
+                self.btn_find = _fixed(PrimaryPushButton(FIF.DOWNLOAD, "Find to download"))
+                self.btn_find.setToolTip("Search the anime sites for it. On its result, the "
+                                         "heart button downloads each new episode for you.")
+            else:
+                self.btn_find = _fixed(PushButton(FIF.SEARCH, "Find in Search"))
+                self.btn_find.setToolTip("Search the anime sites for this season")
             self.btn_find.clicked.connect(lambda: self.find.emit(self.url))
             root.addWidget(self.btn_find)
         else:
@@ -747,17 +775,21 @@ class NewsWidget(QWidget):
         self._filter = key
         self.refresh()
 
+    def show_filter(self, key):
+        """Show one filter, as if its segment were clicked."""
+        self.seg.setCurrentItem(key)
+        self._switch(key)
+
     def refresh(self):
         entries = tracked_shows()
         data = news.load()
         shows = data.get("shows", {})
         anime = [(e, others, group_record([e] + others, shows))
                  for e, others in newest_per_anime(entries, shows)]
-        kind_of = lambda rec: ((rec or {}).get("state") or {}).get("kind")   # noqa: E731
         # Which entries each row stands for, for "Check this show" and "Stop following".
         self._group = {e["url"]: [e] + others for e, others, _r in anime}
-        for key, label, kinds in FILTERS:
-            n = sum(1 for _e, _o, rec in anime if kind_of(rec) in kinds or key == "all")
+        for key, label, _kinds in FILTERS:
+            n = sum(1 for _e, _o, rec in anime if in_filter(key, rec))
             self.seg.widget(key).setText(f"{label}  {n}")
         # When the whole list was last checked: its least recently checked row. The
         # newest check of any one show (Check this show, a show just followed) would
@@ -770,9 +802,8 @@ class NewsWidget(QWidget):
             self.list_col.removeWidget(r)
             r.deleteLater()
         self._rows = []
-        kinds = dict((k, ks) for k, _l, ks in FILTERS)[self._filter]
-        shown = [a for a in anime if self._filter == "all" or kind_of(a[2]) in kinds]
-        shown.sort(key=lambda a: (ORDER.get(kind_of(a[2]), len(ORDER)), a[0]["title"].lower()))
+        shown = [a for a in anime if in_filter(self._filter, a[2])]
+        shown.sort(key=lambda a: row_order(a[0], a[2]))
         for e, others, rec in shown:
             # "Also in your Library" names only Library seasons; a followed copy of
             # the same anime just makes the row offer "Stop following".
@@ -789,7 +820,8 @@ class NewsWidget(QWidget):
             self.empty.setText("Add anime to your Library, or search above to follow one, and "
                                "what's next for each shows up here.")
         elif not shown:
-            self.empty.setText("No shows here right now.")
+            self.empty.setText("No news in the last 7 days." if self._filter == "new"
+                               else "No shows here right now.")
         self.empty.setVisible(not shown)
 
     @staticmethod
@@ -859,7 +891,8 @@ class NewsWidget(QWidget):
         entry = next((e for e in tracked_shows() if e["url"] == url), None)
         if entry is None:
             return
-        title = entry.get("title", "")
+        # A followed anime: its romaji name, the one the sites use.
+        title = entry.get("site_name") or entry.get("title", "")
         self.search_requested.emit(news._norm(title) or title, entry.get("domain") or "")
 
     def pick_match(self, url):

@@ -460,15 +460,16 @@ class NewsNotificationTests(unittest.TestCase):
         import types
         from ui.app_window import AppWindow
         from utils.config import app_settings
-        window = types.SimpleNamespace(notifier=mock.Mock())
+        self.window = types.SimpleNamespace(notifier=mock.Mock(), _show_news=mock.Mock())
         with mock.patch.dict(app_settings, {"news_notify": enabled}):
-            AppWindow._on_news_changes(window, changes)
-        return window.notifier.notify.call_args_list
+            AppWindow._on_news_changes(self.window, changes)
+        return self.window.notifier.notify.call_args_list
 
     def test_one_notice_per_show_or_a_summary(self):
         calls = self.call([("A", "A: S2 has been announced."), ("B", "B: S3 has started airing.")])
-        self.assertEqual([mock.call("Anime news", "A: S2 has been announced."),
-                          mock.call("Anime news", "B: S3 has started airing.")], calls)
+        show = self.window._show_news                          # a click opens Anime news
+        self.assertEqual([mock.call("Anime news", "A: S2 has been announced.", show),
+                          mock.call("Anime news", "B: S3 has started airing.", show)], calls)
         many = self.call([(str(i), f"{i}: news") for i in range(5)])
         self.assertEqual(1, len(many))
         self.assertIn("5 shows", many[0].args[1])

@@ -604,10 +604,15 @@ class AppWindow(FluentWindow):
             return
         if len(changes) > 3:
             self.notifier.notify("Anime news", f"News about {len(changes)} shows you follow. "
-                                               "Open Anime news to see it.")
+                                               "Open Anime news to see it.", self._show_news)
             return
         for _title, message in changes:
-            self.notifier.notify("Anime news", message)
+            self.notifier.notify("Anime news", message, self._show_news)
+
+    def _show_news(self):
+        """A news notification clicked: Anime news, on the shows it was about."""
+        self.open_tab("news_interface")
+        self.news_interface.show_filter("new")
 
     def _later(self, msec, slot):
         """Run `slot` once after `msec`, on a timer owned by this window: it goes

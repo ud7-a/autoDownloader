@@ -42,13 +42,16 @@ See [the release guide](docs/RELEASING.md).
 - **Follow any anime**, even one that isn't in your Library: search for it at
   the top of the tab and pick it from AniList's results. It gets its news and
   notifications like the rest, marked **Following**; **Stop following** is in
-  its **⋯** menu.
+  its **⋯** menu. Once it airs, **Find to download** searches the anime sites
+  for it.
 - The news comes from AniList, needs no account, and is checked once a day in
   the background. **Check now** asks straight away.
 - A wrong match is fixed from the **⋯** menu: **Not the right anime?** lists
   AniList's entries to pick from, and the show keeps that pick.
 - A Windows notification says when a season is announced, gets a date or starts
-  airing. It can be turned off at the bottom of the tab.
+  airing; clicking it opens the tab on **New**, the news of the last 7 days. It
+  can be turned off at the bottom of the tab. Airing shows are listed by their
+  next episode, soonest first.
 - **Finished** means the anime and its source have both ended. AniList can't
   tell whether the whole story was animated.
 

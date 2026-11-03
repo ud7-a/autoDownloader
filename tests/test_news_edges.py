@@ -965,7 +965,7 @@ class NewsTimersTests(unittest.TestCase):
     def test_exactly_three_changes_are_three_notices(self):
         from ui.app_window import AppWindow
         from utils.config import app_settings
-        window = types.SimpleNamespace(notifier=mock.Mock())
+        window = types.SimpleNamespace(notifier=mock.Mock(), _show_news=mock.Mock())
         with mock.patch.dict(app_settings, {"news_notify": True}):
             AppWindow._on_news_changes(window, [(str(i), f"{i}") for i in range(3)])
             AppWindow._on_news_changes(window, [])
