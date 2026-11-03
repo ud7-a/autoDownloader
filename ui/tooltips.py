@@ -24,6 +24,15 @@ class _AnyStateToolTipFilter(ToolTipFilter):
         parent = self.parent()
         return parent.isWidgetType() and bool(parent.toolTip())
 
+    def showToolTip(self):
+        # The widget may have gone while the show delay ran -- a dialog closed with
+        # the mouse over it. A tooltip shown then would never be hidden: no Leave
+        # comes from a hidden widget, and the tooltip is its own window.
+        if not self.parent().isVisible():
+            self.isEnter = False
+            return
+        super().showToolTip()
+
 
 def has_fluent_tooltip(widget):
     return any(isinstance(c, ToolTipFilter) for c in widget.children())

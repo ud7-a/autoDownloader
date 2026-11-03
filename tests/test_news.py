@@ -274,7 +274,7 @@ class CheckAndStoreTests(unittest.TestCase):
     def test_a_broken_file_is_an_empty_store(self):
         with open(self.news.FILE, "w", encoding="utf-8") as f:
             f.write("{not json")
-        self.assertEqual({"shows": {}, "checked_at": 0}, self.news.load())
+        self.assertEqual({"shows": {}, "checked_at": 0, "followed": []}, self.news.load())
 
 
 class HttpTests(unittest.TestCase):
@@ -391,7 +391,7 @@ class NewsTabTests(unittest.TestCase):
         from PyQt6.QtWidgets import QWidget
         host = QWidget()
         self.addCleanup(host.deleteLater)
-        with mock.patch.object(self.news, "search", return_value=found):
+        with mock.patch.object(self.news, "search_page", return_value=(found, False)):
             dlg = MatchDialog("FateZero", current_id, host)
             for t in list(dlg._threads):
                 t.wait(5000)
@@ -427,6 +427,7 @@ class NewsTabTests(unittest.TestCase):
         dlg._show(dlg._generation - 1, [m(9, "Old Result")], "")
         self.assertEqual(["Fate/Zero"], [self.news.display_title(c.media) for c in dlg._cards])
         dlg.search_box.setText("zzz")
+        dlg._query = "zzz"                                         # as Search sets it
         dlg._show(dlg._generation, [], "")
         self.assertEqual([], dlg._cards)
         self.assertFalse(dlg.scroll.isVisibleTo(dlg))

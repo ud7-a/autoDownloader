@@ -38,11 +38,15 @@ See [the release guide](docs/RELEASING.md).
   that keeps exactly what its file holds.
 
 ### 📰 New: Anime news tab
-<!-- app: A new tab shows what's next for every anime in your Library: airing now, a new season coming, or finished. -->
+<!-- app: A new tab shows what's next for every anime in your Library: airing now, a new season coming, or finished. Search it to follow any other anime too. -->
 - A new **Anime news** tab says what's next for every anime in your Library:
   **Airing now** (with the next episode's day), **New season coming** (with its
   start date when there is one), **Waiting for news** (the anime has ended but
   the manga or novel it adapts hasn't), or **Finished**.
+- **Follow any anime**, even one that isn't in your Library: search for it at
+  the top of the tab and pick it from AniList's results. It gets its news and
+  notifications like the rest, marked **Following**; **Stop following** is in
+  its **⋯** menu.
 - The news comes from AniList, needs no account, and is checked once a day in
   the background. **Check now** asks straight away.
 - A wrong match is fixed from the **⋯** menu: **Not the right anime?** lists

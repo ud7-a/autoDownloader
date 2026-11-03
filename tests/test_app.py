@@ -1026,6 +1026,30 @@ class FluentToolTipTests(unittest.TestCase):
         from qfluentwidgets import ToolTipFilter
         self.assertEqual(1, sum(isinstance(c, ToolTipFilter) for c in btn.children()))
 
+    def test_no_tooltip_for_a_widget_hidden_during_the_delay(self):
+        # A dialog closed with the mouse over a hint: the tooltip, its own window,
+        # would show after the delay and never be hidden again.
+        from PyQt6.QtWidgets import QLabel
+        from qfluentwidgets import ToolTipFilter
+        label = QLabel("まかでみWAっしょい!")
+        label.setToolTip("まかでみWAっしょい!")
+        self.addCleanup(label.deleteLater)
+        label.show()
+        self._hover(label)
+        hint = next(c for c in label.children() if isinstance(c, ToolTipFilter))
+        label.hide()
+        hint.showToolTip()                     # the delay ends
+        self.assertFalse(hint._tooltip is not None and hint._tooltip.isVisible())
+        self.assertFalse(hint.isEnter)
+        label.show()                           # shown again: hints work as before
+        self._hover(label)
+        hint.showToolTip()
+        self.assertTrue(hint._tooltip.isVisible())
+        hint.hideToolTip()
+        # Hidden before it is deleted: a window deleted while shown counts as the
+        # last one closing, and the quit that posts ends a later test's event loop.
+        label.hide()
+
     def test_widgets_without_a_hint_are_left_alone(self):
         from PyQt6.QtWidgets import QPushButton
         from ui.tooltips import has_fluent_tooltip

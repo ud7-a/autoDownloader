@@ -90,6 +90,7 @@ def _poster(cover, w, h, radius=6):
 
 def _title(text, size, max_width=None):
     label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)   # a name like "<Infinite Dendrogram>"
     label.setFont(QFont("Segoe UI Variable", size, QFont.Weight.Bold))
     label.setStyleSheet("color: #ffffff; background: transparent;")
     label.setToolTip(text)
@@ -117,6 +118,7 @@ def _fixed(button):
 
 def _muted(text, size=12, wrap=False):
     label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)   # names and notes, never markup
     label.setStyleSheet(f"color: #999999; background: transparent; font-size: {size}px;")
     label.setWordWrap(wrap)
     return label

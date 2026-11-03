@@ -348,7 +348,7 @@ class CheckEdgeTests(Base):
     def test_damaged_files_and_records(self):
         for text in ("", "[]", "null", '{"shows": []}', '{"shows": "x"}', "{broken"):
             self.write_file(text)
-            self.assertEqual({"shows": {}, "checked_at": 0}, self.news.load(), text)
+            self.assertEqual({"shows": {}, "checked_at": 0, "followed": []}, self.news.load(), text)
         self.write_file({"shows": {"a": "garbage", "b": {"state": "bad", "checked_at": "soon"},
                                    "c": {"state": {"kind": "airing"}, "checked_at": "123"}}})
         shows = self.news.load()["shows"]
@@ -415,7 +415,8 @@ class NewsTabEdgeTests(TabBase):
 
     def test_an_empty_library(self):
         w = self.shows([], {})
-        self.assertEqual("Nothing in your Library yet", w.lead.text())
+        self.assertEqual("Nothing to show yet", w.lead.text())
+        self.assertIn("search above to follow one", w.empty.text())
         self.assertEqual([], w._rows)
         self.assertIn("Add anime to your Library", w.empty.text())
         self.assertEqual("All  0", w.seg.widget("all").text())
@@ -428,6 +429,18 @@ class NewsTabEdgeTests(TabBase):
         self.assertIn("Not checked yet", texts)
         self.assertIn("Waiting for the first check.", texts)
         self.assertEqual("1 show from your Library · not checked yet", w.lead.text())
+
+    def test_the_header_time_is_when_every_show_was_checked(self):
+        # One show checked just now (Check this show, a new follow) while the rest
+        # were checked last night: the list was checked last night.
+        from ui.news_tab import checked_text
+        night, now = time.time() - 16 * 3600, time.time()
+        w = self.shows([{"url": "u1", "title": "One"}, {"url": "u2", "title": "Two"},
+                        {"url": "u3", "title": "Three"}],
+                       {"u1": {"checked_at": night, "state": self.state("finished")},
+                        "u2": {"checked_at": now, "state": self.state("airing")},
+                        "u3": {"checked_at": 0, "state": None}})       # never: not counted
+        self.assertEqual(f"3 shows from your Library · {checked_text(night)}", w.lead.text())
 
     def test_order_filters_and_what_each_row_shows(self):
         from utils import anime_news as n
@@ -621,8 +634,8 @@ class PickDialogEdgeTests(TabBase):
         from PyQt6.QtWidgets import QWidget
         host = QWidget()
         self.addCleanup(host.deleteLater)
-        kw = {"side_effect": self.news.NewsError(error)} if error else {"return_value": found}
-        with mock.patch.object(self.news, "search", **kw):
+        kw = {"side_effect": self.news.NewsError(error)} if error else {"return_value": (found, False)}
+        with mock.patch.object(self.news, "search_page", **kw):
             dlg = MatchDialog(title, current_id, host)
             for t in list(dlg._threads):
                 t.wait(5000)
@@ -668,14 +681,17 @@ class PickDialogEdgeTests(TabBase):
         card.set_cover(b"not an image")                              # kept as it was
         self.assertFalse(card.cover.pixmap().isNull())
 
-    def test_typing_waits_then_searches(self):
+    def test_typing_alone_never_searches(self):
+        # Only Search or Enter asks AniList: not every pause while typing.
         dlg = self.dialog([m(2, "Fate/Zero")])
         with mock.patch.object(dlg, "_search") as search:
             dlg.search_box.setText("fate stay")
             dlg.search_box.textEdited.emit("fate stay")
-            self.assertTrue(dlg._typing.isActive())
+            self._app.processEvents()
+            time.sleep(0.6)                                          # past any typing delay
+            self._app.processEvents()
             search.assert_not_called()
-            dlg._typing.timeout.emit()
+            dlg.search_box.returnPressed.emit()
         search.assert_called_once_with("fate stay")
         with mock.patch.object(dlg, "_search") as search:
             dlg.search_box.setText("   ")

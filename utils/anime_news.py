@@ -12,6 +12,10 @@ that season's state becomes one of:
     paused    on hiatus or cancelled
     unknown   no AniList entry could be matched with confidence
 
+Anime that aren't in the Library can be followed too (follow()): the user picks
+them on AniList, so they need no matching, and they are kept in the same file
+under an "anilist:<id>" key, checked like the rest.
+
 AniList's public GraphQL API needs no key. Results are kept in
 APP_DIR/anime_news.json and refreshed at most once a day (MAX_AGE), so a Library
 of 30 anime costs about 60 requests a day, far inside the API's limit.
@@ -40,6 +44,7 @@ TIMEOUT = 15                 # seconds per request
 REQUEST_GAP = 0.7            # seconds between requests: about 85 a minute at most
 MAX_HOPS = 10                # sequels followed before giving up (and loops)
 MATCH_THRESHOLD = 0.6        # how close a title must be to match on its own
+FOLLOW_PREFIX = "anilist:"   # key of an anime followed from the tab, not the Library
 
 AIRING, COMING, WAITING, FINISHED, PAUSED, UNKNOWN = (
     "airing", "coming", "waiting", "finished", "paused", "unknown")
@@ -58,8 +63,9 @@ _MEDIA_FIELDS = """
   nextAiringEpisode { episode airingAt }
 """
 _SEARCH_QUERY = """
-query ($search: String) {
-  Page(perPage: 10) {
+query ($search: String, $perPage: Int, $page: Int) {
+  Page(perPage: $perPage, page: $page) {
+    pageInfo { hasNextPage }
     media(search: $search, type: ANIME, sort: SEARCH_MATCH) {""" + _MEDIA_FIELDS + """
       title { native } coverImage { medium } }
   }
@@ -103,10 +109,21 @@ def post(query, variables, timeout=TIMEOUT):
     raise NewsError("AniList is busy; try again in a minute")
 
 
-def search(query, fetch=post):
+MATCH_RESULTS = 10           # entries a title is matched against
+PICK_RESULTS = 50            # entries the pick list shows: AniList's most per request
+
+
+def search(query, fetch=post, per_page=MATCH_RESULTS):
     """AniList entries for a title, best first: [media dict]."""
-    data = fetch(_SEARCH_QUERY, {"search": query})
-    return ((data.get("Page") or {}).get("media")) or []
+    return search_page(query, 1, fetch, per_page)[0]
+
+
+def search_page(query, page, fetch=post, per_page=PICK_RESULTS):
+    """One page of AniList's answer for a title: ([media dict], whether there is a
+    next page). AniList gives at most 50 a page."""
+    data = fetch(_SEARCH_QUERY, {"search": query, "perPage": per_page, "page": int(page)})
+    p = data.get("Page") or {}
+    return p.get("media") or [], bool((p.get("pageInfo") or {}).get("hasNextPage"))
 
 
 def media(anilist_id, fetch=post):
@@ -130,7 +147,7 @@ def search_text(title):
 
 def display_title(m):
     t = (m or {}).get("title") or {}
-    return t.get("english") or t.get("romaji") or "?"
+    return t.get("english") or t.get("romaji") or t.get("native") or "?"
 
 
 def _names(m):
@@ -362,10 +379,14 @@ def _load():
                         rec["checked_at"] = 0.0
                     shows[url] = rec
             data["shows"] = shows
+            followed = data.get("followed")
+            data["followed"] = [e for e in (followed if isinstance(followed, list) else [])
+                                if isinstance(e, dict) and str(e.get("url") or "").startswith(FOLLOW_PREFIX)
+                                and e.get("title")]
             return data
     except (OSError, ValueError):
         pass
-    return {"shows": {}, "checked_at": 0}
+    return {"shows": {}, "checked_at": 0, "followed": []}
 
 
 def _save(data):
@@ -377,9 +398,49 @@ def _save(data):
 
 
 def load():
-    """{'shows': {library url: record}, 'checked_at': time of the last full check}."""
+    """{'shows': {library url or "anilist:<id>": record}, 'checked_at': time of the
+    last full check, 'followed': [followed entries]}."""
     with _lock:
         return _load()
+
+
+def followed():
+    """The anime followed from the tab's search, not in the Library: entries shaped
+    like the Library's ({"url": "anilist:<id>", "title", "cover", "added"})."""
+    return load()["followed"]
+
+
+def is_followed(url):
+    return str(url or "").startswith(FOLLOW_PREFIX)
+
+
+def follow(m, cover=""):
+    """Follow AniList entry `m` (a search result). Returns the new entry, or None
+    when it is followed already. Its news is worked out by the next check."""
+    url = f"{FOLLOW_PREFIX}{int(m['id'])}"
+    with _lock:
+        data = _load()
+        if any(e["url"] == url for e in data["followed"]):
+            return None
+        entry = {"url": url, "title": display_title(m), "cover": cover or "", "added": time.time()}
+        data["followed"].append(entry)
+        data["shows"][url] = {"anilist_id": int(m["id"]), "manual": True,
+                              "match_title": display_title(m), "state": None, "checked_at": 0}
+        _save(data)
+        return entry
+
+
+def unfollow(url):
+    """Stop following: the entry and its news go. Returns the entry, or None."""
+    with _lock:
+        data = _load()
+        gone = next((e for e in data["followed"] if e["url"] == url), None)
+        if gone is None:
+            return None
+        data["followed"] = [e for e in data["followed"] if e["url"] != url]
+        data["shows"].pop(url, None)
+        _save(data)
+        return gone
 
 
 def set_match(url, anilist_id, match_title):
@@ -455,6 +516,8 @@ def check(entries, force=False, fetch=post, gap=REQUEST_GAP, now=None, progress=
             data = _load()                       # a pick made meanwhile wins
             if (data["shows"].get(url) or {}).get("manual") and not old.get("manual"):
                 continue
+            if is_followed(url) and not any(e["url"] == url for e in data["followed"]):
+                continue                         # unfollowed meanwhile
             data["shows"][url] = new
             if i == len(due) - 1 and not errors:
                 data["checked_at"] = now

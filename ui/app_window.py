@@ -603,8 +603,8 @@ class AppWindow(FluentWindow):
         if not app_settings.get("news_notify", True) or not changes:
             return
         if len(changes) > 3:
-            self.notifier.notify("Anime news", f"News about {len(changes)} shows in your "
-                                               "Library. Open Anime news to see it.")
+            self.notifier.notify("Anime news", f"News about {len(changes)} shows you follow. "
+                                               "Open Anime news to see it.")
             return
         for _title, message in changes:
             self.notifier.notify("Anime news", message)
