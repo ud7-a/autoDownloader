@@ -1,4 +1,4 @@
-from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QEvent, QRect, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import (FluentWindow, FluentIcon as FIF, MessageBoxBase,
                             SubtitleLabel, BodyLabel, PushButton)
@@ -11,6 +11,40 @@ from ui.notifier import Notifier, finished_message, new_episodes_message
 from core.signals import signals
 from utils.config import APP_VERSION, app_settings, get_watchlist
 from utils.naming import VIDEO_EXTENSIONS
+
+
+def place_window(settings, screens, primary):
+    """Where the window opens: its saved geometry when that lies wholly on one
+    display, else centred on the display it was mostly on (the main one when it
+    is on none, a display unplugged since), shrunk to fit if it is bigger.
+    `screens` and `primary` are the displays' available areas (taskbar left out).
+
+    Only the top-left corner on the main display used to be checked: a window
+    saved 1170 px tall at y 366, on a display 1104 px tall (2560 x 1440 at 125%),
+    opened with its bottom 432 px off the screen and What's new's Next button
+    with it; and one saved on a display left of the main one (negative x) was
+    always moved off it."""
+    def number(key, default):
+        try:
+            return int(settings.get(key, default))
+        except (TypeError, ValueError):
+            return default
+    w, h = number("window_width", 1100), number("window_height", 800)
+    x, y = number("window_x", -1), number("window_y", -1)
+    saved = QRect(x, y, w, h)
+    unplaced = x == -1 and y == -1                     # never saved: the default
+    screens = [s for s in screens if not s.isEmpty()] or [primary]
+
+    def overlap(s):
+        r = s.intersected(saved)
+        return r.width() * r.height() if not r.isEmpty() else 0
+    best = max(screens, key=overlap)
+    if unplaced or overlap(best) == 0:
+        best = primary
+    if not unplaced and best.contains(saved):
+        return saved
+    w, h = min(w, best.width()), min(h, best.height())
+    return QRect(best.x() + (best.width() - w) // 2, best.y() + (best.height() - h) // 2, w, h)
 
 
 class MissingEpisodesDialog(MessageBoxBase):
@@ -135,23 +169,10 @@ class AppWindow(FluentWindow):
         # 1280x720 at 125%; every tab is laid out to fit this (see ui/responsive.py).
         self.setMinimumSize(860, 520)
 
-        # Load saved window position/geometry
-        desktop = QApplication.primaryScreen().availableGeometry()
-        w, h = desktop.width(), desktop.height()
-        
-        target_w = app_settings.get("window_width", 1100)
-        target_h = app_settings.get("window_height", 800)
-        target_x = app_settings.get("window_x", -1)
-        target_y = app_settings.get("window_y", -1)
-        
-        if target_x == -1 or target_y == -1:
-            target_x = w // 2 - target_w // 2
-            target_y = h // 2 - target_h // 2
-            
-        if target_x < 0 or target_y < 0 or target_x > w or target_y > h:
-            target_x, target_y = w // 2 - target_w // 2, h // 2 - target_h // 2
-            
-        self.setGeometry(target_x, target_y, target_w, target_h)
+        # The saved position and size, kept wholly on a display.
+        self.setGeometry(place_window(
+            app_settings, [s.availableGeometry() for s in QApplication.screens()],
+            QApplication.primaryScreen().availableGeometry()))
 
         # Defer maximization slightly to prevent any Windows 7 title bar flash
         if app_settings.get("window_maximized", False):

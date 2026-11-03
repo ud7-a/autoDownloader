@@ -1106,5 +1106,63 @@ class SmoothMenuTests(unittest.TestCase):
             self.assertIn("install_smooth_menus()", f.read())
 
 
+class WindowPlacementTests(unittest.TestCase):
+    """The window opens wholly on a display (ui/app_window.place_window)."""
+
+    def setUp(self):
+        from PyQt6.QtCore import QRect
+        from ui.app_window import place_window
+        self.QRect, self.place = QRect, place_window
+        # A main display (taskbar left out) and one to its left, in Windows' pixels.
+        self.main = QRect(0, 0, 2560, 1380)
+        self.left = QRect(-2400, 151, 2400, 1290)
+
+    def at(self, x, y, w, h, screens=None):
+        settings = {"window_x": x, "window_y": y, "window_width": w, "window_height": h}
+        r = self.place(settings, screens or [self.main, self.left], self.main)
+        return (r.x(), r.y(), r.width(), r.height())
+
+    def test_a_window_wholly_on_a_display_stays_where_it_was(self):
+        self.assertEqual((300, 200, 1100, 800), self.at(300, 200, 1100, 800))
+        self.assertEqual((-2000, 300, 1100, 800), self.at(-2000, 300, 1100, 800))  # the left display
+
+    def test_its_bottom_off_the_display_moves_it_to_the_centre(self):
+        # 1170 tall at y 366 ends at 1536, below the 1380 px area.
+        self.assertEqual((730, 105, 1100, 1170), self.at(450, 366, 1100, 1170))
+        # The sandbox's window as Qt measures it at 125%: taller than the display.
+        self.assertEqual((474, 0, 1100, 1104),
+                         self.at(450, 366, 1100, 1170, [self.QRect(0, 0, 2048, 1104)]))
+
+    def test_off_any_edge_centres_it_on_the_display_it_was_mostly_on(self):
+        self.assertEqual((730, 290, 1100, 800), self.at(2000, 300, 1100, 800))     # right edge
+        self.assertEqual((730, 290, 1100, 800), self.at(400, -50, 1100, 800))      # above the top
+        self.assertEqual((-1750, 396, 1100, 800), self.at(-2600, 300, 1100, 800))  # the left one's edge
+
+    def test_straddling_two_displays_goes_to_the_one_with_more_of_it(self):
+        self.assertEqual((730, 290, 1100, 800), self.at(-300, 300, 1100, 800))
+        self.assertEqual((-1750, 396, 1100, 800), self.at(-800, 300, 1100, 800))
+
+    def test_on_no_display_any_more_it_opens_on_the_main_one(self):
+        self.assertEqual((730, 290, 1100, 800), self.at(-2000, 300, 1100, 800, [self.main]))
+        self.assertEqual((730, 290, 1100, 800), self.at(9000, 9000, 1100, 800))
+
+    def test_bigger_than_the_display_is_shrunk_to_fit(self):
+        self.assertEqual((0, 0, 2560, 1380), self.at(0, 0, 3000, 1600))
+        self.assertEqual((-2400, 151, 2400, 1290), self.at(-2400, 151, 2600, 1400))
+
+    def test_never_saved_or_broken_settings_open_centred(self):
+        r = self.place({}, [self.main, self.left], self.main)
+        self.assertEqual((730, 290, 1100, 800), (r.x(), r.y(), r.width(), r.height()))
+        r = self.place({"window_x": "junk", "window_width": None}, [self.main], self.main)
+        self.assertEqual((730, 290, 1100, 800), (r.x(), r.y(), r.width(), r.height()))
+        r = self.place({}, [], self.main)                                 # no display listed
+        self.assertEqual((730, 290, 1100, 800), (r.x(), r.y(), r.width(), r.height()))
+
+    def test_the_window_uses_it(self):
+        import inspect
+        from ui import app_window
+        self.assertIn("place_window(", inspect.getsource(app_window.AppWindow.__init__))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
