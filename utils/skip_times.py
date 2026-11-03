@@ -62,6 +62,54 @@ def skip_counts(folder):
     return found, len(files)
 
 
+MIN_EPISODES = 3          # two neighbours have to agree (utils/intro_detect.py)
+
+
+def skip_status(folder):
+    """One season's "Skip opening" status, in words, for the Library's details
+    window; "" when the folder has no episodes. Says which episodes have it, which
+    were looked at with no opening found (a first episode or a finale often has
+    none), and which aren't looked at yet, and why."""
+    from utils.storage import episode_spec
+    from utils.watch_later import episode_files
+    files = episode_files(folder) if folder else {}
+    if not files:
+        return ""
+    if len(files) < MIN_EPISODES:
+        return (f"Skip opening: needs {MIN_EPISODES} episodes in the folder to find the "
+                f"opening ({len(files)} so far).")
+    saved = read_skip_file(folder).get("episodes") or {}
+    ready, none, todo = [], [], []
+    for ep, path in sorted(files.items()):
+        entry = saved.get(os.path.basename(path))
+        if not is_current(entry, path):
+            todo.append(ep)
+        elif entry.get("op"):
+            ready.append(ep)
+        else:
+            none.append(ep)
+    if not todo and not none:
+        return "Skip opening: ready for every episode."
+    parts = []
+    if ready:
+        parts.append(f"ready for Ep {episode_spec(ready)}")
+    if none:
+        parts.append(f"no opening found in Ep {episode_spec(none)}")
+    if todo:
+        when = ("being looked at now" if is_queued(folder) else
+                "Find openings to skip, in the card's ··· menu, looks now")
+        parts.append(f"Ep {episode_spec(todo)} not looked at yet ({when})")
+    return "Skip opening: " + "; ".join(parts) + "."
+
+
+def is_queued(folder):
+    """Is `folder` waiting in the queue, or being looked at now?"""
+    key = os.path.normcase(os.path.abspath(folder or ""))
+    with _queue_lock:
+        busy = [f for f, _force in _queue] + ([_current] if _current else [])
+    return any(os.path.normcase(os.path.abspath(f)) == key for f in busy)
+
+
 # ------------------------------------------------------------ player settings
 
 def read_settings(cfg_dir):
@@ -98,6 +146,7 @@ def write_settings(cfg_dir, opening, ending):
 _queue = []
 _queue_lock = threading.Lock()
 _worker = None
+_current = None           # the folder being looked at now
 _stop = threading.Event()
 
 
@@ -145,16 +194,18 @@ def stop(wait=0.0):
 
 
 def _run():
-    global _worker
+    global _worker, _current
     from utils import intro_detect
     while True:
         with _queue_lock:
+            _current = None
             # Cleared under the lock, so a folder queued right now starts a new
             # worker instead of landing behind one that is about to return.
             if _stop.is_set() or not _queue:
                 _worker = None
                 return
             folder, force = _queue.pop(0)
+            _current = folder
         try:
             intro_detect.detect_folder(folder, force=force, should_stop=_stop.is_set)
         except Exception:

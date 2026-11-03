@@ -794,6 +794,10 @@ class EntryDialog(MessageBoxBase):
                 grid.set_captions({ep: site_display_name(src.get("site", ""))
                                    for ep, src in sources.items() if src.get("site")})
                 col.addWidget(grid)
+                from utils.skip_times import skip_status
+                skips = skip_status(wl.part_folder(part, _download_dir()))
+                if skips:
+                    col.addWidget(_muted(skips, 11, wrap=True))
                 # Saved on Done (see apply), not on every click.
                 self._grids.append((i, grid, set(eps), set(part.get("watched", [])),
                                     wl.part_ident(part)))
