@@ -226,6 +226,32 @@ class DialogEdgeTests(Qt):
         self.assertEqual(["player_interface"], opened)
         self.assertEqual([], offers)                                   # nothing left after it
 
+    def test_a_resumed_tour_still_says_which_version_it_is_since(self):
+        # The first window marks this version seen when it closes on a tab; the
+        # resumed one read that back and said "since version 5.2.0", this version.
+        from ui import whats_new
+        from utils.config import APP_VERSION, app_settings
+        from PyQt6.QtWidgets import QLabel, QWidget
+        host = QWidget()
+        self.addCleanup(host.deleteLater)
+        vs = self.versions()                                           # 5.2.0 and 5.1.0
+        headings, offers = [], []
+
+        def fake_exec(dlg):
+            headings.append([w.text() for w in dlg.findChildren(QLabel) if "What's new" in w.text()])
+            dlg.opened = "news_interface" if dlg.current == 0 else None
+            return 1
+        with mock.patch.dict(app_settings, {"whats_new_seen": "5.0.0"}), \
+                mock.patch("ui.whats_new.save_config"), \
+                mock.patch.object(whats_new.WhatsNewDialog, "exec", fake_exec), \
+                mock.patch.object(whats_new, "offer_to_continue",
+                                  side_effect=lambda *a, **k: offers.append((a, k))):
+            whats_new.show(host, vs, mock.Mock())
+            self.assertEqual(APP_VERSION, app_settings["whats_new_seen"])  # seen now
+            (window, versions, open_tab, start, _total), kwargs = offers[0]
+            whats_new.show(window, versions, open_tab, start, **kwargs)  # Continue
+        self.assertEqual([["What's new since version 5.0.0"]] * 2, headings)
+
     def test_the_notice_counts_what_is_left(self):
         from ui import whats_new
         import qfluentwidgets

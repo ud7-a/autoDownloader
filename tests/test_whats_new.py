@@ -386,7 +386,7 @@ class ShowAndSeenTests(Qt):
             self.assertEqual("Continue", button.text())
             button.click()
         bar.close.assert_called_once()
-        again.assert_called_once_with(host, versions, open_tab, 1)
+        again.assert_called_once_with(host, versions, open_tab, 1, None)
 
     def test_the_window_can_open_on_any_page(self):
         from PyQt6.QtWidgets import QWidget

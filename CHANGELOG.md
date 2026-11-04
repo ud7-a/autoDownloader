@@ -12,6 +12,8 @@ See [the release guide](docs/RELEASING.md).
 
 ## Unreleased
 
+## 5.2.0 — 2026-11-04
+
 ### ✨ New: What's new after an update
 <!-- app: After each update, this window shows what's new. To see it again, use Check for updates. -->
 - The first launch after an update shows what changed, one page per new

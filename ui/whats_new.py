@@ -202,7 +202,7 @@ class WhatsNewDialog(MessageBoxBase):
 
     MIN_WIDTH, MAX_WIDTH = 760, 980       # px; within these, 72% of the window
 
-    def __init__(self, versions, parent=None, start=0):
+    def __init__(self, versions, parent=None, start=0, since=None):
         super().__init__(parent)
         self.opened = None
         self._closing_to = False
@@ -212,7 +212,7 @@ class WhatsNewDialog(MessageBoxBase):
 
         head = QHBoxLayout()
         if several:
-            heading = f"What's new since version {self._previous(versions)}"
+            heading = f"What's new since version {since or self._previous(versions)}"
         else:
             heading = f"What's new in version {versions[0][0]}"
         head.addWidget(_label(heading, 26, weight=600), 1)
@@ -312,23 +312,29 @@ def pending():
                                app_settings.get("whats_new_seen") or "", APP_VERSION)
 
 
-def show(window, versions, open_tab, start=0):
+def show(window, versions, open_tab, start=0, since=None):
     """Show the window for `versions` over `window`, from page `start`; afterwards
     it counts as seen. A page's tab button opens its tab through open_tab(key), and
-    when pages are left, a notice there offers to continue from the next one."""
+    when pages are left, a notice there offers to continue from the next one.
+
+    `since`, the version the heading names, is read once, before this marks the
+    current version seen: the continued window read it after, and said "since"
+    the version the user is on."""
     if not versions:
         return None
-    dlg = WhatsNewDialog(versions, window, start)
+    since = since or WhatsNewDialog._previous(versions)
+    dlg = WhatsNewDialog(versions, window, start, since)
     dlg.exec()
     mark_seen()
     if dlg.opened:
         open_tab(dlg.opened)
         if dlg.current < len(dlg.pages) - 1:
-            offer_to_continue(window, versions, open_tab, dlg.current + 1, len(dlg.pages))
+            offer_to_continue(window, versions, open_tab, dlg.current + 1, len(dlg.pages),
+                              since=since)
     return dlg
 
 
-def offer_to_continue(window, versions, open_tab, start, total):
+def offer_to_continue(window, versions, open_tab, start, total, since=None):
     """A notice at the bottom of the tab just opened: the tour isn't over. It stays
     until used or closed."""
     from qfluentwidgets import InfoBar, InfoBarPosition
@@ -340,7 +346,7 @@ def offer_to_continue(window, versions, open_tab, start, total):
 
     def resume():
         bar.close()
-        show(window, versions, open_tab, start)
+        show(window, versions, open_tab, start, since)
     button.clicked.connect(resume)
     bar.addWidget(button)
     return bar
